@@ -187,6 +187,9 @@ pub fn do_disconnect(ctx: &Ctx) {
         .file_streaming
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
+    set_menu_check(ctx, ui::ID_TOGGLE_MUTE, false);
+    set_menu_check(ctx, ui::ID_TOGGLE_DEAFEN, false);
+    set_menu_check(ctx, ui::ID_TOGGLE_LOOPBACK, false);
     ctx.ui.frame.set_title("TeamConference");
     ctx.ui.show_main(false);
     rebuild_tree(ctx);
@@ -617,6 +620,13 @@ fn delete_room(ctx: &Ctx) {
 
 // ── Audio ──
 
+/// Häkchen eines Check-Menüpunkts setzen (zeigt An/Aus-Zustand an).
+fn set_menu_check(ctx: &Ctx, id: i32, checked: bool) {
+    if let Some(mb) = ctx.ui.frame.get_menu_bar() {
+        mb.check_item(id, checked);
+    }
+}
+
 fn toggle_mute(ctx: &Ctx) {
     let muted = {
         let mut inner = ctx.app.inner.lock();
@@ -626,6 +636,7 @@ fn toggle_mute(ctx: &Ctx) {
     let _ = ctx
         .app
         .send_ws(Message::new("audio_mute", serde_json::json!({ "muted": muted })));
+    set_menu_check(ctx, ui::ID_TOGGLE_MUTE, muted);
     ctx.ui.append_chat(if muted {
         "* Mikrofon stummgeschaltet."
     } else {
@@ -644,6 +655,7 @@ fn toggle_deafen(ctx: &Ctx) {
         "audio_deafen",
         serde_json::json!({ "deafened": deafened }),
     ));
+    set_menu_check(ctx, ui::ID_TOGGLE_DEAFEN, deafened);
     ctx.ui.append_chat(if deafened {
         "* Ton ausgeschaltet (taub)."
     } else {
@@ -662,6 +674,7 @@ fn toggle_loopback(ctx: &Ctx) {
         "audio_loopback",
         serde_json::json!({ "enabled": loopback }),
     ));
+    set_menu_check(ctx, ui::ID_TOGGLE_LOOPBACK, loopback);
     ctx.ui.append_chat(if loopback {
         "* Loopback eingeschaltet."
     } else {

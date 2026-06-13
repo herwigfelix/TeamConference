@@ -212,16 +212,17 @@ impl Ui {
         let right = BoxSizer::builder(Orientation::Vertical).build();
         right.add(
             &StaticText::builder(&main_panel)
-                .with_label("Lautstärke (%)")
+                .with_label("Lautstärke % (100 = normal)")
                 .build(),
             0,
             SizerFlag::All,
             4,
         );
+        // 0–200 %: 100 = normale Lautstärke (Mitte), darüber lauter, darunter leiser.
         let volume = Slider::builder(&main_panel)
             .with_value(100)
             .with_min_value(0)
-            .with_max_value(100)
+            .with_max_value(200)
             .build();
         right.add(&volume, 0, SizerFlag::Expand | SizerFlag::All, 4);
         right.add(
@@ -267,7 +268,7 @@ impl Ui {
         set_a11y_name(&rooms_tree, "Räume und Nutzer");
         set_a11y_name(&chat_log, "Chatverlauf");
         set_a11y_name(&chat_in, "Chatnachricht eingeben");
-        set_a11y_name(&volume, "Lautstärke in Prozent");
+        set_a11y_name(&volume, "Lautstärke in Prozent, 100 ist normal");
         set_a11y_name(&files, "Dateien im aktuellen Raum");
 
         Ui {
@@ -332,10 +333,11 @@ fn build_menu_bar(frame: &Frame) {
         .append_item(ID_EXIT, "&Beenden\tCtrl+Q", "Programm beenden")
         .build();
 
+    // Check-Einträge: das Häkchen zeigt den Zustand (Screenreader: „aktiviert/deaktiviert").
     let audio_menu = Menu::builder()
-        .append_item(ID_TOGGLE_MUTE, "Mikrofon &stumm/laut\tCtrl+M", "Mikrofon umschalten")
-        .append_item(ID_TOGGLE_DEAFEN, "Ton aus/an (&taub)\tCtrl+D", "Wiedergabe umschalten")
-        .append_item(ID_TOGGLE_LOOPBACK, "&Loopback an/aus\tCtrl+L", "Loopback umschalten")
+        .append_check_item(ID_TOGGLE_MUTE, "Mikrofon &stummschalten\tCtrl+M", "Häkchen = Mikrofon ist stumm")
+        .append_check_item(ID_TOGGLE_DEAFEN, "Ton &ausschalten (taub)\tCtrl+D", "Häkchen = Ton ist aus")
+        .append_check_item(ID_TOGGLE_LOOPBACK, "&Loopback\tCtrl+L", "Häkchen = Loopback ist an")
         .append_item(ID_AUDIO_SETTINGS, "Audio-&Einstellungen…", "Samplerate, Bittiefe, Mono/Stereo")
         .append_item(ID_STREAM_FILE, "Audiodatei &streamen…\tCtrl+S", "Datei in den Raum streamen")
         .append_item(ID_PAUSE_STREAM, "Streaming &pausieren/fortsetzen\tCtrl+P", "Gestreamte Datei pausieren bzw. fortsetzen")

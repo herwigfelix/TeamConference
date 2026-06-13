@@ -87,7 +87,7 @@ fn main() {
         // Serverliste füllen und ggf. Formular mit erstem Eintrag vorbelegen
         handlers::rebuild_server_list(&ctx);
         ui.volume
-            .set_value((cfg.volume * 100.0).clamp(0.0, 100.0) as i32);
+            .set_value((cfg.volume * 100.0).clamp(0.0, 200.0) as i32);
         if let Some(first) = ctx.st.borrow().servers.first().cloned() {
             ui.host_in.set_value(&first.host);
             ui.port_in.set_value(&first.port.to_string());

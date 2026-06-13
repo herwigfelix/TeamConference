@@ -142,8 +142,9 @@ impl AppState {
     }
 
     pub fn set_volume(&self, v: f32) {
+        // bis 2.0 (200 %) — Verstärkung über 1.0 wird in der Wiedergabe geclamped
         self.volume_bits
-            .store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+            .store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
     }
 
     /// Send a protocol message to the server via WebSocket.

@@ -143,7 +143,7 @@ pub fn start_playback(
                     for (i, sample) in data.iter_mut().enumerate() {
                         let offset = i * 2;
                         let s16 = i16::from_le_bytes([local_buf[offset], local_buf[offset + 1]]);
-                        *sample = s16 as f32 / 32768.0 * volume;
+                        *sample = (s16 as f32 / 32768.0 * volume).clamp(-1.0, 1.0);
                     }
                     local_buf.drain(..needed_bytes);
 
@@ -179,7 +179,7 @@ pub fn start_playback(
                             let offset = i * 2;
                             let s16 =
                                 i16::from_le_bytes([local_buf[offset], local_buf[offset + 1]]);
-                            *sample = s16 as f32 / 32768.0 * volume;
+                            *sample = (s16 as f32 / 32768.0 * volume).clamp(-1.0, 1.0);
                         } else {
                             *sample = 0.0;
                         }
