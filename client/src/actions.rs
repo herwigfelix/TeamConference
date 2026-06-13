@@ -621,7 +621,7 @@ fn delete_room(ctx: &Ctx) {
 // ── Audio ──
 
 /// Häkchen eines Check-Menüpunkts setzen (zeigt An/Aus-Zustand an).
-fn set_menu_check(ctx: &Ctx, id: i32, checked: bool) {
+pub fn set_menu_check(ctx: &Ctx, id: i32, checked: bool) {
     if let Some(mb) = ctx.ui.frame.get_menu_bar() {
         mb.check_item(id, checked);
     }
@@ -830,6 +830,7 @@ fn stream_file(ctx: &Ctx) {
     ctx.app
         .stream_paused
         .store(false, std::sync::atomic::Ordering::Relaxed);
+    set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let was_loopback = {
@@ -889,6 +890,7 @@ fn stop_stream(ctx: &Ctx) {
     ctx.app
         .stream_paused
         .store(false, std::sync::atomic::Ordering::Relaxed);
+    set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
     if !was {
         status(ctx, "Es läuft kein Streaming.");
     }
@@ -898,12 +900,14 @@ fn stop_stream(ctx: &Ctx) {
 fn toggle_pause_stream(ctx: &Ctx) {
     let streaming = ctx.app.inner.lock().stream_shutdown.is_some();
     if !streaming {
+        set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
         status(ctx, "Es läuft kein Streaming.");
         return;
     }
     use std::sync::atomic::Ordering;
     let paused = !ctx.app.stream_paused.load(Ordering::Relaxed);
     ctx.app.stream_paused.store(paused, Ordering::Relaxed);
+    set_menu_check(ctx, ui::ID_PAUSE_STREAM, paused);
     ctx.ui.append_chat(if paused {
         "* Streaming pausiert."
     } else {

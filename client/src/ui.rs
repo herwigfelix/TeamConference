@@ -340,7 +340,7 @@ fn build_menu_bar(frame: &Frame) {
         .append_check_item(ID_TOGGLE_LOOPBACK, "&Loopback\tCtrl+L", "Häkchen = Loopback ist an")
         .append_item(ID_AUDIO_SETTINGS, "Audio-&Einstellungen…", "Samplerate, Bittiefe, Mono/Stereo")
         .append_item(ID_STREAM_FILE, "Audiodatei &streamen…\tCtrl+S", "Datei in den Raum streamen")
-        .append_item(ID_PAUSE_STREAM, "Streaming &pausieren/fortsetzen\tCtrl+P", "Gestreamte Datei pausieren bzw. fortsetzen")
+        .append_check_item(ID_PAUSE_STREAM, "Streaming &pausieren\tCtrl+P", "Häkchen = Streaming ist pausiert")
         .append_item(ID_STOP_STREAM, "Streaming &stoppen\tCtrl+Shift+S", "Streaming beenden")
         .build();
 
@@ -372,7 +372,7 @@ fn build_menu_bar(frame: &Frame) {
         .append_item(ID_ACCOUNT_PASSWORD, "Konto-Passwort zurücksetzen…", "Passwort eines Accounts setzen")
         .append_item(ID_ACCOUNT_ROLE, "Konto-Rolle ändern…", "Rolle user/admin setzen")
         .append_item(ID_ACCOUNT_DELETE, "Konto löschen…", "Account löschen")
-        .append_item(ID_REGISTRATION, "Registrierung umschalten", "Selbstregistrierung an/aus")
+        .append_check_item(ID_REGISTRATION, "&Selbstregistrierung erlauben", "Häkchen = neue Nutzer können sich per Login registrieren")
         .append_item(ID_CHANGE_PW, "Eigenes &Passwort ändern…", "Eigenes Passwort ändern")
         .build();
 

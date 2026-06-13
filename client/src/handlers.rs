@@ -113,6 +113,10 @@ pub fn handle(ctx: &Ctx, msg: Message) {
 
         "client_stream_finished" => {
             ctx.app.inner.lock().streaming_file = false;
+            ctx.app
+                .stream_paused
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            crate::actions::set_menu_check(ctx, crate::ui::ID_PAUSE_STREAM, false);
             ui.append_chat("Datei-Streaming beendet.");
             refresh_status(ctx);
         }
@@ -366,6 +370,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             ctx.st.borrow_mut().registration_open = open;
+            crate::actions::set_menu_check(ctx, crate::ui::ID_REGISTRATION, open);
 
             let mut lines = vec![format!(
                 "Registrierung: {}",
