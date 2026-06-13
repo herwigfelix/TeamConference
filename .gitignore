@@ -3,6 +3,9 @@ server/target/
 client/target/
 **/*.rs.bk
 
+# Release-Compilate (compile.sh / compile.bat)
+dist/
+
 # Veraltete Clients — bleiben lokal, kommen nicht ins Repo
 client-tauri/
 legazy client(abandoned)/

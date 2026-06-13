@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -33,6 +33,24 @@ impl Default for AudioConfig {
 pub struct PendingUpload {
     pub filename: String,
     pub data: Vec<u8>,
+}
+
+/// Art eines Knotens in der Windows-Baumansicht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeKind {
+    Room,
+    User,
+}
+
+/// Ein sichtbarer (aufgeklappter) Knoten der Windows-Baumansicht.
+/// Das flache `ui_tree` bildet die `StandardListView`-Zeilen 1:1 ab.
+#[derive(Debug, Clone)]
+pub struct TreeNode {
+    pub kind: TreeKind,
+    /// Raum-ID (bei Room) bzw. Nutzer-ID (bei User)
+    pub id: i64,
+    /// Zugehöriger Raum: bei Room == id, bei User der Raum, in dem er ist
+    pub room_id: i64,
 }
 
 /// Mutable inner state protected by parking_lot::Mutex.
@@ -83,6 +101,10 @@ pub struct InnerState {
     pub ui_files: Vec<FileInfo>,
     pub chat_log: String,
 
+    // Windows-Baumansicht: flache Knotenliste + aufgeklappte Räume
+    pub ui_tree: Vec<TreeNode>,
+    pub expanded_rooms: HashSet<i64>,
+
     // Join that waits for a password dialog
     pub pending_join_room: Option<i64>,
 
@@ -123,6 +145,8 @@ pub struct AppState {
     pub file_streaming: AtomicBool,
     /// Playback volume as f32 bits (0.0 – 1.0), read lock-free in the audio callback
     pub volume_bits: Arc<AtomicU32>,
+    /// Baumansicht statt zweier Listen (nur Windows). Steuert UI und Auswahl-Logik.
+    pub tree_mode: bool,
 }
 
 impl AppState {
@@ -136,6 +160,7 @@ impl AppState {
             playback_rx: Mutex::new(None),
             file_streaming: AtomicBool::new(false),
             volume_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            tree_mode: cfg!(target_os = "windows"),
         }
     }
 

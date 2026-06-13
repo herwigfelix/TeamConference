@@ -97,6 +97,16 @@ Hinweise:
 - Das Paket `visualstudio2022-workload-vctools` schlägt häufig fehl
   (hängender Installer, Exit-Code 1) — deshalb oben der direkte Weg über
   `visualstudio2022buildtools` mit `--package-parameters`.
+- Fehler **`error calling dlltool 'dlltool.exe': program not found`** beim
+  Bauen heißt: Es ist noch die GNU-Toolchain aktiv (setzt das
+  Chocolatey-Paket teils als Standard). Beheben mit
+  `rustup default stable-msvc` (Prüfung: `rustup show active-toolchain`),
+  dann `cargo clean && cargo build --release`.
+- Fehler **`Compatibility with CMake < 3.5 has been removed`** beim Bauen von
+  `audiopus_sys`/Opus: Du hast CMake 4.x, der mitgelieferte Opus-Code nutzt
+  eine ältere Policy. `client/.cargo/config.toml` setzt dafür bereits
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`. Falls die Datei fehlt, einmalig in der
+  PowerShell `$env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"` setzen und neu bauen.
 
 Alternative ohne Chocolatey (winget ist auf Windows 10/11 vorinstalliert):
 
@@ -222,9 +232,9 @@ Die wichtigsten Kurztasten (Strg unter Windows/Linux, Cmd unter macOS):
 Einstellungen (Server, Benutzername, Audiogeräte, Lautstärke) werden
 plattformüblich gespeichert:
 
-- Linux: `~/.config/teamconference/client.json`
-- macOS: `~/Library/Application Support/teamconference/client.json`
-- Windows: `%APPDATA%\teamconference\client.json`
+- Linux: `~/.config/accessyApplications/teamconference/client.json`
+- macOS: `~/Library/Application Support/accessyApplications/teamconference/client.json`
+- Windows: `%APPDATA%\accessyApplications\teamconference\client.json`
 
 ## Barrierefreiheit
 

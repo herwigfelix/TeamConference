@@ -54,8 +54,14 @@ impl Default for ClientConfig {
 }
 
 fn config_path() -> PathBuf {
+    // Einstellungen liegen unter accessyApplications/teamconference im
+    // plattformüblichen Konfigverzeichnis:
+    //   Windows: %APPDATA%\accessyApplications\teamconference  (Roaming)
+    //   macOS:   ~/Library/Application Support/accessyApplications/teamconference
+    //   Linux:   ~/.config/accessyApplications/teamconference
     let dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join("accessyApplications")
         .join("teamconference");
     std::fs::create_dir_all(&dir).ok();
     dir.join("client.json")

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::events::{append_chat, rebuild_files, rebuild_rooms, rebuild_users, refresh_status, set_status};
+use crate::events::{
+    append_chat, rebuild_files, rebuild_room_views, rebuild_tree, refresh_status, set_status,
+};
 use crate::protocol::Message;
 use crate::state::{AppState, PendingUpload};
 use crate::MainWindow;
@@ -46,20 +48,46 @@ fn show_dialog(
     );
 }
 
+/// Aktuell ausgewählter Raum — im Baummodus aus dem Baumknoten
+/// (bei einem Nutzer-Knoten dessen Raum), sonst aus der Raumliste.
 fn selected_room(ui: &MainWindow, state: &Arc<AppState>) -> Option<i64> {
-    let idx = ui.get_rooms_current();
-    if idx < 0 {
-        return None;
+    let inner = state.inner.lock();
+    if state.tree_mode {
+        let idx = ui.get_tree_current();
+        if idx < 0 {
+            return None;
+        }
+        inner.ui_tree.get(idx as usize).map(|n| n.room_id)
+    } else {
+        let idx = ui.get_rooms_current();
+        if idx < 0 {
+            return None;
+        }
+        inner.ui_room_ids.get(idx as usize).copied()
     }
-    state.inner.lock().ui_room_ids.get(idx as usize).copied()
 }
 
+/// Aktuell ausgewählter Nutzer — im Baummodus nur, wenn der Baumknoten ein
+/// Nutzer ist, sonst aus der Nutzerliste.
 fn selected_user(ui: &MainWindow, state: &Arc<AppState>) -> Option<i64> {
-    let idx = ui.get_users_current();
-    if idx < 0 {
-        return None;
+    use crate::state::TreeKind;
+    let inner = state.inner.lock();
+    if state.tree_mode {
+        let idx = ui.get_tree_current();
+        if idx < 0 {
+            return None;
+        }
+        match inner.ui_tree.get(idx as usize) {
+            Some(n) if n.kind == TreeKind::User => Some(n.id),
+            _ => None,
+        }
+    } else {
+        let idx = ui.get_users_current();
+        if idx < 0 {
+            return None;
+        }
+        inner.ui_user_ids.get(idx as usize).copied()
     }
-    state.inner.lock().ui_user_ids.get(idx as usize).copied()
 }
 
 fn selected_file(ui: &MainWindow, state: &Arc<AppState>) -> Option<crate::protocol::FileInfo> {
@@ -226,6 +254,8 @@ pub fn do_disconnect(ui: &MainWindow, state: &Arc<AppState>) {
         inner.ui_room_ids.clear();
         inner.ui_user_ids.clear();
         inner.ui_files.clear();
+        inner.ui_tree.clear();
+        inner.expanded_rooms.clear();
         inner.pending_upload = None;
         inner.download_targets.clear();
         inner.muted = false;
@@ -243,8 +273,7 @@ pub fn do_disconnect(ui: &MainWindow, state: &Arc<AppState>) {
     ui.set_loopback(false);
     ui.set_streaming(false);
     ui.set_window_title("TeamConference".into());
-    rebuild_rooms(ui, state);
-    rebuild_users(ui, state);
+    rebuild_room_views(ui, state);
     rebuild_files(ui, state);
     set_status(ui, "Nicht verbunden");
 }
@@ -339,17 +368,20 @@ pub fn join_room(ui: &MainWindow, state: &Arc<AppState>, room_id: i64, password:
         serde_json::json!({ "room_id": room_id }),
     ));
 
+    // Im Baummodus den beigetretenen Raum aufklappen, damit man die Nutzer sieht
+    {
+        let mut inner = state.inner.lock();
+        inner.expanded_rooms.insert(room_id);
+    }
+
     let room = state.inner.lock().room_name(room_id);
     append_chat(ui, state, &format!("* Raum {} beigetreten.", room));
-    rebuild_users(ui, state);
+    rebuild_room_views(ui, state);
     refresh_status(ui, state);
 }
 
-fn join_selected(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(room_id) = selected_room(ui, state) else {
-        set_status(ui, "Bitte zuerst einen Raum in der Liste auswählen.");
-        return;
-    };
+/// Einem Raum beitreten, vorher bei Bedarf nach dem Passwort fragen.
+fn join_room_checked(ui: &MainWindow, state: &Arc<AppState>, room_id: i64) {
     let has_password = state
         .inner
         .lock()
@@ -379,6 +411,107 @@ fn join_selected(ui: &MainWindow, state: &Arc<AppState>) {
     }
 }
 
+fn join_selected(ui: &MainWindow, state: &Arc<AppState>) {
+    let Some(room_id) = selected_room(ui, state) else {
+        set_status(ui, "Bitte zuerst einen Raum in der Liste auswählen.");
+        return;
+    };
+    join_room_checked(ui, state, room_id);
+}
+
+// ── Windows-Baumansicht ──
+
+/// Aktuell im Baum ausgewählter Knoten.
+fn current_tree_node(ui: &MainWindow, state: &Arc<AppState>) -> Option<crate::state::TreeNode> {
+    let idx = ui.get_tree_current();
+    if idx < 0 {
+        return None;
+    }
+    state.inner.lock().ui_tree.get(idx as usize).cloned()
+}
+
+/// Enter im Baum: auf einem Raum → beitreten. Auf einem Nutzer → nichts.
+pub fn tree_activate(ui: &MainWindow, state: &Arc<AppState>) {
+    use crate::state::TreeKind;
+    match current_tree_node(ui, state) {
+        Some(n) if n.kind == TreeKind::Room => join_room_checked(ui, state, n.id),
+        Some(_) => {}
+        None => set_status(ui, "Bitte zuerst einen Eintrag im Baum auswählen."),
+    }
+}
+
+/// Pfeil rechts im Baum: Raum aufklappen (zeigt Nutzer und Unterräume).
+pub fn tree_expand(ui: &MainWindow, state: &Arc<AppState>) {
+    use crate::state::TreeKind;
+    let Some(node) = current_tree_node(ui, state) else {
+        return;
+    };
+    if node.kind != TreeKind::Room {
+        return;
+    }
+    let changed = {
+        let mut inner = state.inner.lock();
+        let expandable = crate::events::room_is_expandable(&inner.rooms, node.id);
+        if expandable && !inner.expanded_rooms.contains(&node.id) {
+            inner.expanded_rooms.insert(node.id);
+            true
+        } else {
+            false
+        }
+    };
+    if changed {
+        rebuild_tree(ui, state);
+    }
+}
+
+/// Pfeil links im Baum: aufgeklappten Raum zuklappen, sonst zum Elternraum springen.
+pub fn tree_collapse(ui: &MainWindow, state: &Arc<AppState>) {
+    use crate::state::TreeKind;
+    let Some(node) = current_tree_node(ui, state) else {
+        return;
+    };
+
+    // Aufgeklappten Raum zuklappen
+    if node.kind == TreeKind::Room {
+        let was_expanded = {
+            let mut inner = state.inner.lock();
+            if inner.expanded_rooms.remove(&node.id) {
+                true
+            } else {
+                false
+            }
+        };
+        if was_expanded {
+            rebuild_tree(ui, state);
+            return;
+        }
+    }
+
+    // Sonst: Auswahl auf den zugehörigen Raum (Eltern) verschieben
+    let target_room = if node.kind == TreeKind::User {
+        Some(node.room_id)
+    } else {
+        state
+            .inner
+            .lock()
+            .rooms
+            .iter()
+            .find(|r| r.id == node.id)
+            .and_then(|r| r.parent_id)
+    };
+    if let Some(room_id) = target_room {
+        let pos = state
+            .inner
+            .lock()
+            .ui_tree
+            .iter()
+            .position(|n| n.kind == TreeKind::Room && n.id == room_id);
+        if let Some(p) = pos {
+            ui.set_tree_current(p as i32);
+        }
+    }
+}
+
 fn leave_room(ui: &MainWindow, state: &Arc<AppState>) {
     let Some(room_id) = state.inner.lock().current_room_id else {
         set_status(ui, "Du bist in keinem Raum.");
@@ -396,7 +529,7 @@ fn leave_room(ui: &MainWindow, state: &Arc<AppState>) {
             inner.ui_files.clear();
         }
         append_chat(ui, state, &format!("* Raum {} verlassen.", room));
-        rebuild_users(ui, state);
+        rebuild_room_views(ui, state);
         rebuild_files(ui, state);
         refresh_status(ui, state);
     }

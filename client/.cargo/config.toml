@@ -1,0 +1,6 @@
+# CMake 4.0 hat die Unterstützung für cmake_minimum_required(VERSION < 3.5)
+# entfernt. Das von `opus`/`audiopus_sys` gebündelte Opus-CMakeLists nutzt eine
+# ältere Policy — diese Variable lässt CMake 4.x es trotzdem konfigurieren.
+# Auf älteren CMake-Versionen (< 3.31) wird die Variable ignoriert, also harmlos.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

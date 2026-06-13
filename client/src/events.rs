@@ -12,7 +12,7 @@ use crate::protocol::{
     AudioUserState, AuthResponse, FileDownloadData, FileInfo, FileUploadAck, Message, RoomInfo,
     StreamFileStatus, UserInfo,
 };
-use crate::state::AppState;
+use crate::state::{AppState, TreeKind, TreeNode};
 use crate::MainWindow;
 
 /// Append a line to the chat history (with timestamp) and keep it bounded.
@@ -150,6 +150,118 @@ pub fn rebuild_users(ui: &MainWindow, state: &Arc<AppState>) {
     ui.set_users_model(ModelRc::new(VecModel::from(items)));
 }
 
+/// Rebuild the Windows tree (rooms + expanded users/subrooms), preserving
+/// the selected node by identity (kind + id).
+pub fn rebuild_tree(ui: &MainWindow, state: &Arc<AppState>) {
+    let (items, nodes, new_index) = {
+        let inner = state.inner.lock();
+
+        let prev = ui.get_tree_current();
+        let prev_id: Option<(TreeKind, i64)> = if prev >= 0 {
+            inner.ui_tree.get(prev as usize).map(|n| (n.kind, n.id))
+        } else {
+            None
+        };
+
+        let mut items: Vec<StandardListViewItem> = Vec::new();
+        let mut nodes: Vec<TreeNode> = Vec::new();
+        build_tree_level(
+            &inner.rooms,
+            None,
+            0,
+            &inner.expanded_rooms,
+            &mut items,
+            &mut nodes,
+        );
+
+        let new_index = prev_id
+            .and_then(|(k, id)| nodes.iter().position(|n| n.kind == k && n.id == id))
+            .map(|i| i as i32)
+            .unwrap_or(-1);
+
+        (items, nodes, new_index)
+    };
+
+    {
+        let mut inner = state.inner.lock();
+        inner.ui_tree = nodes;
+    }
+    ui.set_tree_model(ModelRc::new(VecModel::from(items)));
+    ui.set_tree_current(new_index);
+}
+
+/// Whether `room_id` has any child rooms or users (i.e. is expandable).
+pub fn room_is_expandable(rooms: &[RoomInfo], room_id: i64) -> bool {
+    rooms.iter().any(|r| r.parent_id == Some(room_id))
+        || rooms
+            .iter()
+            .find(|r| r.id == room_id)
+            .map(|r| !r.users.is_empty())
+            .unwrap_or(false)
+}
+
+/// Recursively append one level of the tree (rooms under `parent`), and for
+/// each expanded room its users followed by its subrooms.
+fn build_tree_level(
+    rooms: &[RoomInfo],
+    parent: Option<i64>,
+    depth: usize,
+    expanded: &std::collections::HashSet<i64>,
+    items: &mut Vec<StandardListViewItem>,
+    nodes: &mut Vec<TreeNode>,
+) {
+    let mut level: Vec<&RoomInfo> = rooms.iter().filter(|r| r.parent_id == parent).collect();
+    level.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for room in level {
+        let has_children = room_is_expandable(rooms, room.id);
+        let is_expanded = expanded.contains(&room.id);
+        let arrow = if !has_children {
+            "   "
+        } else if is_expanded {
+            "▾ "
+        } else {
+            "▸ "
+        };
+        let indent = "    ".repeat(depth);
+        let lock = if room.has_password { ", Passwort" } else { "" };
+        items.push(list_item(format!(
+            "{}{}{} ({} Nutzer{})",
+            indent,
+            arrow,
+            room.name,
+            room.users.len(),
+            lock
+        )));
+        nodes.push(TreeNode {
+            kind: TreeKind::Room,
+            id: room.id,
+            room_id: room.id,
+        });
+
+        if is_expanded {
+            let uindent = "    ".repeat(depth + 1);
+            for u in &room.users {
+                items.push(list_item(format!("{}• {}", uindent, user_label(u))));
+                nodes.push(TreeNode {
+                    kind: TreeKind::User,
+                    id: u.id,
+                    room_id: room.id,
+                });
+            }
+            build_tree_level(rooms, Some(room.id), depth + 1, expanded, items, nodes);
+        }
+    }
+}
+
+/// Rebuild every room/user view at once (two-list layout AND the Windows
+/// tree). Both are cheap; only the platform-appropriate one is shown.
+pub fn rebuild_room_views(ui: &MainWindow, state: &Arc<AppState>) {
+    rebuild_rooms(ui, state);
+    rebuild_users(ui, state);
+    rebuild_tree(ui, state);
+}
+
 /// Rebuild the file list for the current room.
 pub fn rebuild_files(ui: &MainWindow, state: &Arc<AppState>) {
     let files = {
@@ -210,8 +322,7 @@ pub fn handle(
                     ui.set_window_title(format!("TeamConference — {}", server).into());
                     ui.set_active_view(1);
                     append_chat(ui, state, &format!("Verbunden mit {}.", server));
-                    rebuild_rooms(ui, state);
-                    rebuild_users(ui, state);
+                    rebuild_room_views(ui, state);
                     refresh_status(ui, state);
                 }
                 Ok(resp) => {
@@ -257,8 +368,7 @@ pub fn handle(
 
         "room_list" => {
             // state.rooms wurde bereits im Netzwerk-Task aktualisiert
-            rebuild_rooms(ui, state);
-            rebuild_users(ui, state);
+            rebuild_room_views(ui, state);
         }
 
         "room_user_joined" => {
@@ -279,8 +389,7 @@ pub fn handle(
                         inner.room_name(rid),
                     )
                 };
-                rebuild_rooms(ui, state);
-                rebuild_users(ui, state);
+                rebuild_room_views(ui, state);
                 if announce {
                     append_chat(
                         ui,
@@ -303,8 +412,7 @@ pub fn handle(
                     }
                     (inner.current_room_id == Some(rid), nick, inner.room_name(rid))
                 };
-                rebuild_rooms(ui, state);
-                rebuild_users(ui, state);
+                rebuild_room_views(ui, state);
                 if announce {
                     append_chat(
                         ui,
@@ -371,7 +479,7 @@ pub fn handle(
                         }
                     }
                 }
-                rebuild_users(ui, state);
+                rebuild_room_views(ui, state);
             }
         }
 
@@ -533,7 +641,7 @@ pub fn handle(
                     state,
                     &format!("* Du wurdest in den Raum {} verschoben.", name),
                 );
-                rebuild_users(ui, state);
+                rebuild_room_views(ui, state);
                 refresh_status(ui, state);
                 let _ = state.send_ws(Message::new(
                     "file_list",
@@ -556,5 +664,94 @@ pub fn handle(
         other => {
             tracing::debug!("Unhandled server message type: {}", other);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{RoomInfo, UserInfo};
+    use std::collections::HashSet;
+
+    fn room(id: i64, name: &str, parent: Option<i64>, users: Vec<UserInfo>) -> RoomInfo {
+        RoomInfo {
+            id,
+            name: name.into(),
+            parent_id: parent,
+            users,
+            max_users: 0,
+            description: String::new(),
+            has_password: false,
+        }
+    }
+
+    fn user(id: i64, nick: &str) -> UserInfo {
+        UserInfo {
+            id,
+            nickname: nick.into(),
+            role: "user".into(),
+            muted: false,
+            deafened: false,
+        }
+    }
+
+    #[test]
+    fn tree_collapsed_shows_only_top_level_rooms() {
+        let rooms = vec![
+            room(1, "Lobby", None, vec![user(10, "Alice")]),
+            room(2, "Talk", Some(1), vec![]),
+            room(3, "Spiele", None, vec![]),
+        ];
+        let expanded = HashSet::new();
+        let mut items = Vec::new();
+        let mut nodes = Vec::new();
+        build_tree_level(&rooms, None, 0, &expanded, &mut items, &mut nodes);
+
+        // Nur die beiden Top-Level-Räume, alphabetisch (Lobby, Spiele)
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].kind, TreeKind::Room);
+        assert_eq!(nodes[0].id, 1);
+        assert_eq!(nodes[1].id, 3);
+        // Lobby ist aufklappbar (Nutzer + Unterraum) → Pfeil-Marker
+        assert!(items[0].text.as_str().contains("▸"));
+        // Spiele ist leer → kein Pfeil
+        assert!(!items[1].text.as_str().contains("▸"));
+    }
+
+    #[test]
+    fn tree_expanded_room_shows_users_then_subrooms() {
+        let rooms = vec![
+            room(1, "Lobby", None, vec![user(10, "Alice")]),
+            room(2, "Talk", Some(1), vec![]),
+        ];
+        let mut expanded = HashSet::new();
+        expanded.insert(1);
+        let mut items = Vec::new();
+        let mut nodes = Vec::new();
+        build_tree_level(&rooms, None, 0, &expanded, &mut items, &mut nodes);
+
+        // Reihenfolge: Raum Lobby, Nutzer Alice, Unterraum Talk
+        assert_eq!(nodes.len(), 3);
+        assert_eq!((nodes[0].kind, nodes[0].id), (TreeKind::Room, 1));
+        assert_eq!((nodes[1].kind, nodes[1].id), (TreeKind::User, 10));
+        assert_eq!(nodes[1].room_id, 1); // Nutzer kennt seinen Raum
+        assert_eq!((nodes[2].kind, nodes[2].id), (TreeKind::Room, 2));
+        // aufgeklappt → nach unten zeigender Pfeil
+        assert!(items[0].text.as_str().contains("▾"));
+        // Nutzerzeile eingerückt mit Aufzählungspunkt
+        assert!(items[1].text.as_str().contains("• Alice"));
+    }
+
+    #[test]
+    fn room_expandable_only_with_children_or_users() {
+        let rooms = vec![
+            room(1, "Voll", None, vec![user(10, "Bob")]),
+            room(2, "Leer", None, vec![]),
+            room(3, "Eltern", None, vec![]),
+            room(4, "Kind", Some(3), vec![]),
+        ];
+        assert!(room_is_expandable(&rooms, 1)); // hat Nutzer
+        assert!(!room_is_expandable(&rooms, 2)); // leer
+        assert!(room_is_expandable(&rooms, 3)); // hat Unterraum
     }
 }

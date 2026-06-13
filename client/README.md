@@ -58,10 +58,16 @@ Unter Windows/Linux **Strg**, unter macOS **Cmd** (Strg funktioniert dort ebenfa
 
 ## Einstellungen
 
-Server, Benutzername, Spitzname, Audiogeräte und Lautstärke werden in
-`~/.config/teamconference/client.json` (macOS: `~/Library/Application
-Support/teamconference/client.json`) gespeichert. Audiogeräte lassen sich
-über *Server → Einstellungen…* wählen und gelten ab der nächsten Verbindung.
+Server, Benutzername, Spitzname, Audiogeräte und Lautstärke werden unter
+`accessyApplications/teamconference/client.json` im plattformüblichen
+Konfigverzeichnis gespeichert:
+
+- Linux: `~/.config/accessyApplications/teamconference/client.json`
+- macOS: `~/Library/Application Support/accessyApplications/teamconference/client.json`
+- Windows: `%APPDATA%\accessyApplications\teamconference\client.json`
+
+Audiogeräte lassen sich über *Server → Einstellungen…* wählen und gelten ab
+der nächsten Verbindung.
 
 ## Technik
 

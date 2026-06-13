@@ -46,6 +46,9 @@ fn main() {
     // Plattformabhängige Kurztasten-Beschriftung
     ui.set_mod_name(if cfg!(target_os = "macos") { "Cmd" } else { "Strg" }.into());
 
+    // Baumansicht (Räume + Nutzer in einem Tree) nur unter Windows
+    ui.set_is_windows(state.tree_mode);
+
     // Gespeicherte Einstellungen vorbelegen
     let cfg = config::load_config();
     ui.set_conn_host(cfg.host.clone().into());
@@ -137,6 +140,35 @@ fn main() {
         ui.on_settings_accepted(move |input, output| {
             if let Some(ui) = weak.upgrade() {
                 actions::settings_accepted(&ui, &state2, input.as_str(), output.as_str());
+            }
+        });
+    }
+
+    // Windows-Baumansicht: Enter beitreten, Pfeil rechts/links auf-/zuklappen
+    {
+        let weak = ui.as_weak();
+        let state2 = state.clone();
+        ui.on_tree_activate(move || {
+            if let Some(ui) = weak.upgrade() {
+                actions::tree_activate(&ui, &state2);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state2 = state.clone();
+        ui.on_tree_expand(move || {
+            if let Some(ui) = weak.upgrade() {
+                actions::tree_expand(&ui, &state2);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state2 = state.clone();
+        ui.on_tree_collapse(move || {
+            if let Some(ui) = weak.upgrade() {
+                actions::tree_collapse(&ui, &state2);
             }
         });
     }

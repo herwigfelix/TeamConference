@@ -27,13 +27,19 @@ export component MainWindow inherits Window {
     in-out property <string> conn-nickname;
     in property <bool> connecting: false;
 
+    // Baumansicht (nur Windows): Räume und Nutzer in einem klassischen Tree
+    in property <bool> is-windows: false;
+
     // ── Hauptansicht ──
     in property <[StandardListViewItem]> rooms-model;
     in property <[StandardListViewItem]> users-model;
     in property <[StandardListViewItem]> files-model;
+    in property <[StandardListViewItem]> tree-model;
     in-out property <int> rooms-current: -1;
     in-out property <int> users-current: -1;
     in-out property <int> files-current: -1;
+    in-out property <int> tree-current: -1;
+    in-out property <bool> tree-has-focus: false;
     in property <string> chat-text;
     // Byte-Länge von chat-text, von Rust gesetzt — für Auto-Scroll ans Ende
     in property <int> chat-len: 0;
@@ -72,6 +78,10 @@ export component MainWindow inherits Window {
     callback volume-changed(float);
     callback dialog-accepted(string, string, string);
     callback settings-accepted(string, string);
+    // Windows-Baumansicht: Enter = beitreten, Pfeil rechts = aufklappen, Pfeil links = zuklappen
+    callback tree-activate();
+    callback tree-expand();
+    callback tree-collapse();
 
     public function show-dialog(mode: string, title: string, text: string,
                                 label1: string, show1: bool,
@@ -340,12 +350,52 @@ export component MainWindow inherits Window {
                     root.menu-action("help");
                     return accept;
                 }
+                // Baumansicht (Windows): blanke Enter/Pfeil-Tasten, wenn der Baum den Fokus hat
+                if (root.is-windows && root.tree-has-focus) {
+                    if (event.text == Key.Return) {
+                        root.tree-activate();
+                        return accept;
+                    }
+                    if (event.text == Key.RightArrow) {
+                        root.tree-expand();
+                        return accept;
+                    }
+                    if (event.text == Key.LeftArrow) {
+                        root.tree-collapse();
+                        return accept;
+                    }
+                }
                 return reject;
             }
 
             HorizontalBox {
-                // ── Linke Spalte: Räume und Nutzer ──
-                VerticalBox {
+                // ── Linke Spalte (Windows): klassische Baumansicht ──
+                if root.is-windows : VerticalBox {
+                    width: 300px;
+                    Text {
+                        text: "Räume und Nutzer";
+                        accessible-role: AccessibleRole.none;
+                    }
+                    tree-list := StandardListView {
+                        model: root.tree-model;
+                        current-item <=> root.tree-current;
+                        accessible-label: "Räume und Nutzer, Baumansicht. Enter tritt dem Raum bei, Pfeil rechts klappt auf, Pfeil links klappt zu.";
+                        vertical-stretch: 1;
+                        changed has-focus => { root.tree-has-focus = self.has-focus; }
+                    }
+                    Text {
+                        text: "Enter: beitreten · → aufklappen · ← zuklappen";
+                        accessible-role: AccessibleRole.none;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: "Beitreten";
+                        accessible-label: "Ausgewähltem Raum beitreten";
+                        clicked => { root.tree-activate(); }
+                    }
+                }
+                // ── Linke Spalte (macOS/Linux): zwei getrennte Listen ──
+                if !root.is-windows : VerticalBox {
                     width: 260px;
                     Text {
                         text: "Räume und Unterräume";
