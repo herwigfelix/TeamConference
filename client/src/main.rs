@@ -47,6 +47,13 @@ fn main() {
     let app_state = Arc::new(AppState::new());
     let cfg = config::load_config();
     app_state.set_volume(cfg.volume);
+    // Gespeicherte Audio-Einstellungen übernehmen
+    {
+        let mut inner = app_state.inner.lock();
+        inner.audio_config.sample_rate = cfg.sample_rate;
+        inner.audio_config.bit_depth = cfg.bit_depth;
+        inner.audio_config.channels = cfg.channels;
+    }
     // Klon für das Speichern der Lautstärke nach dem Event-Loop (app_state wird in die Closure verschoben)
     let app_state_exit = app_state.clone();
 
@@ -71,7 +78,8 @@ fn main() {
             st: Rc::new(RefCell::new(UiState {
                 servers: cfg.servers.clone(),
                 files: Vec::new(),
-                tree_map: std::collections::HashMap::new(),
+                room_ids: Vec::new(),
+                user_ids: Vec::new(),
                 registration_open: false,
             })),
         };
@@ -159,7 +167,7 @@ fn wire_events(ctx: &Ctx) {
     }
     {
         let ctx = ctx.clone();
-        ui.join_btn.on_click(move |_| actions::tree_activate(&ctx));
+        ui.join_btn.on_click(move |_| actions::join_selected(&ctx));
     }
     {
         let ctx = ctx.clone();
@@ -175,9 +183,9 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.volume.on_slider(move |_| actions::volume_changed(&ctx));
     }
+    // Doppelklick auf einen Raum tritt ihm bei (zusätzlich zu Knopf/Strg+J)
     {
         let ctx = ctx.clone();
-        ui.tree
-            .on_item_activated(move |_| actions::tree_activate(&ctx));
+        ui.rooms.on_item_double_clicked(move |_| actions::join_selected(&ctx));
     }
 }

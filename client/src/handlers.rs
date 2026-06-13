@@ -1,7 +1,5 @@
 //! Verarbeitung eingehender Server-Nachrichten auf dem UI-Thread sowie
-//! Aufbau der Baum-, Datei- und Serverliste.
-
-use std::collections::HashSet;
+//! Aufbau der Raum-, Nutzer-, Datei- und Serverliste.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -12,7 +10,6 @@ use crate::protocol::{
     AudioUserState, AuthResponse, FileDownloadData, FileInfo, FileUploadAck, Message, RoomInfo,
     StreamFileStatus, UserInfo,
 };
-use crate::ui::NodeRef;
 
 fn user_label(u: &UserInfo) -> String {
     let mut label = u.nickname.clone();
@@ -28,80 +25,82 @@ fn user_label(u: &UserInfo) -> String {
     label
 }
 
-/// IDs des aktuellen Raums und aller seiner Vorfahren (für Auto-Aufklappen).
-fn ancestor_path(rooms: &[RoomInfo], current: Option<i64>) -> HashSet<i64> {
-    let mut set = HashSet::new();
-    let mut cur = current;
-    while let Some(id) = cur {
-        if !set.insert(id) {
-            break;
-        }
-        cur = rooms.iter().find(|r| r.id == id).and_then(|r| r.parent_id);
-    }
-    set
-}
-
-/// Pointer eines DataViewItem als stabilen Map-Schlüssel.
-fn item_key(item: &DataViewItem) -> Option<usize> {
-    item.get_id::<u8>().map(|p| p as usize)
-}
-
-fn add_rooms(
-    tree: &DataViewTreeCtrl,
-    parent_item: &DataViewItem,
-    rooms: &[RoomInfo],
-    parent_id: Option<i64>,
-    expand_set: &HashSet<i64>,
-    map: &mut std::collections::HashMap<usize, NodeRef>,
-) {
-    let mut level: Vec<&RoomInfo> = rooms.iter().filter(|r| r.parent_id == parent_id).collect();
-    level.sort_by(|a, b| a.name.cmp(&b.name));
-
-    for room in level {
-        let lock = if room.has_password { ", Passwort" } else { "" };
-        let label = format!("{} ({} Nutzer{})", room.name, room.users.len(), lock);
-        // Räume sind Container (aufklappbar). Icons: -1 = kein Icon.
-        let room_item = tree.append_container(parent_item, &label, -1, -1);
-        if let Some(k) = item_key(&room_item) {
-            map.insert(k, NodeRef::Room(room.id));
-        }
-
-        for u in &room.users {
-            let user_item = tree.append_item(&room_item, &user_label(u), -1);
-            if let Some(k) = item_key(&user_item) {
-                map.insert(
-                    k,
-                    NodeRef::User {
-                        id: u.id,
-                        room: room.id,
-                    },
-                );
-            }
-        }
-
-        add_rooms(tree, &room_item, rooms, Some(room.id), expand_set, map);
-
-        if expand_set.contains(&room.id) {
-            tree.expand(&room_item);
-        }
-    }
-}
-
-/// Baumansicht (Räume + Nutzer) neu aufbauen.
-pub fn rebuild_tree(ctx: &Ctx) {
-    let tree = ctx.ui.tree;
-    tree.delete_all_items();
-
-    let (rooms, current) = {
+/// Räume + Unterräume flach in die Raum-ListBox schreiben (Unterräume eingerückt),
+/// und die Index→Raum-ID-Zuordnung aktualisieren. Erhält die Auswahl per Raum-ID.
+pub fn rebuild_rooms(ctx: &Ctx) {
+    let (rooms, prev_id) = {
         let inner = ctx.app.inner.lock();
-        (inner.rooms.clone(), inner.current_room_id)
+        let prev = ctx.ui.rooms.get_selection();
+        let prev_id = prev.and_then(|i| ctx.st.borrow().room_ids.get(i as usize).copied());
+        (inner.rooms.clone(), prev_id)
     };
 
-    let expand_set = ancestor_path(&rooms, current);
-    let root = DataViewItem::default();
-    let mut map = std::collections::HashMap::new();
-    add_rooms(&tree, &root, &rooms, None, &expand_set, &mut map);
-    ctx.st.borrow_mut().tree_map = map;
+    let mut ids: Vec<i64> = Vec::new();
+    ctx.ui.rooms.clear();
+
+    // rekursiv, alphabetisch je Ebene, mit Einrückung nach Tiefe
+    fn add_level(
+        lb: &ListBox,
+        rooms: &[RoomInfo],
+        parent: Option<i64>,
+        depth: usize,
+        ids: &mut Vec<i64>,
+    ) {
+        let mut level: Vec<&RoomInfo> = rooms.iter().filter(|r| r.parent_id == parent).collect();
+        level.sort_by(|a, b| a.name.cmp(&b.name));
+        for room in level {
+            let indent = "    ".repeat(depth);
+            let lock = if room.has_password { ", Passwort" } else { "" };
+            lb.append(&format!(
+                "{}{} ({} Nutzer{})",
+                indent,
+                room.name,
+                room.users.len(),
+                lock
+            ));
+            ids.push(room.id);
+            add_level(lb, rooms, Some(room.id), depth + 1, ids);
+        }
+    }
+    add_level(&ctx.ui.rooms, &rooms, None, 0, &mut ids);
+
+    // vorherige Auswahl per Raum-ID wiederherstellen
+    if let Some(pid) = prev_id {
+        if let Some(pos) = ids.iter().position(|&r| r == pid) {
+            ctx.ui.rooms.set_selection(pos as u32, true);
+        }
+    }
+    ctx.st.borrow_mut().room_ids = ids;
+}
+
+/// Nutzer des aktuellen Raums in die Nutzer-ListBox schreiben.
+pub fn rebuild_users(ctx: &Ctx) {
+    let users = {
+        let inner = ctx.app.inner.lock();
+        match inner.current_room_id {
+            Some(rid) => inner
+                .rooms
+                .iter()
+                .find(|r| r.id == rid)
+                .map(|r| r.users.clone())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    };
+
+    ctx.ui.users.clear();
+    let mut ids: Vec<i64> = Vec::new();
+    for u in &users {
+        ctx.ui.users.append(&user_label(u));
+        ids.push(u.id);
+    }
+    ctx.st.borrow_mut().user_ids = ids;
+}
+
+/// Raum- und Nutzerliste zusammen neu aufbauen.
+pub fn rebuild_tree(ctx: &Ctx) {
+    rebuild_rooms(ctx);
+    rebuild_users(ctx);
 }
 
 /// Dateiliste neu aufbauen.
@@ -166,7 +165,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 rebuild_files(ctx);
                 refresh_status(ctx);
                 // Fokus in die Hauptansicht setzen, damit der Screenreader mitwandert
-                ui.tree.set_focus();
+                ui.rooms.set_focus();
             }
             Ok(resp) => {
                 let err = resp.error.unwrap_or_else(|| "Unbekannter Fehler".into());

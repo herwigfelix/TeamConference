@@ -1,7 +1,6 @@
 //! Gemeinsamer UI-seitiger Kontext, der an alle Event-Closures übergeben wird.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -10,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::config::ServerEntry;
 use crate::protocol::{FileInfo, Message};
 use crate::state::AppState;
-use crate::ui::{NodeRef, Ui};
+use crate::ui::Ui;
 
 /// UI-Thread-eigene Daten (nicht thread-shared): Index→Daten-Zuordnungen.
 #[derive(Default)]
@@ -19,8 +18,10 @@ pub struct UiState {
     pub servers: Vec<ServerEntry>,
     /// Dateien der Dateiliste (entspricht den Einträgen der files-ListBox)
     pub files: Vec<FileInfo>,
-    /// DataViewItem-Pointer (als usize) → Baumknoten
-    pub tree_map: HashMap<usize, NodeRef>,
+    /// Raum-IDs in Anzeigereihenfolge (Index der rooms-ListBox → Raum-ID)
+    pub room_ids: Vec<i64>,
+    /// Nutzer-IDs in Anzeigereihenfolge (Index der users-ListBox → Nutzer-ID)
+    pub user_ids: Vec<i64>,
     /// Zuletzt vom Server gemeldeter Registrierungsstatus (für das Umschalten)
     pub registration_open: bool,
 }

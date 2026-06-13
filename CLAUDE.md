@@ -42,7 +42,7 @@ docker compose up -d --build
 
 Module roles: `ui.rs` builds the frame/menus/widgets and holds the `Ui` struct (all widgets are `Copy`); `app.rs` defines `Ctx` (clones into every event closure: `Ui` + `Arc<AppState>` + Tokio handle + `ev_tx` + `Rc<RefCell<UiState>>`); `handlers.rs` turns incoming messages into widget updates and rebuilds the room/file views; `actions.rs` turns menu/button/dialog input into protocol messages; `net/` (WebSocket+UDP) and `audio/` (cpal capture/playback, Symphonia file streaming, Opus) are **UI-agnostic and shared** — `net/ws_client.rs::pre_handle_message` updates `AppState` on the network thread; the UI layer only renders.
 
-`state::AppState` (`Arc<Mutex<InnerState>>` + atomics) is the single shared state between UI and network/audio. The rooms+users tree uses **`DataViewTreeCtrl`** (native NSOutlineView/GTK — VoiceOver-accessible); since it can't store item data, `UiState.tree_map` maps the `DataViewItem` pointer (as `usize`) → `NodeRef`.
+`state::AppState` (`Arc<Mutex<InnerState>>` + atomics) is the single shared state between UI and network/audio. Rooms and users are two **native `wxListBox`** controls (rooms flattened with indentation for subrooms, users for the current room); `UiState.room_ids`/`user_ids` map listbox index → id. Native listboxes are screen-reader-accessible on every platform — `wxTreeCtrl`/`wxDataViewCtrl` each fall back to a non-accessible generic implementation on one platform (Tree on macOS, DataView on Windows), so trees were abandoned for accessibility.
 
 ## Conventions & gotchas
 

@@ -18,7 +18,8 @@ Aktionen sind über Kurztasten erreichbar.
 
 - **Serverliste** (Lesezeichen): Server speichern, auswählen, entfernen
 - Hierarchische Räume und Unterräume, optional mit Passwort und Nutzerlimit
-- Räume und Nutzer als nativer Baum (Pfeiltasten klappen auf/zu, Enter tritt bei)
+- Räume (mit eingerückten Unterräumen) und Nutzer als native Listen — auf allen Plattformen screenreader-tauglich
+- Audio-Einstellungen: Samplerate, Bittiefe, Mono/Stereo
 - Raum-Chat, Privatnachrichten, Server-Durchsagen
 - Datei-Upload/-Download pro Raum
 - Audiodateien in einen Raum streamen (MP3, WAV, FLAC, OGG, M4A, …)
@@ -268,8 +269,9 @@ cargo run --release
 
 Zuerst erscheint die Verbindungsansicht mit der **Serverliste**: gespeicherte
 Server auswählen, per *Als Lesezeichen speichern* anlegen oder entfernen, dann
-*Verbinden*. Nach der Anmeldung zeigt das Hauptfenster Räume und Nutzer als
-Baum, den Chatverlauf mit Eingabefeld, den Lautstärkeregler und die Dateiliste.
+*Verbinden*. Nach der Anmeldung zeigt das Hauptfenster die Raumliste (Unterräume
+eingerückt) und die Nutzerliste des aktuellen Raums, den Chatverlauf mit
+Eingabefeld, den Lautstärkeregler und die Dateiliste.
 Alles Weitere (Audio, Raum- und Nutzerverwaltung, Datei-Streaming) läuft über
 die Menüleiste oder Kurztasten — Kurztasten-Übersicht über *Hilfe → Kurztasten*
 (F1) oder in [client/README.md](client/README.md).
@@ -302,10 +304,14 @@ plattformüblich gespeichert:
   NSAccessibility (macOS) und ATK/AT-SPI (Linux) — funktioniert mit VoiceOver,
   NVDA, JAWS und Orca ohne Zusatzschicht.
 - Vollständige Tastaturbedienung: Menü-Beschleuniger (Strg/Cmd), Tab-Navigation,
-  native Baum-Navigation (Pfeil rechts/links klappt auf/zu, Enter tritt bei).
+  Listen mit Pfeiltasten; Beitreten per Knopf, Strg+J oder Doppelklick.
+- Räume und Nutzer sind **native Listen** (`wxListBox`) statt eines Tree-Widgets —
+  Tree-Controls sind in wxWidgets je nach Plattform nicht screenreader-tauglich,
+  Listboxen überall. Unterräume werden eingerückt dargestellt.
+- Wichtige Rückmeldungen (Verbindungs-/Anmeldefehler, Konto-Ergebnisse) kommen
+  als **Dialog** — die Statuszeile wird von Screenreadern nicht vorgelesen.
 - Statusänderungen (stumm, Raum betreten, Upload fertig, …) werden zusätzlich
-  als Textzeile im Chatverlauf protokolliert und sind damit nachlesbar.
-- Räume und Nutzer stehen in einem nativen Baum; passwortgeschützte Räume und
+  als Textzeile im Chatverlauf protokolliert; passwortgeschützte Räume und
   stumm/taub-Zustände sind textuell gekennzeichnet (nicht nur per Icon).
 
 ## Protokoll

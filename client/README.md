@@ -44,12 +44,14 @@ die Mikrofonrechte des Terminals.
 
 ## Hauptfenster
 
-- **Räume und Nutzer** als nativer Baum: Räume mit darunter eingehängten
-  Nutzern und Unterräumen. Pfeil rechts/links klappt auf/zu, Enter (oder
-  Doppelklick) tritt dem Raum bei.
+- **Raumliste** (native Liste, Unterräume eingerückt) und darunter die
+  **Nutzerliste** des aktuellen Raums. Beitreten per Knopf „Beitreten", Strg+J
+  oder Doppelklick auf den Raum. (Native Listen statt Tree-Widget, weil
+  Tree-Controls in wxWidgets je nach Plattform nicht screenreader-tauglich sind.)
 - **Chatverlauf** (schreibgeschützt) und **Chateingabe** (Enter sendet).
 - **Lautstärkeregler** (0–100 %, wirkt auf die Wiedergabe).
 - **Dateiliste des aktuellen Raums** mit Herunterladen/Aktualisieren.
+- Audio-Qualität (Samplerate, Bittiefe, Mono/Stereo) über *Audio → Audio-Einstellungen*.
 
 Alles Weitere läuft über die Menüleiste (Server, Audio, Räume, Dateien,
 Verwaltung, Hilfe) oder über Kurztasten.
@@ -73,9 +75,6 @@ Menü-Beschleuniger; wxWidgets bildet **Strg** auf macOS automatisch auf **Cmd**
 | Strg+Umschalt+P | Privatnachricht an ausgewählten Nutzer (Text vorher ins Eingabefeld) |
 | Strg+Q | Beenden |
 | F1 | Kurztasten-Hilfe |
-
-Im Baum gelten zusätzlich die nativen Tasten: Pfeil rechts/links zum
-Auf-/Zuklappen, Enter zum Beitreten.
 
 ## Einstellungen
 

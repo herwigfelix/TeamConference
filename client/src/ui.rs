@@ -20,7 +20,7 @@ impl AccessibleImpl for NamedAccessible {
 }
 
 /// Setzt Fenster- und Accessible-Namen eines Bedienelements.
-fn set_a11y_name(widget: &dyn WxWidget, name: &str) {
+pub fn set_a11y_name(widget: &dyn WxWidget, name: &str) {
     widget.set_name(name);
     widget.set_accessible(Accessible::new(widget, NamedAccessible { name: name.to_string() }));
 }
@@ -33,6 +33,7 @@ pub const ID_TOGGLE_LOOPBACK: i32 = ID_HIGHEST + 4;
 pub const ID_STREAM_FILE: i32 = ID_HIGHEST + 5;
 pub const ID_STOP_STREAM: i32 = ID_HIGHEST + 6;
 pub const ID_PAUSE_STREAM: i32 = ID_HIGHEST + 30;
+pub const ID_AUDIO_SETTINGS: i32 = ID_HIGHEST + 31;
 pub const ID_JOIN_ROOM: i32 = ID_HIGHEST + 7;
 pub const ID_LEAVE_ROOM: i32 = ID_HIGHEST + 8;
 pub const ID_CREATE_ROOM: i32 = ID_HIGHEST + 9;
@@ -58,14 +59,6 @@ pub const ID_ACCOUNT_DELETE: i32 = ID_HIGHEST + 27;
 pub const ID_REGISTRATION: i32 = ID_HIGHEST + 28;
 pub const ID_CHANGE_PW: i32 = ID_HIGHEST + 29;
 
-/// Was ein Baumknoten repräsentiert. Wird im UiState über den DataViewItem-Pointer
-/// gemappt (DataViewTreeCtrl speichert keine beliebigen Item-Daten).
-#[derive(Debug, Clone)]
-pub enum NodeRef {
-    Room(i64),
-    User { id: i64, room: i64 },
-}
-
 /// Alle Widget-Handles der Oberfläche. Widgets sind Copy → frei in Closures kopierbar.
 #[derive(Clone, Copy)]
 pub struct Ui {
@@ -84,10 +77,12 @@ pub struct Ui {
     pub bookmark_btn: Button,
     pub remove_btn: Button,
 
-    // Hauptansicht
+    // Hauptansicht — Räume und Nutzer als native ListBoxen (auf allen
+    // Plattformen screenreader-tauglich; Unterräume eingerückt).
     pub main_panel: Panel,
-    // Native Baumansicht (NSOutlineView/GTK/Win) — VoiceOver-/Screenreader-tauglich
-    pub tree: DataViewTreeCtrl,
+    pub rooms: ListBox,
+    pub users: ListBox,
+    pub join_btn: Button,
     pub chat_log: TextCtrl,
     pub chat_in: TextCtrl,
     pub send_btn: Button,
@@ -95,7 +90,6 @@ pub struct Ui {
     pub files: ListBox,
     pub download_btn: Button,
     pub refresh_btn: Button,
-    pub join_btn: Button,
 }
 
 impl Ui {
@@ -162,28 +156,31 @@ impl Ui {
         let main_panel = Panel::builder(&frame).build();
         let mh = BoxSizer::builder(Orientation::Horizontal).build();
 
-        // Linke Spalte: Baum (Räume + Nutzer) — native wxTreeCtrl
+        // Linke Spalte: Räume und Nutzer als native ListBoxen (barrierefrei
+        // auf allen Plattformen). Unterräume werden in der Raumliste eingerückt.
         let left = BoxSizer::builder(Orientation::Vertical).build();
         left.add(
             &StaticText::builder(&main_panel)
-                .with_label("Räume und Nutzer")
+                .with_label("Räume und Unterräume")
                 .build(),
             0,
             SizerFlag::All,
             4,
         );
-        let tree = DataViewTreeCtrl::builder(&main_panel).build();
-        // Eine Icon+Text-Spalte (Spalte 0) — der Tree-Store liefert IconText-Daten.
-        tree.append_icon_text_column(
-            "Räume und Nutzer",
-            0,
-            240,
-            DataViewAlign::Left,
-            DataViewColumnFlags::Resizable,
-        );
-        left.add(&tree, 1, SizerFlag::Expand | SizerFlag::All, 4);
+        let rooms = ListBox::builder(&main_panel).build();
+        left.add(&rooms, 1, SizerFlag::Expand | SizerFlag::All, 4);
         let join_btn = Button::builder(&main_panel).with_label("Beitreten").build();
         left.add(&join_btn, 0, SizerFlag::Expand | SizerFlag::All, 4);
+        left.add(
+            &StaticText::builder(&main_panel)
+                .with_label("Nutzer im aktuellen Raum")
+                .build(),
+            0,
+            SizerFlag::All,
+            4,
+        );
+        let users = ListBox::builder(&main_panel).build();
+        left.add(&users, 1, SizerFlag::Expand | SizerFlag::All, 4);
         mh.add_sizer(&left, 2, SizerFlag::Expand | SizerFlag::All, 4);
 
         // Mitte: Chat
@@ -264,7 +261,8 @@ impl Ui {
         set_a11y_name(&user_in, "Benutzername");
         set_a11y_name(&pass_in, "Passwort");
         set_a11y_name(&nick_in, "Spitzname");
-        set_a11y_name(&tree, "Räume und Nutzer");
+        set_a11y_name(&rooms, "Räume und Unterräume");
+        set_a11y_name(&users, "Nutzer im aktuellen Raum");
         set_a11y_name(&chat_log, "Chatverlauf");
         set_a11y_name(&chat_in, "Chatnachricht eingeben");
         set_a11y_name(&volume, "Lautstärke in Prozent");
@@ -284,7 +282,9 @@ impl Ui {
             bookmark_btn,
             remove_btn,
             main_panel,
-            tree,
+            rooms,
+            users,
+            join_btn,
             chat_log,
             chat_in,
             send_btn,
@@ -292,7 +292,6 @@ impl Ui {
             files,
             download_btn,
             refresh_btn,
-            join_btn,
         }
     }
 
@@ -335,6 +334,7 @@ fn build_menu_bar(frame: &Frame) {
         .append_item(ID_TOGGLE_MUTE, "Mikrofon &stumm/laut\tCtrl+M", "Mikrofon umschalten")
         .append_item(ID_TOGGLE_DEAFEN, "Ton aus/an (&taub)\tCtrl+D", "Wiedergabe umschalten")
         .append_item(ID_TOGGLE_LOOPBACK, "&Loopback an/aus\tCtrl+L", "Loopback umschalten")
+        .append_item(ID_AUDIO_SETTINGS, "Audio-&Einstellungen…", "Samplerate, Bittiefe, Mono/Stereo")
         .append_item(ID_STREAM_FILE, "Audiodatei &streamen…\tCtrl+S", "Datei in den Raum streamen")
         .append_item(ID_PAUSE_STREAM, "Streaming &pausieren/fortsetzen\tCtrl+P", "Gestreamte Datei pausieren bzw. fortsetzen")
         .append_item(ID_STOP_STREAM, "Streaming &stoppen\tCtrl+Shift+S", "Streaming beenden")

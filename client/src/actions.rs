@@ -7,7 +7,7 @@ use crate::config::{self, ServerEntry};
 use crate::handlers::{rebuild_files, rebuild_server_list, rebuild_tree, refresh_status};
 use crate::protocol::Message;
 use crate::state::PendingUpload;
-use crate::ui::{self, NodeRef};
+use crate::ui;
 
 // ── kleine Helfer ──
 
@@ -25,25 +25,16 @@ fn send_or_status(ctx: &Ctx, msg: Message) -> bool {
     }
 }
 
-/// Aktuell im Baum ausgewählter Knoten (über die DataViewItem→NodeRef-Map).
-fn selected_node(ctx: &Ctx) -> Option<NodeRef> {
-    let item = ctx.ui.tree.get_selection()?;
-    let key = item.get_id::<u8>().map(|p| p as usize)?;
-    ctx.st.borrow().tree_map.get(&key).cloned()
-}
-
+/// In der Raumliste ausgewählte Raum-ID.
 fn selected_room(ctx: &Ctx) -> Option<i64> {
-    match selected_node(ctx)? {
-        NodeRef::Room(id) => Some(id),
-        NodeRef::User { room, .. } => Some(room),
-    }
+    let idx = ctx.ui.rooms.get_selection()? as usize;
+    ctx.st.borrow().room_ids.get(idx).copied()
 }
 
+/// In der Nutzerliste ausgewählte Nutzer-ID.
 fn selected_user(ctx: &Ctx) -> Option<i64> {
-    match selected_node(ctx)? {
-        NodeRef::User { id, .. } => Some(id),
-        NodeRef::Room(_) => None,
-    }
+    let idx = ctx.ui.users.get_selection()? as usize;
+    ctx.st.borrow().user_ids.get(idx).copied()
 }
 
 fn selected_file(ctx: &Ctx) -> Option<crate::protocol::FileInfo> {
@@ -364,18 +355,11 @@ fn join_room_checked(ctx: &Ctx, room_id: i64) {
     }
 }
 
-fn join_selected(ctx: &Ctx) {
+/// Dem in der Raumliste ausgewählten Raum beitreten (Knopf, Strg+J, Doppelklick).
+pub fn join_selected(ctx: &Ctx) {
     match selected_room(ctx) {
         Some(room_id) => join_room_checked(ctx, room_id),
-        None => status(ctx, "Bitte zuerst einen Raum im Baum auswählen."),
-    }
-}
-
-/// Doppelklick/Enter auf einen Baumeintrag: Raum → beitreten.
-pub fn tree_activate(ctx: &Ctx) {
-    match selected_node(ctx) {
-        Some(NodeRef::Room(id)) => join_room_checked(ctx, id),
-        _ => {}
+        None => notify(ctx, "Bitte zuerst einen Raum auswählen.", "Beitreten"),
     }
 }
 
@@ -499,6 +483,113 @@ fn toggle_loopback(ctx: &Ctx) {
 pub fn volume_changed(ctx: &Ctx) {
     let v = ctx.ui.volume.get_value();
     ctx.app.set_volume(v as f32 / 100.0);
+}
+
+/// Dialog für Audio-Qualität: Samplerate, Bittiefe, Kanäle (Mono/Stereo).
+fn audio_settings(ctx: &Ctx) {
+    const RATES: [u32; 5] = [48000, 44100, 24000, 16000, 8000];
+    const DEPTHS: [u8; 3] = [16, 24, 32];
+
+    let (cur_rate, cur_depth, cur_ch) = {
+        let a = &ctx.app.inner.lock().audio_config;
+        (a.sample_rate, a.bit_depth, a.channels)
+    };
+
+    let dialog = Dialog::builder(&ctx.ui.frame, "Audio-Einstellungen").build();
+    let v = BoxSizer::builder(Orientation::Vertical).build();
+
+    let row = |label: &str, choice: &Choice| {
+        let r = BoxSizer::builder(Orientation::Horizontal).build();
+        r.add(
+            &StaticText::builder(&dialog).with_label(label).build(),
+            0,
+            SizerFlag::AlignCenterVertical | SizerFlag::All,
+            6,
+        );
+        r.add(choice, 1, SizerFlag::Expand | SizerFlag::All, 6);
+        v.add_sizer(&r, 0, SizerFlag::Expand, 0);
+    };
+
+    let rate_choice = Choice::builder(&dialog).build();
+    for r in RATES {
+        rate_choice.append(&r.to_string());
+    }
+    rate_choice.set_selection(RATES.iter().position(|&r| r == cur_rate).unwrap_or(0) as u32);
+    ui::set_a11y_name(&rate_choice, "Samplerate in Hertz");
+    row("Samplerate (Hz):", &rate_choice);
+
+    let depth_choice = Choice::builder(&dialog).build();
+    for d in DEPTHS {
+        depth_choice.append(&d.to_string());
+    }
+    depth_choice.set_selection(DEPTHS.iter().position(|&d| d == cur_depth).unwrap_or(0) as u32);
+    ui::set_a11y_name(&depth_choice, "Bittiefe");
+    row("Bittiefe (Bit):", &depth_choice);
+
+    let ch_choice = Choice::builder(&dialog).build();
+    ch_choice.append("Mono");
+    ch_choice.append("Stereo");
+    ch_choice.set_selection(if cur_ch >= 2 { 1 } else { 0 });
+    ui::set_a11y_name(&ch_choice, "Kanäle Mono oder Stereo");
+    row("Kanäle:", &ch_choice);
+
+    let btns = BoxSizer::builder(Orientation::Horizontal).build();
+    let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
+    let ok = Button::builder(&dialog).with_label("Speichern").build();
+    {
+        let d = dialog;
+        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
+    }
+    {
+        let d = dialog;
+        ok.on_click(move |_| d.end_modal(ID_OK));
+    }
+    btns.add(&cancel, 0, SizerFlag::All, 6);
+    btns.add(&ok, 0, SizerFlag::All, 6);
+    v.add_sizer(&btns, 0, SizerFlag::AlignRight, 0);
+
+    dialog.set_sizer(v, true);
+    dialog.fit();
+
+    let result = dialog.show_modal();
+    if result == ID_OK {
+        let rate = RATES[rate_choice.get_selection().unwrap_or(0) as usize];
+        let depth = DEPTHS[depth_choice.get_selection().unwrap_or(0) as usize];
+        let channels = if ch_choice.get_selection().unwrap_or(0) == 1 { 2u8 } else { 1u8 };
+
+        {
+            let mut inner = ctx.app.inner.lock();
+            inner.audio_config.sample_rate = rate;
+            inner.audio_config.bit_depth = depth;
+            inner.audio_config.channels = channels;
+        }
+        let mut cfg = config::load_config();
+        cfg.sample_rate = rate;
+        cfg.bit_depth = depth;
+        cfg.channels = channels;
+        let _ = config::save_config(&cfg);
+
+        // Falls in einem Raum: dem Server die neue Konfiguration melden
+        if ctx.app.inner.lock().current_room_id.is_some() {
+            let _ = ctx.app.send_ws(Message::new(
+                "audio_config",
+                serde_json::json!({ "sample_rate": rate, "bit_depth": depth, "channels": channels, "enabled": true }),
+            ));
+        }
+        dialog.destroy();
+        notify(
+            ctx,
+            &format!(
+                "Audio gespeichert: {} Hz, {} Bit, {}.\nGilt ab der nächsten Verbindung.",
+                rate,
+                depth,
+                if channels == 2 { "Stereo" } else { "Mono" }
+            ),
+            "Audio-Einstellungen",
+        );
+    } else {
+        dialog.destroy();
+    }
 }
 
 pub fn save_volume(ctx: &Ctx) {
@@ -923,6 +1014,7 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         ui::ID_TOGGLE_MUTE => toggle_mute(ctx),
         ui::ID_TOGGLE_DEAFEN => toggle_deafen(ctx),
         ui::ID_TOGGLE_LOOPBACK => toggle_loopback(ctx),
+        ui::ID_AUDIO_SETTINGS => audio_settings(ctx),
         ui::ID_STREAM_FILE => stream_file(ctx),
         ui::ID_PAUSE_STREAM => toggle_pause_stream(ctx),
         ui::ID_STOP_STREAM => stop_stream(ctx),
