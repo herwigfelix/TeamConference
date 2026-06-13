@@ -1,8 +1,9 @@
 # TeamConference Server
 # Build:  docker build -f docker/Dockerfile -t teamconference-server .
 #         (aus dem Projekt-Wurzelverzeichnis)
-# Aktuelles stabiles Rust (einige Abhängigkeiten brauchen Edition 2024 → ≥ 1.85)
-FROM rust:1 AS builder
+# Aktuelles stabiles Rust auf Bookworm-Basis: erfüllt Edition 2024 (≥ 1.85) und
+# passt zur glibc des Runtime-Images (debian:bookworm-slim).
+FROM rust:1-bookworm AS builder
 WORKDIR /app
 COPY server/ .
 # Cargo-Caches zwischen Builds wiederverwenden
