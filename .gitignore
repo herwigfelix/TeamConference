@@ -1,0 +1,31 @@
+# Rust
+server/target/
+client/target/
+**/*.rs.bk
+
+# Veraltete Clients — bleiben lokal, kommen nicht ins Repo
+client-tauri/
+legazy client(abandoned)/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Projektdaten (Datenbank, Uploads, Zertifikate)
+data/
+certs/
+*.db
+*.db-journal
+log.txt
+
+# Lokale Tool-Einstellungen
+.claude/settings.local.json
+
+# Environment
+.env

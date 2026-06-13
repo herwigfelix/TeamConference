@@ -1,0 +1,40 @@
+# TeamConference Server — Docker Compose
+#
+# Start (aus dem Projektstamm):
+#   docker compose up -d --build
+#
+# Danach im Client verbinden mit: Host = <Server-IP>, Port = 9500, SSL an.
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: teamconference-server
+    container_name: teamconference-server
+    restart: unless-stopped
+
+    ports:
+      - "9500:9500"        # Steuerkanal (WebSocket/TLS)
+      - "9501:9501/udp"    # Audiokanal (UDP)
+
+    environment:
+      - RUST_LOG=info
+      # Standard-Admin: wird beim ersten Start angelegt, falls er noch nicht
+      # existiert. Passwort vor dem ersten Start unbedingt ändern!
+      # (Ein späterer Wechsel hier ändert keinen bereits existierenden Account.)
+      - TC_ADMIN_USERNAME=admin
+      - TC_ADMIN_PASSWORD=bitte-aendern
+
+    volumes:
+      # Persistente Daten: SQLite-Datenbank und hochgeladene Dateien
+      - teamconference-data:/data
+      # TLS-Zertifikate; werden beim ersten Start automatisch erzeugt.
+      # Eigene Zertifikate: server.crt/server.key in das Volume legen.
+      - teamconference-certs:/certs
+      # Server-Konfiguration (Ports, Audio-Limits, Uploadgröße, …)
+      - ./docker/config.toml:/etc/teamconference/config.toml:ro
+
+volumes:
+  teamconference-data:
+  teamconference-certs:

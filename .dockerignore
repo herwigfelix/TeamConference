@@ -1,0 +1,12 @@
+# Build-Kontext klein halten — nur server/ und docker/ werden gebraucht
+client/target
+client-tauri
+legazy client(abandoned)
+server/target
+server/data
+server/certs
+docker/data
+docker/certs
+.git
+.DS_Store
+log.txt

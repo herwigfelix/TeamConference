@@ -1,0 +1,607 @@
+// TeamConference — Slint-Client mit Barrierefreiheits-Fokus.
+// Hauptfenster: Chatverlauf, Chateingabe, Raumliste, Nutzerliste,
+// Lautstärkeregler und Dateiliste. Alles Weitere über Menüs und Kurztasten.
+
+import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, Slider, StandardListView, TextEdit, VerticalBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: root.window-title;
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 820px;
+    min-height: 560px;
+
+    // "Strg" unter Windows/Linux, "Cmd" unter macOS (wird von Rust gesetzt)
+    in property <string> mod-name: "Strg";
+    in property <string> window-title: "TeamConference";
+    // 0 = Verbindungsansicht, 1 = Hauptansicht
+    in-out property <int> active-view: 0;
+    in property <string> status-text: "Nicht verbunden";
+
+    // ── Verbindungsansicht ──
+    in-out property <string> conn-host;
+    in-out property <string> conn-port: "9500";
+    in-out property <bool> conn-ssl: true;
+    in-out property <string> conn-username;
+    in-out property <string> conn-password;
+    in-out property <string> conn-nickname;
+    in property <bool> connecting: false;
+
+    // ── Hauptansicht ──
+    in property <[StandardListViewItem]> rooms-model;
+    in property <[StandardListViewItem]> users-model;
+    in property <[StandardListViewItem]> files-model;
+    in-out property <int> rooms-current: -1;
+    in-out property <int> users-current: -1;
+    in-out property <int> files-current: -1;
+    in property <string> chat-text;
+    // Byte-Länge von chat-text, von Rust gesetzt — für Auto-Scroll ans Ende
+    in property <int> chat-len: 0;
+    in-out property <string> chat-input;
+    in-out property <float> volume: 100;
+    in property <string> current-room-name: "kein Raum";
+    in property <bool> muted: false;
+    in property <bool> deafened: false;
+    in property <bool> loopback: false;
+    in property <bool> streaming: false;
+
+    // ── Generischer Dialog (Raum erstellen, Kick, Passwort, …) ──
+    in-out property <bool> dialog-visible: false;
+    in-out property <string> dialog-mode;
+    in-out property <string> dialog-title;
+    in-out property <string> dialog-text;
+    in-out property <string> dialog-label1;
+    in-out property <string> dialog-label2;
+    in-out property <bool> dialog-show1: true;
+    in-out property <bool> dialog-show2: false;
+    in-out property <bool> dialog-password: false;
+    in-out property <string> dialog-field1;
+    in-out property <string> dialog-field2;
+
+    // ── Einstellungen (Audiogeräte) ──
+    in-out property <bool> settings-visible: false;
+    in property <[string]> input-devices;
+    in property <[string]> output-devices;
+    in-out property <string> selected-input;
+    in-out property <string> selected-output;
+
+    // ── Callbacks Richtung Rust ──
+    callback request-connect();
+    callback menu-action(string);
+    callback send-chat();
+    callback volume-changed(float);
+    callback dialog-accepted(string, string, string);
+    callback settings-accepted(string, string);
+
+    public function show-dialog(mode: string, title: string, text: string,
+                                label1: string, show1: bool,
+                                label2: string, show2: bool,
+                                password: bool) {
+        root.dialog-mode = mode;
+        root.dialog-title = title;
+        root.dialog-text = text;
+        root.dialog-label1 = label1;
+        root.dialog-show1 = show1;
+        root.dialog-label2 = label2;
+        root.dialog-show2 = show2;
+        root.dialog-password = password;
+        root.dialog-field1 = "";
+        root.dialog-field2 = "";
+        root.dialog-visible = true;
+    }
+
+    function shortcut(letter: string) -> string {
+        return " (" + root.mod-name + "+" + letter + ")";
+    }
+
+    MenuBar {
+        Menu {
+            title: "Server";
+            MenuItem {
+                title: root.active-view == 0 ? "Verbinden" : "Verbindung trennen";
+                activated => {
+                    if (root.active-view == 0) { root.request-connect(); }
+                    else { root.menu-action("disconnect"); }
+                }
+            }
+            MenuItem {
+                title: "Einstellungen…";
+                activated => { root.menu-action("settings"); }
+            }
+            MenuItem {
+                title: "Beenden" + shortcut("Q");
+                activated => { root.menu-action("quit"); }
+            }
+        }
+        Menu {
+            title: "Audio";
+            MenuItem {
+                title: (root.muted ? "Mikrofon einschalten" : "Mikrofon stummschalten") + shortcut("M");
+                activated => { root.menu-action("toggle-mute"); }
+            }
+            MenuItem {
+                title: (root.deafened ? "Ton einschalten" : "Ton ausschalten (taub)") + shortcut("D");
+                activated => { root.menu-action("toggle-deafen"); }
+            }
+            MenuItem {
+                title: (root.loopback ? "Loopback ausschalten" : "Loopback einschalten") + shortcut("L");
+                activated => { root.menu-action("toggle-loopback"); }
+            }
+            MenuItem {
+                title: "Audiodatei streamen…" + shortcut("S");
+                activated => { root.menu-action("stream-file"); }
+            }
+            MenuItem {
+                title: "Streaming stoppen (" + root.mod-name + "+Umschalt+S)";
+                activated => { root.menu-action("stop-stream"); }
+            }
+        }
+        Menu {
+            title: "Räume";
+            MenuItem {
+                title: "Ausgewähltem Raum beitreten" + shortcut("J");
+                activated => { root.menu-action("join-room"); }
+            }
+            MenuItem {
+                title: "Aktuellen Raum verlassen";
+                activated => { root.menu-action("leave-room"); }
+            }
+            MenuItem {
+                title: "Raum erstellen…";
+                activated => { root.menu-action("create-room"); }
+            }
+            MenuItem {
+                title: "Unterraum im ausgewählten Raum erstellen…";
+                activated => { root.menu-action("create-subroom"); }
+            }
+            MenuItem {
+                title: "Ausgewählten Raum löschen…";
+                activated => { root.menu-action("delete-room"); }
+            }
+        }
+        Menu {
+            title: "Dateien";
+            MenuItem {
+                title: "Datei in aktuellen Raum hochladen…" + shortcut("U");
+                activated => { root.menu-action("upload-file"); }
+            }
+            MenuItem {
+                title: "Ausgewählte Datei herunterladen…" + shortcut("H");
+                activated => { root.menu-action("download-file"); }
+            }
+            MenuItem {
+                title: "Dateiliste aktualisieren" + shortcut("R");
+                activated => { root.menu-action("refresh-files"); }
+            }
+        }
+        Menu {
+            title: "Verwaltung";
+            MenuItem {
+                title: "Privatnachricht an ausgewählten Nutzer senden" + shortcut("P");
+                activated => { root.menu-action("private-message"); }
+            }
+            MenuItem {
+                title: "Ausgewählten Nutzer kicken…";
+                activated => { root.menu-action("kick"); }
+            }
+            MenuItem {
+                title: "Ausgewählten Nutzer bannen…";
+                activated => { root.menu-action("ban"); }
+            }
+            MenuItem {
+                title: "Ausgewählten Nutzer in ausgewählten Raum verschieben";
+                activated => { root.menu-action("move-user"); }
+            }
+            MenuItem {
+                title: "Ausgewählten Nutzer stummschalten (Admin)";
+                activated => { root.menu-action("admin-mute"); }
+            }
+            MenuItem {
+                title: "Stummschaltung des Nutzers aufheben (Admin)";
+                activated => { root.menu-action("admin-unmute"); }
+            }
+            MenuItem {
+                title: "Servernachricht senden…";
+                activated => { root.menu-action("server-message"); }
+            }
+        }
+        Menu {
+            title: "Hilfe";
+            MenuItem {
+                title: "Kurztasten anzeigen (F1)";
+                activated => { root.menu-action("help"); }
+            }
+        }
+    }
+
+    VerticalBox {
+        // ════════ Verbindungsansicht ════════
+        if root.active-view == 0 : VerticalBox {
+            alignment: start;
+            GroupBox {
+                title: "Mit Server verbinden";
+                VerticalBox {
+                    alignment: start;
+                    HorizontalBox {
+                        Text { text: "Host:"; vertical-alignment: center; min-width: 140px; }
+                        host-edit := LineEdit {
+                            text <=> root.conn-host;
+                            placeholder-text: "z. B. voice.example.org";
+                            accessible-label: "Server-Host";
+                        }
+                    }
+                    HorizontalBox {
+                        Text { text: "Port:"; vertical-alignment: center; min-width: 140px; }
+                        LineEdit {
+                            text <=> root.conn-port;
+                            placeholder-text: "9500";
+                            accessible-label: "Server-Port";
+                        }
+                    }
+                    CheckBox {
+                        text: "SSL/TLS verwenden";
+                        checked <=> root.conn-ssl;
+                        accessible-label: "SSL/TLS verwenden";
+                    }
+                    HorizontalBox {
+                        Text { text: "Benutzername:"; vertical-alignment: center; min-width: 140px; }
+                        LineEdit {
+                            text <=> root.conn-username;
+                            accessible-label: "Benutzername";
+                        }
+                    }
+                    HorizontalBox {
+                        Text { text: "Passwort:"; vertical-alignment: center; min-width: 140px; }
+                        LineEdit {
+                            text <=> root.conn-password;
+                            input-type: InputType.password;
+                            accessible-label: "Passwort";
+                            accepted => { root.request-connect(); }
+                        }
+                    }
+                    HorizontalBox {
+                        Text { text: "Spitzname:"; vertical-alignment: center; min-width: 140px; }
+                        LineEdit {
+                            text <=> root.conn-nickname;
+                            placeholder-text: "(wie Benutzername)";
+                            accessible-label: "Spitzname";
+                            accepted => { root.request-connect(); }
+                        }
+                    }
+                    Button {
+                        text: root.connecting ? "Verbinde…" : "Verbinden";
+                        enabled: !root.connecting;
+                        primary: true;
+                        accessible-label: "Mit Server verbinden";
+                        clicked => { root.request-connect(); }
+                    }
+                }
+            }
+        }
+
+        // ════════ Hauptansicht ════════
+        if root.active-view == 1 : main-scope := FocusScope {
+            key-pressed(event) => {
+                if (root.dialog-visible || root.settings-visible) {
+                    if (event.text == Key.Escape) {
+                        root.dialog-visible = false;
+                        root.settings-visible = false;
+                        return accept;
+                    }
+                    return reject;
+                }
+                if (event.modifiers.control || event.modifiers.meta) {
+                    if (event.text == "m" || event.text == "M") {
+                        root.menu-action("toggle-mute");
+                        return accept;
+                    }
+                    if (event.text == "d" || event.text == "D") {
+                        root.menu-action("toggle-deafen");
+                        return accept;
+                    }
+                    if (event.text == "l" || event.text == "L") {
+                        root.menu-action("toggle-loopback");
+                        return accept;
+                    }
+                    if ((event.text == "s" || event.text == "S") && event.modifiers.shift) {
+                        root.menu-action("stop-stream");
+                        return accept;
+                    }
+                    if (event.text == "s" || event.text == "S") {
+                        root.menu-action("stream-file");
+                        return accept;
+                    }
+                    if (event.text == "j" || event.text == "J") {
+                        root.menu-action("join-room");
+                        return accept;
+                    }
+                    if (event.text == "u" || event.text == "U") {
+                        root.menu-action("upload-file");
+                        return accept;
+                    }
+                    if (event.text == "h" || event.text == "H") {
+                        root.menu-action("download-file");
+                        return accept;
+                    }
+                    if (event.text == "r" || event.text == "R") {
+                        root.menu-action("refresh-files");
+                        return accept;
+                    }
+                    if (event.text == "p" || event.text == "P") {
+                        root.menu-action("private-message");
+                        return accept;
+                    }
+                    if (event.text == "q" || event.text == "Q") {
+                        root.menu-action("quit");
+                        return accept;
+                    }
+                }
+                if (event.text == Key.F1) {
+                    root.menu-action("help");
+                    return accept;
+                }
+                return reject;
+            }
+
+            HorizontalBox {
+                // ── Linke Spalte: Räume und Nutzer ──
+                VerticalBox {
+                    width: 260px;
+                    Text {
+                        text: "Räume und Unterräume";
+                        accessible-role: AccessibleRole.none;
+                    }
+                    rooms-list := StandardListView {
+                        model: root.rooms-model;
+                        current-item <=> root.rooms-current;
+                        accessible-label: "Räume und Unterräume";
+                        vertical-stretch: 1;
+                    }
+                    Button {
+                        text: "Beitreten";
+                        accessible-label: "Ausgewähltem Raum beitreten";
+                        clicked => { root.menu-action("join-room"); }
+                    }
+                    Text {
+                        text: "Nutzer in: " + root.current-room-name;
+                        accessible-role: AccessibleRole.none;
+                    }
+                    users-list := StandardListView {
+                        model: root.users-model;
+                        current-item <=> root.users-current;
+                        accessible-label: "Nutzer im aktuellen Raum";
+                        vertical-stretch: 1;
+                    }
+                }
+
+                // ── Mitte: Chat ──
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Chatverlauf";
+                        accessible-role: AccessibleRole.none;
+                    }
+                    chat-view := TextEdit {
+                        text: root.chat-text;
+                        read-only: true;
+                        wrap: TextWrap.word-wrap;
+                        accessible-label: "Chatverlauf";
+                        vertical-stretch: 1;
+                        changed text => {
+                            // Cursor ans Ende setzen, damit neue Nachrichten sichtbar bleiben
+                            self.set-selection-offsets(root.chat-len, root.chat-len);
+                        }
+                    }
+                    HorizontalBox {
+                        chat-edit := LineEdit {
+                            text <=> root.chat-input;
+                            placeholder-text: "Nachricht eingeben…";
+                            accessible-label: "Chatnachricht eingeben";
+                            horizontal-stretch: 1;
+                            accepted => { root.send-chat(); }
+                        }
+                        Button {
+                            text: "Senden";
+                            accessible-label: "Nachricht senden";
+                            clicked => { root.send-chat(); }
+                        }
+                    }
+                }
+
+                // ── Rechte Spalte: Lautstärke und Dateien ──
+                VerticalBox {
+                    width: 260px;
+                    Text {
+                        text: "Lautstärke: " + Math.round(root.volume) + " %";
+                        accessible-role: AccessibleRole.none;
+                    }
+                    volume-slider := Slider {
+                        minimum: 0;
+                        maximum: 100;
+                        value <=> root.volume;
+                        accessible-label: "Wiedergabe-Lautstärke in Prozent";
+                        changed(v) => { root.volume-changed(v); }
+                    }
+                    Text {
+                        text: "Dateien im aktuellen Raum";
+                        accessible-role: AccessibleRole.none;
+                    }
+                    files-list := StandardListView {
+                        model: root.files-model;
+                        current-item <=> root.files-current;
+                        accessible-label: "Dateien im aktuellen Raum";
+                        vertical-stretch: 1;
+                    }
+                    HorizontalBox {
+                        Button {
+                            text: "Herunterladen";
+                            accessible-label: "Ausgewählte Datei herunterladen";
+                            clicked => { root.menu-action("download-file"); }
+                        }
+                        Button {
+                            text: "Aktualisieren";
+                            accessible-label: "Dateiliste aktualisieren";
+                            clicked => { root.menu-action("refresh-files"); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Statuszeile ──
+        status-bar := Text {
+            text: root.status-text;
+            accessible-label: "Status: " + root.status-text;
+        }
+    }
+
+    // ════════ Generischer Dialog ════════
+    if root.dialog-visible : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        // Klicks hinter dem Dialog abfangen
+        TouchArea { }
+
+        dialog-panel := Rectangle {
+            background: #2b2b2b;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #888;
+            width: min(root.width - 80px, 480px);
+            height: dialog-layout.preferred-height + 40px;
+
+            dialog-layout := VerticalBox {
+                x: 20px;
+                y: 20px;
+                width: parent.width - 40px;
+                spacing: 8px;
+
+                Text {
+                    text: root.dialog-title;
+                    font-size: 16px;
+                    font-weight: 700;
+                    accessible-label: "Dialog: " + root.dialog-title;
+                }
+                if root.dialog-text != "" : Text {
+                    text: root.dialog-text;
+                    wrap: word-wrap;
+                }
+                if root.dialog-show1 : HorizontalBox {
+                    Text { text: root.dialog-label1; vertical-alignment: center; min-width: 110px; }
+                    dlg-field1 := LineEdit {
+                        text <=> root.dialog-field1;
+                        input-type: root.dialog-password ? InputType.password : InputType.text;
+                        accessible-label: root.dialog-label1;
+                        init => { self.focus(); }
+                        accepted => {
+                            if (!root.dialog-show2) {
+                                root.dialog-visible = false;
+                                root.dialog-accepted(root.dialog-mode, root.dialog-field1, root.dialog-field2);
+                            }
+                        }
+                    }
+                }
+                if root.dialog-show2 : HorizontalBox {
+                    Text { text: root.dialog-label2; vertical-alignment: center; min-width: 110px; }
+                    LineEdit {
+                        text <=> root.dialog-field2;
+                        accessible-label: root.dialog-label2;
+                        accepted => {
+                            root.dialog-visible = false;
+                            root.dialog-accepted(root.dialog-mode, root.dialog-field1, root.dialog-field2);
+                        }
+                    }
+                }
+                HorizontalBox {
+                    alignment: end;
+                    Button {
+                        text: "Abbrechen";
+                        accessible-label: "Dialog abbrechen";
+                        clicked => { root.dialog-visible = false; }
+                    }
+                    Button {
+                        text: "OK";
+                        primary: true;
+                        accessible-label: "Dialog bestätigen";
+                        clicked => {
+                            root.dialog-visible = false;
+                            root.dialog-accepted(root.dialog-mode, root.dialog-field1, root.dialog-field2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ════════ Einstellungen: Audiogeräte ════════
+    if root.settings-visible : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        TouchArea { }
+
+        Rectangle {
+            background: #2b2b2b;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #888;
+            width: min(root.width - 80px, 520px);
+            height: settings-layout.preferred-height + 40px;
+
+            settings-layout := VerticalBox {
+                x: 20px;
+                y: 20px;
+                width: parent.width - 40px;
+                spacing: 8px;
+
+                Text {
+                    text: "Einstellungen — Audiogeräte";
+                    font-size: 16px;
+                    font-weight: 700;
+                    accessible-label: "Dialog: Einstellungen, Audiogeräte";
+                }
+                HorizontalBox {
+                    Text { text: "Eingabegerät:"; vertical-alignment: center; min-width: 120px; }
+                    input-combo := ComboBox {
+                        model: root.input-devices;
+                        current-value <=> root.selected-input;
+                        accessible-label: "Audio-Eingabegerät";
+                        init => { self.focus(); }
+                    }
+                }
+                HorizontalBox {
+                    Text { text: "Ausgabegerät:"; vertical-alignment: center; min-width: 120px; }
+                    ComboBox {
+                        model: root.output-devices;
+                        current-value <=> root.selected-output;
+                        accessible-label: "Audio-Ausgabegerät";
+                    }
+                }
+                Text {
+                    text: "Geräteänderungen gelten ab der nächsten Verbindung.";
+                    wrap: word-wrap;
+                }
+                HorizontalBox {
+                    alignment: end;
+                    Button {
+                        text: "Abbrechen";
+                        accessible-label: "Einstellungen abbrechen";
+                        clicked => { root.settings-visible = false; }
+                    }
+                    Button {
+                        text: "Speichern";
+                        primary: true;
+                        accessible-label: "Einstellungen speichern";
+                        clicked => {
+                            root.settings-visible = false;
+                            root.settings-accepted(root.selected-input, root.selected-output);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
