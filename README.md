@@ -20,7 +20,9 @@ Aktionen sind über Kurztasten erreichbar.
 - Hierarchische Räume und Unterräume, optional mit Passwort und Nutzerlimit
 - Räume und Nutzer als **plattformnativer Baum** (wxTreeCtrl auf Windows,
   DataViewTreeCtrl auf macOS/Linux) — auf jeder Plattform screenreader-tauglich
-- Audiogeräte (Mikrofon/Lautsprecher) im Client wählbar
+- **Audio-Qualität pro Raum** (Samplerate, Bittiefe, Mono/Stereo) im
+  Raum-erstellen/-bearbeiten-Dialog; beim Beitritt übernimmt der Client sie
+- Audiogeräte (Mikrofon/Lautsprecher) im Client wählbar (*Audio → Audio-Einstellungen*)
 - Raum-Chat, Privatnachrichten, Server-Durchsagen
 - Datei-Upload/-Download pro Raum
 - Audiodateien in einen Raum streamen (MP3, WAV, FLAC, OGG, M4A, …)

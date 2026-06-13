@@ -41,6 +41,7 @@ pub const ID_STREAM_FILE: i32 = ID_HIGHEST + 5;
 pub const ID_STOP_STREAM: i32 = ID_HIGHEST + 6;
 pub const ID_PAUSE_STREAM: i32 = ID_HIGHEST + 30;
 pub const ID_AUDIO_SETTINGS: i32 = ID_HIGHEST + 31;
+pub const ID_EDIT_ROOM: i32 = ID_HIGHEST + 32;
 pub const ID_JOIN_ROOM: i32 = ID_HIGHEST + 7;
 pub const ID_LEAVE_ROOM: i32 = ID_HIGHEST + 8;
 pub const ID_CREATE_ROOM: i32 = ID_HIGHEST + 9;
@@ -346,6 +347,7 @@ fn build_menu_bar(frame: &Frame) {
         .append_item(ID_LEAVE_ROOM, "Raum &verlassen", "Aktuellen Raum verlassen")
         .append_item(ID_CREATE_ROOM, "Raum &erstellen…", "Neuen Raum erstellen")
         .append_item(ID_CREATE_SUBROOM, "&Unterraum erstellen…", "Unterraum im ausgewählten Raum erstellen")
+        .append_item(ID_EDIT_ROOM, "Raum &bearbeiten…", "Ausgewählten Raum bearbeiten (Name, Passwort, Audio)")
         .append_item(ID_DELETE_ROOM, "Raum &löschen…", "Ausgewählten Raum löschen")
         .build();
 

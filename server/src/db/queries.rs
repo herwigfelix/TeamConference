@@ -19,6 +19,9 @@ pub struct DbRoom {
     pub description: String,
     pub is_default: bool,
     pub sort_order: i64,
+    pub sample_rate: i64,
+    pub bit_depth: i64,
+    pub channels: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +209,7 @@ pub async fn create_ban(
 pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
     conn.call(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order
+            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels
              FROM rooms ORDER BY sort_order, name"
         )?;
         let rooms = stmt.query_map([], |row| {
@@ -219,6 +222,9 @@ pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
                 description: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 is_default: row.get(6)?,
                 sort_order: row.get(7)?,
+                sample_rate: row.get(8)?,
+                bit_depth: row.get(9)?,
+                channels: row.get(10)?,
             })
         })?.filter_map(|r| r.ok()).collect();
         Ok(rooms)
@@ -233,12 +239,16 @@ pub async fn create_room(
     parent_id: Option<i64>,
     password: Option<String>,
     max_users: i64,
+    sample_rate: i64,
+    bit_depth: i64,
+    channels: i64,
 ) -> anyhow::Result<i64> {
     let password_hash = password.map(|p| hash_password(&p)).transpose()?;
     conn.call(move |conn| {
         conn.execute(
-            "INSERT INTO rooms (name, parent_id, password_hash, max_users) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![name, parent_id, password_hash, max_users],
+            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels],
         )?;
         Ok(conn.last_insert_rowid())
     })
@@ -255,12 +265,16 @@ pub async fn delete_room(conn: &Connection, room_id: i64) -> anyhow::Result<()> 
     .map_err(|e| anyhow::anyhow!("Failed to delete room: {}", e))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_room(
     conn: &Connection,
     room_id: i64,
     name: Option<String>,
     password: Option<Option<String>>,
     max_users: Option<i64>,
+    sample_rate: Option<i64>,
+    bit_depth: Option<i64>,
+    channels: Option<i64>,
 ) -> anyhow::Result<()> {
     let password_hash = match password {
         Some(Some(p)) => Some(Some(hash_password(&p)?)),
@@ -276,6 +290,15 @@ pub async fn update_room(
         }
         if let Some(mu) = max_users {
             conn.execute("UPDATE rooms SET max_users = ?1 WHERE id = ?2", rusqlite::params![mu, room_id])?;
+        }
+        if let Some(sr) = sample_rate {
+            conn.execute("UPDATE rooms SET sample_rate = ?1 WHERE id = ?2", rusqlite::params![sr, room_id])?;
+        }
+        if let Some(bd) = bit_depth {
+            conn.execute("UPDATE rooms SET bit_depth = ?1 WHERE id = ?2", rusqlite::params![bd, room_id])?;
+        }
+        if let Some(ch) = channels {
+            conn.execute("UPDATE rooms SET channels = ?1 WHERE id = ?2", rusqlite::params![ch, room_id])?;
         }
         Ok(())
     })

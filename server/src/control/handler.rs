@@ -224,6 +224,9 @@ pub async fn handle_connection<S>(
                     req.parent_id,
                     req.password,
                     req.max_users.unwrap_or(0),
+                    req.sample_rate.unwrap_or(48000),
+                    req.bit_depth.unwrap_or(16),
+                    req.channels.unwrap_or(1),
                 ).await {
                     Ok(_) => {
                         // Broadcast updated room list to all
@@ -291,7 +294,7 @@ pub async fn handle_connection<S>(
                     }
                 };
 
-                match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users).await {
+                match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users, req.sample_rate, req.bit_depth, req.channels).await {
                     Ok(()) => {
                         let room_list = state.rooms.get_room_list().await.unwrap_or_default();
                         let list_msg = Message::new("room_list", serde_json::json!({

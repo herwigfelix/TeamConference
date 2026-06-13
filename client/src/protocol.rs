@@ -54,6 +54,12 @@ pub struct RoomInfo {
     pub description: String,
     #[serde(default)]
     pub has_password: bool,
+    #[serde(default)]
+    pub sample_rate: i64,
+    #[serde(default)]
+    pub bit_depth: i64,
+    #[serde(default)]
+    pub channels: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

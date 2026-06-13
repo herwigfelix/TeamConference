@@ -311,14 +311,29 @@ fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
     if !send_or_status(ctx, Message::new("room_join", data)) {
         return;
     }
+    // Audio-Qualität wird vom Raum bestimmt: Werte aus der RoomInfo übernehmen.
     let (sr, bd, ch) = {
         let mut inner = ctx.app.inner.lock();
         inner.current_room_id = Some(room_id);
-        (
-            inner.audio_config.sample_rate,
-            inner.audio_config.bit_depth,
-            inner.audio_config.channels,
-        )
+        let (mut sr, mut bd, mut ch) = inner
+            .rooms
+            .iter()
+            .find(|r| r.id == room_id)
+            .map(|r| (r.sample_rate, r.bit_depth, r.channels))
+            .unwrap_or((48000, 16, 1));
+        if sr <= 0 {
+            sr = 48000;
+        }
+        if bd <= 0 {
+            bd = 16;
+        }
+        if ch <= 0 {
+            ch = 1;
+        }
+        inner.audio_config.sample_rate = sr as u32;
+        inner.audio_config.bit_depth = bd as u8;
+        inner.audio_config.channels = ch as u8;
+        (sr, bd, ch)
     };
     let _ = ctx.app.send_ws(Message::new(
         "audio_config",
@@ -383,23 +398,198 @@ fn leave_room(ctx: &Ctx) {
     }
 }
 
-fn create_room(ctx: &Ctx, parent: Option<i64>) {
-    let title = if parent.is_some() {
-        "Unterraum erstellen"
-    } else {
-        "Raum erstellen"
+const RATES: [i64; 5] = [48000, 44100, 24000, 16000, 8000];
+const DEPTHS: [i64; 3] = [16, 24, 32];
+
+/// Was der Raum-Dialog erstellt/bearbeitet.
+enum RoomMode {
+    Create { parent: Option<i64> },
+    Edit { room_id: i64 },
+}
+
+/// Gemeinsamer Dialog zum Erstellen und Bearbeiten eines Raums:
+/// Name, Passwort, max. Nutzer und die raumweite Audio-Qualität.
+fn room_dialog(ctx: &Ctx, mode: RoomMode) {
+    // Vorbelegung bei Bearbeiten
+    let (title, name0, max0, sr0, bd0, ch0, had_pw) = match &mode {
+        RoomMode::Create { parent } => {
+            let t = if parent.is_some() {
+                "Unterraum erstellen"
+            } else {
+                "Raum erstellen"
+            };
+            (t, String::new(), 0i64, 48000i64, 16i64, 1i64, false)
+        }
+        RoomMode::Edit { room_id } => {
+            let inner = ctx.app.inner.lock();
+            match inner.rooms.iter().find(|r| r.id == *room_id) {
+                Some(r) => (
+                    "Raum bearbeiten",
+                    r.name.clone(),
+                    r.max_users,
+                    if r.sample_rate > 0 { r.sample_rate } else { 48000 },
+                    if r.bit_depth > 0 { r.bit_depth } else { 16 },
+                    if r.channels > 0 { r.channels } else { 1 },
+                    r.has_password,
+                ),
+                None => ("Raum bearbeiten", String::new(), 0, 48000, 16, 1, false),
+            }
+        }
     };
-    let Some(name) = ask_text(ctx, "Name des Raums:", title, "") else {
+
+    let dialog = Dialog::builder(&ctx.ui.frame, title).build();
+    let v = BoxSizer::builder(Orientation::Vertical).build();
+    // generisch (Sizer::add braucht Sized), daher freie fn statt Closure
+    fn add_row<W: WxWidget>(dialog: &Dialog, v: &BoxSizer, label: &str, ctrl: &W) {
+        let r = BoxSizer::builder(Orientation::Horizontal).build();
+        r.add(
+            &StaticText::builder(dialog).with_label(label).build(),
+            0,
+            SizerFlag::AlignCenterVertical | SizerFlag::All,
+            6,
+        );
+        r.add(ctrl, 1, SizerFlag::Expand | SizerFlag::All, 6);
+        v.add_sizer(&r, 0, SizerFlag::Expand, 0);
+    }
+
+    let name_in = TextCtrl::builder(&dialog).build();
+    name_in.set_value(&name0);
+    ui::set_a11y_name(&name_in, "Raumname");
+    add_row(&dialog, &v, "Name:", &name_in);
+
+    // Passwort: Checkbox steuert, ob es gesetzt/geändert wird
+    let pw_chk = CheckBox::builder(&dialog)
+        .with_label("Passwort setzen/ändern")
+        .build();
+    pw_chk.set_value(false);
+    ui::set_a11y_name(&pw_chk, "Passwort setzen oder ändern");
+    v.add(&pw_chk, 0, SizerFlag::All, 6);
+    let pw_in = TextCtrl::builder(&dialog)
+        .with_style(TextCtrlStyle::Password)
+        .build();
+    ui::set_a11y_name(&pw_in, "Passwort");
+    add_row(
+        &dialog,
+        &v,
+        if had_pw {
+            "Passwort (leer = entfernen):"
+        } else {
+            "Passwort:"
+        },
+        &pw_in,
+    );
+
+    let max_in = TextCtrl::builder(&dialog).build();
+    max_in.set_value(&max0.to_string());
+    ui::set_a11y_name(&max_in, "Maximale Nutzerzahl, 0 = unbegrenzt");
+    add_row(&dialog, &v, "Max. Nutzer (0 = ∞):", &max_in);
+
+    let rate_choice = Choice::builder(&dialog).build();
+    for r in RATES {
+        rate_choice.append(&r.to_string());
+    }
+    rate_choice.set_selection(RATES.iter().position(|&r| r == sr0).unwrap_or(0) as u32);
+    ui::set_a11y_name(&rate_choice, "Samplerate in Hertz");
+    add_row(&dialog, &v, "Samplerate (Hz):", &rate_choice);
+
+    let depth_choice = Choice::builder(&dialog).build();
+    for d in DEPTHS {
+        depth_choice.append(&d.to_string());
+    }
+    depth_choice.set_selection(DEPTHS.iter().position(|&d| d == bd0).unwrap_or(0) as u32);
+    ui::set_a11y_name(&depth_choice, "Bittiefe");
+    add_row(&dialog, &v, "Bittiefe (Bit):", &depth_choice);
+
+    let ch_choice = Choice::builder(&dialog).build();
+    ch_choice.append("Mono");
+    ch_choice.append("Stereo");
+    ch_choice.set_selection(if ch0 >= 2 { 1 } else { 0 });
+    ui::set_a11y_name(&ch_choice, "Kanäle Mono oder Stereo");
+    add_row(&dialog, &v, "Kanäle:", &ch_choice);
+
+    let btns = BoxSizer::builder(Orientation::Horizontal).build();
+    let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
+    let ok = Button::builder(&dialog).with_label("Speichern").build();
+    {
+        let d = dialog;
+        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
+    }
+    {
+        let d = dialog;
+        ok.on_click(move |_| d.end_modal(ID_OK));
+    }
+    btns.add(&cancel, 0, SizerFlag::All, 6);
+    btns.add(&ok, 0, SizerFlag::All, 6);
+    v.add_sizer(&btns, 0, SizerFlag::AlignRight, 0);
+
+    dialog.set_sizer(v, true);
+    dialog.fit();
+
+    let result = dialog.show_modal();
+    if result != ID_OK {
+        dialog.destroy();
         return;
-    };
-    let mut data = serde_json::json!({ "name": name });
-    if let Some(pid) = parent {
-        data["parent_id"] = serde_json::json!(pid);
     }
-    if let Some(pw) = ask_text(ctx, "Passwort (leer = keins):", title, "") {
-        data["password"] = serde_json::Value::String(pw);
+
+    let name = name_in.get_value().trim().to_string();
+    let max_users: i64 = max_in.get_value().trim().parse().unwrap_or(0);
+    let sample_rate = RATES[rate_choice.get_selection().unwrap_or(0) as usize];
+    let bit_depth = DEPTHS[depth_choice.get_selection().unwrap_or(0) as usize];
+    let channels = if ch_choice.get_selection().unwrap_or(0) == 1 { 2 } else { 1 };
+    let pw_change = pw_chk.is_checked();
+    let pw_value = pw_in.get_value();
+    dialog.destroy();
+
+    if name.is_empty() {
+        notify(ctx, "Raumname darf nicht leer sein.", "Raum");
+        return;
     }
-    send_or_status(ctx, Message::new("room_create", data));
+
+    match mode {
+        RoomMode::Create { parent } => {
+            let mut data = serde_json::json!({
+                "name": name,
+                "max_users": max_users,
+                "sample_rate": sample_rate,
+                "bit_depth": bit_depth,
+                "channels": channels,
+            });
+            if let Some(pid) = parent {
+                data["parent_id"] = serde_json::json!(pid);
+            }
+            if pw_change && !pw_value.is_empty() {
+                data["password"] = serde_json::Value::String(pw_value);
+            }
+            send_or_status(ctx, Message::new("room_create", data));
+        }
+        RoomMode::Edit { room_id } => {
+            let mut data = serde_json::json!({
+                "room_id": room_id,
+                "name": name,
+                "max_users": max_users,
+                "sample_rate": sample_rate,
+                "bit_depth": bit_depth,
+                "channels": channels,
+            });
+            // Passwort nur anfassen, wenn die Checkbox aktiv ist:
+            // leeres Feld = entfernen (null), sonst setzen.
+            if pw_change {
+                data["password"] = if pw_value.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(pw_value)
+                };
+            }
+            send_or_status(ctx, Message::new("room_update", data));
+        }
+    }
+}
+
+fn edit_selected_room(ctx: &Ctx) {
+    match selected_room(ctx) {
+        Some(room_id) => room_dialog(ctx, RoomMode::Edit { room_id }),
+        None => notify(ctx, "Bitte zuerst einen Raum auswählen.", "Raum bearbeiten"),
+    }
 }
 
 fn delete_room(ctx: &Ctx) {
@@ -1019,14 +1209,15 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         ui::ID_STOP_STREAM => stop_stream(ctx),
         ui::ID_JOIN_ROOM => join_selected(ctx),
         ui::ID_LEAVE_ROOM => leave_room(ctx),
-        ui::ID_CREATE_ROOM => create_room(ctx, None),
+        ui::ID_CREATE_ROOM => room_dialog(ctx, RoomMode::Create { parent: None }),
         ui::ID_CREATE_SUBROOM => {
             if let Some(parent) = selected_room(ctx) {
-                create_room(ctx, Some(parent));
+                room_dialog(ctx, RoomMode::Create { parent: Some(parent) });
             } else {
-                status(ctx, "Bitte zuerst den übergeordneten Raum auswählen.");
+                notify(ctx, "Bitte zuerst den übergeordneten Raum auswählen.", "Unterraum");
             }
         }
+        ui::ID_EDIT_ROOM => edit_selected_room(ctx),
         ui::ID_DELETE_ROOM => delete_room(ctx),
         ui::ID_UPLOAD => upload_file(ctx),
         ui::ID_DOWNLOAD => download_file(ctx),

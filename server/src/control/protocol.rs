@@ -66,6 +66,12 @@ pub struct RoomInfo {
     pub description: String,
     #[serde(default)]
     pub has_password: bool,
+    #[serde(default)]
+    pub sample_rate: i64,
+    #[serde(default)]
+    pub bit_depth: i64,
+    #[serde(default)]
+    pub channels: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +107,12 @@ pub struct RoomCreate {
     pub password: Option<String>,
     #[serde(default)]
     pub max_users: Option<i64>,
+    #[serde(default)]
+    pub sample_rate: Option<i64>,
+    #[serde(default)]
+    pub bit_depth: Option<i64>,
+    #[serde(default)]
+    pub channels: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +129,12 @@ pub struct RoomUpdate {
     pub password: Option<Option<String>>,
     #[serde(default)]
     pub max_users: Option<i64>,
+    #[serde(default)]
+    pub sample_rate: Option<i64>,
+    #[serde(default)]
+    pub bit_depth: Option<i64>,
+    #[serde(default)]
+    pub channels: Option<i64>,
 }
 
 // Chat

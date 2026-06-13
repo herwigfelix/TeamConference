@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS rooms (
     max_users INTEGER DEFAULT 0,
     description TEXT DEFAULT '',
     is_default BOOLEAN DEFAULT 0,
-    sort_order INTEGER DEFAULT 0
+    sort_order INTEGER DEFAULT 0,
+    sample_rate INTEGER NOT NULL DEFAULT 48000,
+    bit_depth INTEGER NOT NULL DEFAULT 16,
+    channels INTEGER NOT NULL DEFAULT 1
 );
 
 -- Bans

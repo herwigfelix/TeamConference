@@ -28,6 +28,9 @@ impl RoomManager {
                 max_users: r.max_users,
                 description: r.description,
                 has_password: r.password_hash.is_some(),
+                sample_rate: r.sample_rate,
+                bit_depth: r.bit_depth,
+                channels: r.channels,
             });
         }
 
@@ -83,14 +86,18 @@ impl RoomManager {
         self.users.set_room(user_id, None).await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_room(
         &self,
         name: String,
         parent_id: Option<i64>,
         password: Option<String>,
         max_users: i64,
+        sample_rate: i64,
+        bit_depth: i64,
+        channels: i64,
     ) -> anyhow::Result<i64> {
-        queries::create_room(&self.db, name, parent_id, password, max_users).await
+        queries::create_room(&self.db, name, parent_id, password, max_users, sample_rate, bit_depth, channels).await
     }
 
     pub async fn delete_room(&self, room_id: i64) -> anyhow::Result<()> {
@@ -103,14 +110,18 @@ impl RoomManager {
         queries::delete_room(&self.db, room_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_room(
         &self,
         room_id: i64,
         name: Option<String>,
         password: Option<Option<String>>,
         max_users: Option<i64>,
+        sample_rate: Option<i64>,
+        bit_depth: Option<i64>,
+        channels: Option<i64>,
     ) -> anyhow::Result<()> {
-        queries::update_room(&self.db, room_id, name, password, max_users).await
+        queries::update_room(&self.db, room_id, name, password, max_users, sample_rate, bit_depth, channels).await
     }
 
     pub async fn room_exists(&self, room_id: i64) -> anyhow::Result<bool> {

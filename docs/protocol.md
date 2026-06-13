@@ -31,12 +31,17 @@ TeamConference uses two channels:
 |------|-----------|------|
 | `room_join` | C→S | `{ room_id, password? }` |
 | `room_leave` | C→S | `{ room_id }` |
-| `room_list` | S→C | `{ rooms: [{ id, name, parent_id, users, ... }] }` |
+| `room_list` | S→C | `{ rooms: [{ id, name, parent_id, users, max_users, has_password, sample_rate, bit_depth, channels }] }` |
 | `room_user_joined` | S→C | `{ room_id, user: { id, nickname, ... } }` |
 | `room_user_left` | S→C | `{ room_id, user_id }` |
-| `room_create` | C→S | `{ name, parent_id?, password?, max_users? }` (Admin) |
+| `room_create` | C→S | `{ name, parent_id?, password?, max_users?, sample_rate?, bit_depth?, channels? }` (Admin) |
 | `room_delete` | C→S | `{ room_id }` (Admin) |
-| `room_update` | C→S | `{ room_id, name?, password?, max_users? }` (Admin) |
+| `room_update` | C→S | `{ room_id, name?, password?, max_users?, sample_rate?, bit_depth?, channels? }` (Admin) |
+
+Die Audio-Qualität (`sample_rate`/`bit_depth`/`channels`) ist **pro Raum**
+festgelegt; beim `room_join` übernimmt der Client diese Werte und meldet sie via
+`audio_config`. `password` bei `room_update`: weglassen = unverändert, `null` =
+entfernen, String = setzen.
 
 ### Chat
 
