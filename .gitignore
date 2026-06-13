@@ -24,8 +24,8 @@ certs/
 *.db-journal
 log.txt
 
-# Lokale Tool-Einstellungen
-.claude/settings.local.json
+# Lokale Tool-Einstellungen (CLAUDE.md im Projektstamm bleibt versioniert)
+.claude/
 
 # Environment
 .env
