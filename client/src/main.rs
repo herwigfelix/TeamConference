@@ -1,30 +1,34 @@
-//! TeamConference — barrierefreier Slint-Client.
+//! TeamConference — barrierefreier Client mit nativer wxWidgets-Oberfläche (wxDragon).
 //!
 //! Architektur:
-//!   - Slint-Eventloop auf dem Hauptthread (UI)
+//!   - wxWidgets-Eventloop auf dem Hauptthread (UI, native Accessibility)
 //!   - Tokio-Runtime im Hintergrund (WebSocket, UDP-Audio, Datei-Streaming)
-//!   - Server-Nachrichten laufen über einen Kanal und werden mit
-//!     `slint::invoke_from_event_loop` auf dem UI-Thread verarbeitet
+//!   - Server-Nachrichten laufen über einen Kanal und werden von einem
+//!     UI-Timer (alle 30 ms) auf dem Hauptthread verarbeitet. Widgets sind
+//!     nicht Send, daher überqueren nur reine Daten den Thread.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod app;
 mod audio;
 mod config;
-mod events;
+mod handlers;
 mod net;
 mod protocol;
 mod state;
+mod ui;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use slint::ComponentHandle;
-use tokio::sync::mpsc;
+use wxdragon::prelude::*;
 
+use crate::app::{Ctx, UiState};
 use crate::protocol::Message;
 use crate::state::AppState;
-
-slint::include_modules!();
+use crate::ui::Ui;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -40,141 +44,140 @@ fn main() {
         .expect("Tokio runtime");
     let rt_handle = rt.handle().clone();
 
-    let state = Arc::new(AppState::new());
-    let ui = MainWindow::new().expect("Slint window");
-
-    // Plattformabhängige Kurztasten-Beschriftung
-    ui.set_mod_name(if cfg!(target_os = "macos") { "Cmd" } else { "Strg" }.into());
-
-    // Baumansicht (Räume + Nutzer in einem Tree) nur unter Windows
-    ui.set_is_windows(state.tree_mode);
-
-    // Gespeicherte Einstellungen vorbelegen
+    let app_state = Arc::new(AppState::new());
     let cfg = config::load_config();
-    ui.set_conn_host(cfg.host.clone().into());
-    ui.set_conn_port(cfg.port.to_string().into());
-    ui.set_conn_ssl(cfg.ssl);
-    ui.set_conn_username(cfg.username.clone().into());
-    ui.set_conn_nickname(cfg.nickname.clone().into());
-    state.set_volume(cfg.volume);
-    ui.set_volume((cfg.volume * 100.0).clamp(0.0, 100.0));
+    app_state.set_volume(cfg.volume);
+    // Klon für das Speichern der Lautstärke nach dem Event-Loop (app_state wird in die Closure verschoben)
+    let app_state_exit = app_state.clone();
 
     // Kanal: Netzwerk-Tasks → UI-Thread
-    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Message>();
-    {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        let rt2 = rt_handle.clone();
-        let ev_tx2 = ev_tx.clone();
-        rt.spawn(async move {
-            while let Some(msg) = ev_rx.recv().await {
-                let weak = weak.clone();
-                let state3 = state2.clone();
-                let rt3 = rt2.clone();
-                let ev_tx3 = ev_tx2.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        events::handle(&ui, &state3, &rt3, &ev_tx3, msg);
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    let ev_rx = Rc::new(RefCell::new(ev_rx));
+
+    let _ = wxdragon::main(move |_| {
+        let frame = Frame::builder()
+            .with_title("TeamConference")
+            .with_size(Size::new(1080, 720))
+            .build();
+        frame.centre();
+
+        let ui = Ui::build(frame);
+
+        let ctx = Ctx {
+            ui,
+            app: app_state.clone(),
+            rt: rt_handle.clone(),
+            ev_tx: ev_tx.clone(),
+            st: Rc::new(RefCell::new(UiState {
+                servers: cfg.servers.clone(),
+                files: Vec::new(),
+                tree_map: std::collections::HashMap::new(),
+                registration_open: false,
+            })),
+        };
+
+        // Serverliste füllen und ggf. Formular mit erstem Eintrag vorbelegen
+        handlers::rebuild_server_list(&ctx);
+        ui.volume
+            .set_value((cfg.volume * 100.0).clamp(0.0, 100.0) as i32);
+        if let Some(first) = ctx.st.borrow().servers.first().cloned() {
+            ui.host_in.set_value(&first.host);
+            ui.port_in.set_value(&first.port.to_string());
+            ui.ssl_chk.set_value(first.ssl);
+            ui.user_in.set_value(&first.username);
+            ui.nick_in.set_value(&first.nickname);
+        }
+
+        wire_events(&ctx);
+
+        // UI-Timer: Server-Nachrichten vom Kanal abholen und verarbeiten
+        {
+            let ctx = ctx.clone();
+            let ev_rx = ev_rx.clone();
+            let timer = Timer::new(&ui.frame);
+            timer.on_tick(move |_| {
+                let mut rx = ev_rx.borrow_mut();
+                for _ in 0..50 {
+                    match rx.try_recv() {
+                        Ok(msg) => handlers::handle(&ctx, msg),
+                        Err(_) => break,
                     }
-                });
-            }
-        });
+                }
+            });
+            timer.start(30, false);
+            // Timer am Leben halten (lokale Variable würde sonst gedroppt)
+            std::mem::forget(timer);
+        }
+
+        ui.frame.show(true);
+    });
+
+    // Beim Beenden Lautstärke sichern
+    let mut saved = config::load_config();
+    saved.volume = app_state_exit.volume();
+    let _ = config::save_config(&saved);
+}
+
+/// Verbindet alle Buttons, Menüs und Listen mit ihren Aktionen.
+fn wire_events(ctx: &Ctx) {
+    let ui = ctx.ui;
+
+    // Menüleiste (ein Handler für alle IDs)
+    {
+        let ctx = ctx.clone();
+        ui.frame
+            .on_menu(move |event| actions::handle_menu(&ctx, event.get_id()));
     }
 
-    // ── UI-Callbacks ──
-
+    // Verbindungsansicht
     {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        let rt2 = rt_handle.clone();
-        let ev_tx2 = ev_tx.clone();
-        ui.on_request_connect(move || {
-            if let Some(ui) = weak.upgrade() {
-                actions::connect_clicked(&ui, &state2, &rt2, &ev_tx2);
-            }
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        let rt2 = rt_handle.clone();
-        let ev_tx2 = ev_tx.clone();
-        ui.on_menu_action(move |action| {
-            if let Some(ui) = weak.upgrade() {
-                actions::menu_action(&ui, &state2, &rt2, &ev_tx2, action.as_str());
-            }
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        ui.on_send_chat(move || {
-            if let Some(ui) = weak.upgrade() {
-                actions::send_chat(&ui, &state2);
-            }
-        });
-    }
-
-    {
-        let state2 = state.clone();
-        ui.on_volume_changed(move |value| {
-            actions::volume_changed(&state2, value);
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        ui.on_dialog_accepted(move |mode, f1, f2| {
-            if let Some(ui) = weak.upgrade() {
-                actions::dialog_accepted(&ui, &state2, mode.as_str(), f1.as_str(), f2.as_str());
-            }
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        ui.on_settings_accepted(move |input, output| {
-            if let Some(ui) = weak.upgrade() {
-                actions::settings_accepted(&ui, &state2, input.as_str(), output.as_str());
-            }
-        });
-    }
-
-    // Windows-Baumansicht: Enter beitreten, Pfeil rechts/links auf-/zuklappen
-    {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        ui.on_tree_activate(move || {
-            if let Some(ui) = weak.upgrade() {
-                actions::tree_activate(&ui, &state2);
-            }
-        });
+        let ctx = ctx.clone();
+        ui.connect_btn.on_click(move |_| actions::do_connect(&ctx));
     }
     {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        ui.on_tree_expand(move || {
-            if let Some(ui) = weak.upgrade() {
-                actions::tree_expand(&ui, &state2);
-            }
-        });
+        let ctx = ctx.clone();
+        ui.bookmark_btn.on_click(move |_| actions::save_bookmark(&ctx));
     }
     {
-        let weak = ui.as_weak();
-        let state2 = state.clone();
-        ui.on_tree_collapse(move || {
-            if let Some(ui) = weak.upgrade() {
-                actions::tree_collapse(&ui, &state2);
-            }
-        });
+        let ctx = ctx.clone();
+        ui.remove_btn.on_click(move |_| actions::remove_server(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.server_list
+            .on_selection_changed(move |_| actions::fill_form_from_server(&ctx));
     }
 
-    ui.run().expect("Slint event loop");
-
-    // Lautstärke beim Beenden sichern
-    actions::save_volume(&state);
+    // Hauptansicht
+    {
+        let ctx = ctx.clone();
+        ui.send_btn.on_click(move |_| actions::send_chat(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.chat_in.on_text_enter(move |_| actions::send_chat(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.join_btn.on_click(move |_| actions::tree_activate(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.download_btn
+            .on_click(move |_| actions::handle_menu(&ctx, ui::ID_DOWNLOAD));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.refresh_btn
+            .on_click(move |_| actions::handle_menu(&ctx, ui::ID_REFRESH_FILES));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.volume.on_slider(move |_| actions::volume_changed(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.tree
+            .on_item_activated(move |_| actions::tree_activate(&ctx));
+    }
 }

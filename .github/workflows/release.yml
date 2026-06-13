@@ -1,0 +1,78 @@
+name: Release Client
+
+# Baut den TeamConference-Client für Windows und macOS.
+# - Bei Push eines Tags v* werden die Artefakte an ein GitHub-Release gehängt.
+# - Manuell (workflow_dispatch) entstehen herunterladbare Build-Artefakte
+#   ohne Release (zum Testen).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14         # Apple Silicon (arm64)
+            label: macOS arm64
+            shell: bash
+            build: bash compile.sh
+          - os: macos-13         # Intel (x86_64)
+            label: macOS x86_64
+            shell: bash
+            build: bash compile.sh
+          - os: windows-latest   # x64, MSVC vorinstalliert
+            label: Windows x64
+            shell: cmd
+            build: compile.bat
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stable Rust mit plattformüblichem Host (auf Windows automatisch MSVC).
+      - name: Rust einrichten
+        uses: dtolnay/rust-toolchain@stable
+
+      # Compile-Caches zwischen Läufen wiederverwenden
+      - name: Cargo-Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      # CMake ist auf den GitHub-Runnern vorinstalliert; sicherheitshalber prüfen.
+      - name: CMake-Version
+        run: cmake --version
+
+      - name: Client bauen und paketieren
+        shell: ${{ matrix.shell }}
+        run: ${{ matrix.build }}
+
+      # Build-Artefakte immer hochladen (auch bei manuellem Lauf ohne Tag)
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeamConference-${{ matrix.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error
+
+      # Bei einem Tag v* die Dateien an das Release hängen
+      - name: An Release anhängen
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.dmg
+          fail_on_unmatched_files: false

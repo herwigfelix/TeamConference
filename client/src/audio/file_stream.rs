@@ -107,6 +107,8 @@ pub async fn stream_audio_file(
     // Clock-based pacing
     let stream_start = tokio::time::Instant::now();
     let mut chunks_sent: u64 = 0;
+    // Aufsummierte Pausendauer, damit das Pacing nach dem Fortsetzen stimmt
+    let mut paused_offset = tokio::time::Duration::ZERO;
 
     loop {
         if *shutdown_rx.borrow() {
@@ -160,8 +162,22 @@ pub async fn stream_audio_file(
                 return Ok(());
             }
 
+            // Pause: warten, solange pausiert; verstrichene Zeit als Offset merken,
+            // damit nach dem Fortsetzen nicht im Schwall nachgeholt wird.
+            if state.stream_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                let pause_start = tokio::time::Instant::now();
+                while state.stream_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    if *shutdown_rx.borrow() {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+                paused_offset += pause_start.elapsed();
+            }
+
             // Clock-based pacing
-            let target_time = stream_start + tokio::time::Duration::from_millis(chunks_sent * 20);
+            let target_time =
+                stream_start + tokio::time::Duration::from_millis(chunks_sent * 20) + paused_offset;
             tokio::time::sleep_until(target_time).await;
 
             let chunk: Vec<u8> = accumulator.drain(..chunk_bytes).collect();
@@ -217,7 +233,8 @@ pub async fn stream_audio_file(
     if !accumulator.is_empty() {
         accumulator.resize(chunk_bytes, 0);
 
-        let target_time = stream_start + tokio::time::Duration::from_millis(chunks_sent * 20);
+        let target_time =
+            stream_start + tokio::time::Duration::from_millis(chunks_sent * 20) + paused_offset;
         tokio::time::sleep_until(target_time).await;
 
         let pcm_samples: Vec<i16> = accumulator

@@ -1,245 +1,169 @@
-//! Aktionen, die von der UI (Menü, Kurztasten, Buttons, Dialoge) ausgelöst werden.
+//! Aktionen aus Menüs, Buttons, Tastatur und Dialogen.
 
-use std::sync::Arc;
+use wxdragon::prelude::*;
 
-use tokio::sync::mpsc;
-
-use crate::events::{
-    append_chat, rebuild_files, rebuild_room_views, rebuild_tree, refresh_status, set_status,
-};
+use crate::app::Ctx;
+use crate::config::{self, ServerEntry};
+use crate::handlers::{rebuild_files, rebuild_server_list, rebuild_tree, refresh_status};
 use crate::protocol::Message;
-use crate::state::{AppState, PendingUpload};
-use crate::MainWindow;
+use crate::state::PendingUpload;
+use crate::ui::{self, NodeRef};
 
-const HELP_TEXT: &str = "Kurztasten (Strg unter Windows/Linux, Cmd unter macOS):\n\
-Strg+M — Mikrofon stumm/laut\n\
-Strg+D — Ton aus/an (taub)\n\
-Strg+L — Loopback an/aus\n\
-Strg+S — Audiodatei streamen\n\
-Strg+Umschalt+S — Streaming stoppen\n\
-Strg+J — Ausgewähltem Raum beitreten\n\
-Strg+U — Datei hochladen\n\
-Strg+H — Ausgewählte Datei herunterladen\n\
-Strg+R — Dateiliste aktualisieren\n\
-Strg+P — Privatnachricht an ausgewählten Nutzer\n\
-Strg+Q — Beenden\n\
-Tab/Umschalt+Tab — zwischen Bedienelementen wechseln";
+// ── kleine Helfer ──
 
-fn show_dialog(
-    ui: &MainWindow,
-    mode: &str,
-    title: &str,
-    text: &str,
-    label1: &str,
-    show1: bool,
-    label2: &str,
-    show2: bool,
-    password: bool,
-) {
-    ui.invoke_show_dialog(
-        mode.into(),
-        title.into(),
-        text.into(),
-        label1.into(),
-        show1,
-        label2.into(),
-        show2,
-        password,
-    );
+fn status(ctx: &Ctx, text: &str) {
+    ctx.ui.set_status(text);
 }
 
-/// Aktuell ausgewählter Raum — im Baummodus aus dem Baumknoten
-/// (bei einem Nutzer-Knoten dessen Raum), sonst aus der Raumliste.
-fn selected_room(ui: &MainWindow, state: &Arc<AppState>) -> Option<i64> {
-    let inner = state.inner.lock();
-    if state.tree_mode {
-        let idx = ui.get_tree_current();
-        if idx < 0 {
-            return None;
-        }
-        inner.ui_tree.get(idx as usize).map(|n| n.room_id)
-    } else {
-        let idx = ui.get_rooms_current();
-        if idx < 0 {
-            return None;
-        }
-        inner.ui_room_ids.get(idx as usize).copied()
-    }
-}
-
-/// Aktuell ausgewählter Nutzer — im Baummodus nur, wenn der Baumknoten ein
-/// Nutzer ist, sonst aus der Nutzerliste.
-fn selected_user(ui: &MainWindow, state: &Arc<AppState>) -> Option<i64> {
-    use crate::state::TreeKind;
-    let inner = state.inner.lock();
-    if state.tree_mode {
-        let idx = ui.get_tree_current();
-        if idx < 0 {
-            return None;
-        }
-        match inner.ui_tree.get(idx as usize) {
-            Some(n) if n.kind == TreeKind::User => Some(n.id),
-            _ => None,
-        }
-    } else {
-        let idx = ui.get_users_current();
-        if idx < 0 {
-            return None;
-        }
-        inner.ui_user_ids.get(idx as usize).copied()
-    }
-}
-
-fn selected_file(ui: &MainWindow, state: &Arc<AppState>) -> Option<crate::protocol::FileInfo> {
-    let idx = ui.get_files_current();
-    if idx < 0 {
-        return None;
-    }
-    state.inner.lock().ui_files.get(idx as usize).cloned()
-}
-
-fn send_or_status(ui: &MainWindow, state: &Arc<AppState>, msg: Message) -> bool {
-    match state.send_ws(msg) {
+fn send_or_status(ctx: &Ctx, msg: Message) -> bool {
+    match ctx.app.send_ws(msg) {
         Ok(()) => true,
         Err(e) => {
-            set_status(ui, &e);
+            status(ctx, &e);
             false
         }
     }
 }
 
+/// Aktuell im Baum ausgewählter Knoten (über die DataViewItem→NodeRef-Map).
+fn selected_node(ctx: &Ctx) -> Option<NodeRef> {
+    let item = ctx.ui.tree.get_selection()?;
+    let key = item.get_id::<u8>().map(|p| p as usize)?;
+    ctx.st.borrow().tree_map.get(&key).cloned()
+}
+
+fn selected_room(ctx: &Ctx) -> Option<i64> {
+    match selected_node(ctx)? {
+        NodeRef::Room(id) => Some(id),
+        NodeRef::User { room, .. } => Some(room),
+    }
+}
+
+fn selected_user(ctx: &Ctx) -> Option<i64> {
+    match selected_node(ctx)? {
+        NodeRef::User { id, .. } => Some(id),
+        NodeRef::Room(_) => None,
+    }
+}
+
+fn selected_file(ctx: &Ctx) -> Option<crate::protocol::FileInfo> {
+    let idx = ctx.ui.files.get_selection()? as usize;
+    ctx.st.borrow().files.get(idx).cloned()
+}
+
+fn ask_text(ctx: &Ctx, message: &str, caption: &str, default: &str) -> Option<String> {
+    let dlg = TextEntryDialog::builder(&ctx.ui.frame, message, caption)
+        .with_default_value(default)
+        .build();
+    if dlg.show_modal() == ID_OK {
+        dlg.get_value().filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
+fn info_box(ctx: &Ctx, message: &str, caption: &str) {
+    let dlg = MessageDialog::builder(&ctx.ui.frame, message, caption).build();
+    dlg.show_modal();
+}
+
 // ── Verbindung ──
 
-pub fn connect_clicked(
-    ui: &MainWindow,
-    state: &Arc<AppState>,
-    rt: &tokio::runtime::Handle,
-    ev_tx: &mpsc::UnboundedSender<Message>,
-) {
-    if state.inner.lock().connected {
-        set_status(ui, "Bereits verbunden — bitte zuerst trennen.");
+pub fn do_connect(ctx: &Ctx) {
+    if ctx.app.inner.lock().connected {
+        status(ctx, "Bereits verbunden — bitte zuerst trennen.");
         return;
     }
-
-    let host = ui.get_conn_host().to_string().trim().to_string();
-    let port: u16 = match ui.get_conn_port().to_string().trim().parse() {
+    let host = ctx.ui.host_in.get_value().trim().to_string();
+    let port: u16 = match ctx.ui.port_in.get_value().trim().parse() {
         Ok(p) => p,
         Err(_) => {
-            set_status(ui, "Ungültiger Port.");
+            status(ctx, "Ungültiger Port.");
             return;
         }
     };
-    let ssl = ui.get_conn_ssl();
-    let username = ui.get_conn_username().to_string().trim().to_string();
-    let password = ui.get_conn_password().to_string();
-    let mut nickname = ui.get_conn_nickname().to_string().trim().to_string();
+    let ssl = ctx.ui.ssl_chk.is_checked();
+    let username = ctx.ui.user_in.get_value().trim().to_string();
+    let password = ctx.ui.pass_in.get_value();
+    let mut nickname = ctx.ui.nick_in.get_value().trim().to_string();
     if nickname.is_empty() {
         nickname = username.clone();
     }
-
     if host.is_empty() || username.is_empty() || password.is_empty() {
-        set_status(ui, "Host, Benutzername und Passwort sind erforderlich.");
+        status(ctx, "Host, Benutzername und Passwort sind erforderlich.");
         return;
     }
 
-    // Einstellungen merken (ohne Passwort)
-    let mut cfg = crate::config::load_config();
-    cfg.host = host.clone();
-    cfg.port = port;
-    cfg.ssl = ssl;
-    cfg.username = username.clone();
-    cfg.nickname = nickname.clone();
-    let _ = crate::config::save_config(&cfg);
-
+    let (input_device, output_device) = {
+        let cfg = config::load_config();
+        (cfg.input_device.clone(), cfg.output_device.clone())
+    };
     {
-        let mut inner = state.inner.lock();
+        let mut inner = ctx.app.inner.lock();
         inner.nickname = nickname.clone();
-        inner.input_device = cfg.input_device.clone();
-        inner.output_device = cfg.output_device.clone();
+        inner.input_device = input_device;
+        inner.output_device = output_device.clone();
     }
 
-    ui.set_connecting(true);
-    set_status(ui, "Verbinde…");
+    status(ctx, "Verbinde…");
 
-    let state2 = state.clone();
-    let ev_tx2 = ev_tx.clone();
-    let output_device = cfg.output_device.clone();
-    rt.spawn(async move {
+    let app = ctx.app.clone();
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
         let fail = |text: String| {
-            let _ = ev_tx2.send(Message::new(
-                "client_error",
-                serde_json::json!({ "message": text }),
-            ));
+            let _ = ev_tx.send(Message::new("client_error", serde_json::json!({ "message": text })));
         };
 
         if let Err(e) =
-            crate::net::ws_client::connect(&host, port, ssl, state2.clone(), ev_tx2.clone()).await
+            crate::net::ws_client::connect(&host, port, ssl, app.clone(), ev_tx.clone()).await
         {
             fail(format!("Verbindung fehlgeschlagen: {}", e));
             return;
         }
-
-        // UDP-Audio (Audioport = Steuerport + 1, wie Server-Standard)
-        match crate::net::udp_client::start_udp_audio(&host, port + 1, state2.clone()).await {
+        match crate::net::udp_client::start_udp_audio(&host, port + 1, app.clone()).await {
             Ok((send_shutdown, recv_shutdown)) => {
-                let mut inner = state2.inner.lock();
+                let mut inner = app.inner.lock();
                 inner.capture_shutdown = Some(send_shutdown);
                 inner.playback_shutdown = Some(recv_shutdown);
             }
-            Err(e) => {
-                fail(format!("UDP-Audio fehlgeschlagen: {}", e));
-            }
+            Err(e) => fail(format!("UDP-Audio fehlgeschlagen: {}", e)),
         }
 
-        // Audio-Wiedergabe starten (Stream muss am Leben bleiben)
-        let playback_state = state2.clone();
-        std::thread::spawn(move || match crate::audio::playback::start_playback(
-            playback_state,
-            output_device,
-        ) {
-            Ok(_stream) => loop {
-                std::thread::park();
-            },
-            Err(e) => {
-                tracing::error!("Failed to start playback: {}", e);
+        let playback_state = app.clone();
+        std::thread::spawn(move || {
+            match crate::audio::playback::start_playback(playback_state, output_device) {
+                Ok(_stream) => loop {
+                    std::thread::park();
+                },
+                Err(e) => tracing::error!("Failed to start playback: {}", e),
             }
         });
 
-        // Anmeldung
         let login = Message::new(
             "auth_login",
-            serde_json::json!({
-                "username": username,
-                "password": password,
-                "nickname": nickname,
-            }),
+            serde_json::json!({ "username": username, "password": password, "nickname": nickname }),
         );
-        if let Err(e) = state2.send_ws(login) {
+        if let Err(e) = app.send_ws(login) {
             fail(format!("Anmeldung fehlgeschlagen: {}", e));
         }
     });
 }
 
-/// Tear down the connection and reset state + UI to the connect view.
-pub fn do_disconnect(ui: &MainWindow, state: &Arc<AppState>) {
+pub fn do_disconnect(ctx: &Ctx) {
     {
-        let mut inner = state.inner.lock();
-
+        let mut inner = ctx.app.inner.lock();
         if let Some(ref tx) = inner.capture_shutdown {
             let _ = tx.send(true);
         }
         inner.capture_shutdown = None;
-
         if let Some(ref tx) = inner.playback_shutdown {
             let _ = tx.send(true);
         }
         inner.playback_shutdown = None;
-
         if let Some(ref tx) = inner.stream_shutdown {
             let _ = tx.send(true);
         }
         inner.stream_shutdown = None;
-
         inner.ws_tx = None;
         inner.connected = false;
         inner.authenticated = false;
@@ -251,98 +175,143 @@ pub fn do_disconnect(ui: &MainWindow, state: &Arc<AppState>) {
         inner.server_udp_addr = None;
         inner.capturing = false;
         inner.streaming_file = false;
-        inner.ui_room_ids.clear();
-        inner.ui_user_ids.clear();
-        inner.ui_files.clear();
-        inner.ui_tree.clear();
-        inner.expanded_rooms.clear();
+        inner.current_files.clear();
         inner.pending_upload = None;
         inner.download_targets.clear();
         inner.muted = false;
         inner.deafened = false;
         inner.loopback = false;
     }
-    state
+    ctx.app
         .file_streaming
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
-    ui.set_active_view(0);
-    ui.set_connecting(false);
-    ui.set_muted(false);
-    ui.set_deafened(false);
-    ui.set_loopback(false);
-    ui.set_streaming(false);
-    ui.set_window_title("TeamConference".into());
-    rebuild_room_views(ui, state);
-    rebuild_files(ui, state);
-    set_status(ui, "Nicht verbunden");
+    ctx.ui.frame.set_title("TeamConference");
+    ctx.ui.show_main(false);
+    rebuild_tree(ctx);
+    rebuild_files(ctx);
+    status(ctx, "Nicht verbunden");
+}
+
+// ── Serverliste ──
+
+pub fn fill_form_from_server(ctx: &Ctx) {
+    let Some(idx) = ctx.ui.server_list.get_selection() else {
+        return;
+    };
+    let entry = ctx.st.borrow().servers.get(idx as usize).cloned();
+    if let Some(s) = entry {
+        ctx.ui.host_in.set_value(&s.host);
+        ctx.ui.port_in.set_value(&s.port.to_string());
+        ctx.ui.ssl_chk.set_value(s.ssl);
+        ctx.ui.user_in.set_value(&s.username);
+        ctx.ui.nick_in.set_value(&s.nickname);
+    }
+}
+
+pub fn save_bookmark(ctx: &Ctx) {
+    let host = ctx.ui.host_in.get_value().trim().to_string();
+    if host.is_empty() {
+        status(ctx, "Host darf nicht leer sein.");
+        return;
+    }
+    let port: u16 = ctx.ui.port_in.get_value().trim().parse().unwrap_or(9500);
+    let entry = ServerEntry {
+        name: host.clone(),
+        host,
+        port,
+        ssl: ctx.ui.ssl_chk.is_checked(),
+        username: ctx.ui.user_in.get_value().trim().to_string(),
+        nickname: ctx.ui.nick_in.get_value().trim().to_string(),
+    };
+    ctx.st.borrow_mut().servers.push(entry);
+    persist_servers(ctx);
+    rebuild_server_list(ctx);
+    status(ctx, "Server als Lesezeichen gespeichert.");
+}
+
+pub fn remove_server(ctx: &Ctx) {
+    let Some(idx) = ctx.ui.server_list.get_selection() else {
+        status(ctx, "Bitte zuerst einen Server auswählen.");
+        return;
+    };
+    {
+        let mut st = ctx.st.borrow_mut();
+        if (idx as usize) < st.servers.len() {
+            st.servers.remove(idx as usize);
+        }
+    }
+    persist_servers(ctx);
+    rebuild_server_list(ctx);
+    status(ctx, "Server entfernt.");
+}
+
+fn persist_servers(ctx: &Ctx) {
+    let mut cfg = config::load_config();
+    cfg.servers = ctx.st.borrow().servers.clone();
+    let _ = config::save_config(&cfg);
 }
 
 // ── Chat ──
 
-pub fn send_chat(ui: &MainWindow, state: &Arc<AppState>) {
-    let text = ui.get_chat_input().to_string();
+pub fn send_chat(ctx: &Ctx) {
+    let text = ctx.ui.chat_in.get_value();
     let text = text.trim();
     if text.is_empty() {
         return;
     }
     let (room_id, nickname) = {
-        let inner = state.inner.lock();
+        let inner = ctx.app.inner.lock();
         (inner.current_room_id, inner.nickname.clone())
     };
     let Some(room_id) = room_id else {
-        set_status(ui, "Bitte zuerst einem Raum beitreten.");
+        status(ctx, "Bitte zuerst einem Raum beitreten.");
         return;
     };
     let msg = Message::new(
         "chat_room",
         serde_json::json!({ "room_id": room_id, "message": text }),
     );
-    if send_or_status(ui, state, msg) {
-        let room = state.inner.lock().room_name(room_id);
-        append_chat(ui, state, &format!("[{}] {}: {}", room, nickname, text));
-        ui.set_chat_input("".into());
+    if send_or_status(ctx, msg) {
+        let room = ctx.app.inner.lock().room_name(room_id);
+        ctx.ui.append_chat(&format!("[{}] {}: {}", room, nickname, text));
+        ctx.ui.chat_in.clear();
     }
 }
 
-fn send_private_message(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(user_id) = selected_user(ui, state) else {
-        set_status(ui, "Bitte zuerst einen Nutzer in der Liste auswählen.");
+fn private_message(ctx: &Ctx) {
+    let Some(user_id) = selected_user(ctx) else {
+        status(ctx, "Bitte zuerst einen Nutzer im Baum auswählen.");
         return;
     };
-    let text = ui.get_chat_input().to_string();
-    let text = text.trim().to_string();
+    let text = ctx.ui.chat_in.get_value().trim().to_string();
     if text.is_empty() {
-        set_status(
-            ui,
-            "Privatnachricht: Text zuerst ins Chateingabefeld schreiben, dann Strg+P.",
-        );
+        status(ctx, "Privatnachricht: Text zuerst ins Eingabefeld schreiben, dann Strg+P.");
         return;
     }
     let msg = Message::new(
         "chat_private",
         serde_json::json!({ "to_user_id": user_id, "message": text }),
     );
-    if send_or_status(ui, state, msg) {
-        let nick = state.inner.lock().nickname_of(user_id);
-        append_chat(ui, state, &format!("[Privat an {}] {}", nick, text));
-        ui.set_chat_input("".into());
+    if send_or_status(ctx, msg) {
+        let nick = ctx.app.inner.lock().nickname_of(user_id);
+        ctx.ui.append_chat(&format!("[Privat an {}] {}", nick, text));
+        ctx.ui.chat_in.clear();
     }
 }
 
 // ── Räume ──
 
-pub fn join_room(ui: &MainWindow, state: &Arc<AppState>, room_id: i64, password: Option<String>) {
+fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
     let mut data = serde_json::json!({ "room_id": room_id });
     if let Some(pw) = password {
         data["password"] = serde_json::Value::String(pw);
     }
-    if !send_or_status(ui, state, Message::new("room_join", data)) {
+    if !send_or_status(ctx, Message::new("room_join", data)) {
         return;
     }
-
     let (sr, bd, ch) = {
-        let mut inner = state.inner.lock();
+        let mut inner = ctx.app.inner.lock();
         inner.current_room_id = Some(room_id);
         (
             inner.audio_config.sample_rate,
@@ -350,39 +319,23 @@ pub fn join_room(ui: &MainWindow, state: &Arc<AppState>, room_id: i64, password:
             inner.audio_config.channels,
         )
     };
-
-    // Audio-Konfiguration anmelden (Server antwortet mit UDP-Token)
-    let _ = state.send_ws(Message::new(
+    let _ = ctx.app.send_ws(Message::new(
         "audio_config",
-        serde_json::json!({
-            "sample_rate": sr,
-            "bit_depth": bd,
-            "channels": ch,
-            "enabled": true,
-        }),
+        serde_json::json!({ "sample_rate": sr, "bit_depth": bd, "channels": ch, "enabled": true }),
     ));
+    let _ = ctx
+        .app
+        .send_ws(Message::new("file_list", serde_json::json!({ "room_id": room_id })));
 
-    // Dateiliste anfordern
-    let _ = state.send_ws(Message::new(
-        "file_list",
-        serde_json::json!({ "room_id": room_id }),
-    ));
-
-    // Im Baummodus den beigetretenen Raum aufklappen, damit man die Nutzer sieht
-    {
-        let mut inner = state.inner.lock();
-        inner.expanded_rooms.insert(room_id);
-    }
-
-    let room = state.inner.lock().room_name(room_id);
-    append_chat(ui, state, &format!("* Raum {} beigetreten.", room));
-    rebuild_room_views(ui, state);
-    refresh_status(ui, state);
+    let room = ctx.app.inner.lock().room_name(room_id);
+    ctx.ui.append_chat(&format!("* Raum {} beigetreten.", room));
+    rebuild_tree(ctx);
+    refresh_status(ctx);
 }
 
-/// Einem Raum beitreten, vorher bei Bedarf nach dem Passwort fragen.
-fn join_room_checked(ui: &MainWindow, state: &Arc<AppState>, room_id: i64) {
-    let has_password = state
+fn join_room_checked(ctx: &Ctx, room_id: i64) {
+    let has_password = ctx
+        .app
         .inner
         .lock()
         .rooms
@@ -391,273 +344,195 @@ fn join_room_checked(ui: &MainWindow, state: &Arc<AppState>, room_id: i64) {
         .map(|r| r.has_password)
         .unwrap_or(false);
     if has_password {
-        {
-            let mut inner = state.inner.lock();
-            inner.pending_join_room = Some(room_id);
+        if let Some(pw) = ask_text(ctx, "Passwort für diesen Raum:", "Raum-Passwort", "") {
+            join_room(ctx, room_id, Some(pw));
         }
-        show_dialog(
-            ui,
-            "room-password",
-            "Raum-Passwort",
-            "Dieser Raum ist passwortgeschützt.",
-            "Passwort:",
-            true,
-            "",
-            false,
-            true,
-        );
     } else {
-        join_room(ui, state, room_id, None);
+        join_room(ctx, room_id, None);
     }
 }
 
-fn join_selected(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(room_id) = selected_room(ui, state) else {
-        set_status(ui, "Bitte zuerst einen Raum in der Liste auswählen.");
-        return;
-    };
-    join_room_checked(ui, state, room_id);
-}
-
-// ── Windows-Baumansicht ──
-
-/// Aktuell im Baum ausgewählter Knoten.
-fn current_tree_node(ui: &MainWindow, state: &Arc<AppState>) -> Option<crate::state::TreeNode> {
-    let idx = ui.get_tree_current();
-    if idx < 0 {
-        return None;
-    }
-    state.inner.lock().ui_tree.get(idx as usize).cloned()
-}
-
-/// Enter im Baum: auf einem Raum → beitreten. Auf einem Nutzer → nichts.
-pub fn tree_activate(ui: &MainWindow, state: &Arc<AppState>) {
-    use crate::state::TreeKind;
-    match current_tree_node(ui, state) {
-        Some(n) if n.kind == TreeKind::Room => join_room_checked(ui, state, n.id),
-        Some(_) => {}
-        None => set_status(ui, "Bitte zuerst einen Eintrag im Baum auswählen."),
+fn join_selected(ctx: &Ctx) {
+    match selected_room(ctx) {
+        Some(room_id) => join_room_checked(ctx, room_id),
+        None => status(ctx, "Bitte zuerst einen Raum im Baum auswählen."),
     }
 }
 
-/// Pfeil rechts im Baum: Raum aufklappen (zeigt Nutzer und Unterräume).
-pub fn tree_expand(ui: &MainWindow, state: &Arc<AppState>) {
-    use crate::state::TreeKind;
-    let Some(node) = current_tree_node(ui, state) else {
-        return;
-    };
-    if node.kind != TreeKind::Room {
-        return;
-    }
-    let changed = {
-        let mut inner = state.inner.lock();
-        let expandable = crate::events::room_is_expandable(&inner.rooms, node.id);
-        if expandable && !inner.expanded_rooms.contains(&node.id) {
-            inner.expanded_rooms.insert(node.id);
-            true
-        } else {
-            false
-        }
-    };
-    if changed {
-        rebuild_tree(ui, state);
+/// Doppelklick/Enter auf einen Baumeintrag: Raum → beitreten.
+pub fn tree_activate(ctx: &Ctx) {
+    match selected_node(ctx) {
+        Some(NodeRef::Room(id)) => join_room_checked(ctx, id),
+        _ => {}
     }
 }
 
-/// Pfeil links im Baum: aufgeklappten Raum zuklappen, sonst zum Elternraum springen.
-pub fn tree_collapse(ui: &MainWindow, state: &Arc<AppState>) {
-    use crate::state::TreeKind;
-    let Some(node) = current_tree_node(ui, state) else {
-        return;
-    };
-
-    // Aufgeklappten Raum zuklappen
-    if node.kind == TreeKind::Room {
-        let was_expanded = {
-            let mut inner = state.inner.lock();
-            if inner.expanded_rooms.remove(&node.id) {
-                true
-            } else {
-                false
-            }
-        };
-        if was_expanded {
-            rebuild_tree(ui, state);
-            return;
-        }
-    }
-
-    // Sonst: Auswahl auf den zugehörigen Raum (Eltern) verschieben
-    let target_room = if node.kind == TreeKind::User {
-        Some(node.room_id)
-    } else {
-        state
-            .inner
-            .lock()
-            .rooms
-            .iter()
-            .find(|r| r.id == node.id)
-            .and_then(|r| r.parent_id)
-    };
-    if let Some(room_id) = target_room {
-        let pos = state
-            .inner
-            .lock()
-            .ui_tree
-            .iter()
-            .position(|n| n.kind == TreeKind::Room && n.id == room_id);
-        if let Some(p) = pos {
-            ui.set_tree_current(p as i32);
-        }
-    }
-}
-
-fn leave_room(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(room_id) = state.inner.lock().current_room_id else {
-        set_status(ui, "Du bist in keinem Raum.");
+fn leave_room(ctx: &Ctx) {
+    let Some(room_id) = ctx.app.inner.lock().current_room_id else {
+        status(ctx, "Du bist in keinem Raum.");
         return;
     };
     if send_or_status(
-        ui,
-        state,
+        ctx,
         Message::new("room_leave", serde_json::json!({ "room_id": room_id })),
     ) {
-        let room = state.inner.lock().room_name(room_id);
+        let room = ctx.app.inner.lock().room_name(room_id);
         {
-            let mut inner = state.inner.lock();
+            let mut inner = ctx.app.inner.lock();
             inner.current_room_id = None;
-            inner.ui_files.clear();
+            inner.current_files.clear();
         }
-        append_chat(ui, state, &format!("* Raum {} verlassen.", room));
-        rebuild_room_views(ui, state);
-        rebuild_files(ui, state);
-        refresh_status(ui, state);
+        ctx.ui.append_chat(&format!("* Raum {} verlassen.", room));
+        rebuild_tree(ctx);
+        rebuild_files(ctx);
+        refresh_status(ctx);
+    }
+}
+
+fn create_room(ctx: &Ctx, parent: Option<i64>) {
+    let title = if parent.is_some() {
+        "Unterraum erstellen"
+    } else {
+        "Raum erstellen"
+    };
+    let Some(name) = ask_text(ctx, "Name des Raums:", title, "") else {
+        return;
+    };
+    let mut data = serde_json::json!({ "name": name });
+    if let Some(pid) = parent {
+        data["parent_id"] = serde_json::json!(pid);
+    }
+    if let Some(pw) = ask_text(ctx, "Passwort (leer = keins):", title, "") {
+        data["password"] = serde_json::Value::String(pw);
+    }
+    send_or_status(ctx, Message::new("room_create", data));
+}
+
+fn delete_room(ctx: &Ctx) {
+    let Some(room_id) = selected_room(ctx) else {
+        status(ctx, "Bitte zuerst einen Raum auswählen.");
+        return;
+    };
+    let name = ctx.app.inner.lock().room_name(room_id);
+    let dlg = MessageDialog::builder(
+        &ctx.ui.frame,
+        &format!("Raum „{}“ wirklich löschen?", name),
+        "Raum löschen",
+    )
+    .with_style(MessageDialogStyle::YesNo)
+    .build();
+    if dlg.show_modal() == ID_YES {
+        send_or_status(
+            ctx,
+            Message::new("room_delete", serde_json::json!({ "room_id": room_id })),
+        );
     }
 }
 
 // ── Audio ──
 
-fn toggle_mute(ui: &MainWindow, state: &Arc<AppState>) {
+fn toggle_mute(ctx: &Ctx) {
     let muted = {
-        let mut inner = state.inner.lock();
+        let mut inner = ctx.app.inner.lock();
         inner.muted = !inner.muted;
         inner.muted
     };
-    let _ = state.send_ws(Message::new(
-        "audio_mute",
-        serde_json::json!({ "muted": muted }),
-    ));
-    ui.set_muted(muted);
-    append_chat(
-        ui,
-        state,
-        if muted {
-            "* Mikrofon stummgeschaltet."
-        } else {
-            "* Mikrofon eingeschaltet."
-        },
-    );
-    refresh_status(ui, state);
+    let _ = ctx
+        .app
+        .send_ws(Message::new("audio_mute", serde_json::json!({ "muted": muted })));
+    ctx.ui.append_chat(if muted {
+        "* Mikrofon stummgeschaltet."
+    } else {
+        "* Mikrofon eingeschaltet."
+    });
+    refresh_status(ctx);
 }
 
-fn toggle_deafen(ui: &MainWindow, state: &Arc<AppState>) {
+fn toggle_deafen(ctx: &Ctx) {
     let deafened = {
-        let mut inner = state.inner.lock();
+        let mut inner = ctx.app.inner.lock();
         inner.deafened = !inner.deafened;
         inner.deafened
     };
-    let _ = state.send_ws(Message::new(
+    let _ = ctx.app.send_ws(Message::new(
         "audio_deafen",
         serde_json::json!({ "deafened": deafened }),
     ));
-    ui.set_deafened(deafened);
-    append_chat(
-        ui,
-        state,
-        if deafened {
-            "* Ton ausgeschaltet (taub)."
-        } else {
-            "* Ton eingeschaltet."
-        },
-    );
-    refresh_status(ui, state);
+    ctx.ui.append_chat(if deafened {
+        "* Ton ausgeschaltet (taub)."
+    } else {
+        "* Ton eingeschaltet."
+    });
+    refresh_status(ctx);
 }
 
-fn toggle_loopback(ui: &MainWindow, state: &Arc<AppState>) {
+fn toggle_loopback(ctx: &Ctx) {
     let loopback = {
-        let mut inner = state.inner.lock();
+        let mut inner = ctx.app.inner.lock();
         inner.loopback = !inner.loopback;
         inner.loopback
     };
-    let _ = state.send_ws(Message::new(
+    let _ = ctx.app.send_ws(Message::new(
         "audio_loopback",
         serde_json::json!({ "enabled": loopback }),
     ));
-    ui.set_loopback(loopback);
-    append_chat(
-        ui,
-        state,
-        if loopback {
-            "* Loopback eingeschaltet."
-        } else {
-            "* Loopback ausgeschaltet."
-        },
-    );
-    refresh_status(ui, state);
+    ctx.ui.append_chat(if loopback {
+        "* Loopback eingeschaltet."
+    } else {
+        "* Loopback ausgeschaltet."
+    });
+    refresh_status(ctx);
 }
 
-pub fn volume_changed(state: &Arc<AppState>, value: f32) {
-    state.set_volume(value / 100.0);
+pub fn volume_changed(ctx: &Ctx) {
+    let v = ctx.ui.volume.get_value();
+    ctx.app.set_volume(v as f32 / 100.0);
 }
 
-pub fn save_volume(state: &Arc<AppState>) {
-    let mut cfg = crate::config::load_config();
-    cfg.volume = state.volume();
-    let _ = crate::config::save_config(&cfg);
+pub fn save_volume(ctx: &Ctx) {
+    let mut cfg = config::load_config();
+    cfg.volume = ctx.app.volume();
+    let _ = config::save_config(&cfg);
 }
 
 // ── Datei-Streaming ──
 
-fn stream_file(
-    ui: &MainWindow,
-    state: &Arc<AppState>,
-    rt: &tokio::runtime::Handle,
-    ev_tx: &mpsc::UnboundedSender<Message>,
-) {
-    if !state.inner.lock().connected {
-        set_status(ui, "Nicht verbunden.");
+fn stream_file(ctx: &Ctx) {
+    if !ctx.app.inner.lock().connected {
+        status(ctx, "Nicht verbunden.");
         return;
     }
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Audiodatei zum Streamen wählen")
-        .add_filter(
-            "Audiodateien",
-            &["mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "aiff"],
-        )
-        .pick_file()
-    else {
+    let dlg = FileDialog::builder(&ctx.ui.frame)
+        .with_message("Audiodatei zum Streamen wählen")
+        .with_wildcard("Audiodateien|*.mp3;*.wav;*.flac;*.ogg;*.m4a;*.aac;*.opus;*.aiff|Alle Dateien|*.*")
+        .with_style(FileDialogStyle::Open)
+        .build();
+    if dlg.show_modal() != ID_OK {
         return;
-    };
+    }
+    let Some(path) = dlg.get_path() else { return };
+    let path = std::path::PathBuf::from(path);
 
-    // Laufenden Stream stoppen
     {
-        let inner = state.inner.lock();
+        let inner = ctx.app.inner.lock();
         if let Some(ref tx) = inner.stream_shutdown {
             let _ = tx.send(true);
         }
     }
+    // Pause-Flag für den neuen Stream zurücksetzen
+    ctx.app
+        .stream_paused
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let was_loopback = {
-        let mut inner = state.inner.lock();
+        let mut inner = ctx.app.inner.lock();
         inner.stream_shutdown = Some(shutdown_tx);
         inner.streaming_file = true;
         inner.loopback
     };
-
-    // Loopback aktivieren, damit der Stream auch lokal hörbar ist
     if !was_loopback {
-        let _ = state.send_ws(Message::new(
+        let _ = ctx.app.send_ws(Message::new(
             "audio_loopback",
             serde_json::json!({ "enabled": true }),
         ));
@@ -667,43 +542,35 @@ fn stream_file(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    ui.set_streaming(true);
-    append_chat(ui, state, &format!("* Streame Datei: {}", filename));
-    refresh_status(ui, state);
+    ctx.ui.append_chat(&format!("* Streame Datei: {}", filename));
+    refresh_status(ctx);
 
-    let state2 = state.clone();
-    let ev_tx2 = ev_tx.clone();
-    rt.spawn(async move {
+    let app = ctx.app.clone();
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
         let result =
-            crate::audio::file_stream::stream_audio_file(&path, state2.clone(), shutdown_rx).await;
+            crate::audio::file_stream::stream_audio_file(&path, app.clone(), shutdown_rx).await;
         if let Err(e) = result {
             tracing::error!("Audio file stream error: {}", e);
-            let _ = ev_tx2.send(Message::new(
+            let _ = ev_tx.send(Message::new(
                 "client_error",
                 serde_json::json!({ "message": format!("Streaming-Fehler: {}", e) }),
             ));
         }
-        // Loopback zurücksetzen
         if !was_loopback {
-            let _ = state2.send_ws(Message::new(
+            let _ = app.send_ws(Message::new(
                 "audio_loopback",
                 serde_json::json!({ "enabled": false }),
             ));
         }
-        {
-            let mut inner = state2.inner.lock();
-            inner.stream_shutdown = None;
-        }
-        let _ = ev_tx2.send(Message::new(
-            "client_stream_finished",
-            serde_json::json!({}),
-        ));
+        app.inner.lock().stream_shutdown = None;
+        let _ = ev_tx.send(Message::new("client_stream_finished", serde_json::json!({})));
     });
 }
 
-fn stop_stream(ui: &MainWindow, state: &Arc<AppState>) {
-    let was_streaming = {
-        let mut inner = state.inner.lock();
+fn stop_stream(ctx: &Ctx) {
+    let was = {
+        let mut inner = ctx.app.inner.lock();
         let was = inner.stream_shutdown.is_some();
         if let Some(ref tx) = inner.stream_shutdown {
             let _ = tx.send(true);
@@ -711,25 +578,49 @@ fn stop_stream(ui: &MainWindow, state: &Arc<AppState>) {
         inner.stream_shutdown = None;
         was
     };
-    if !was_streaming {
-        set_status(ui, "Es läuft kein Streaming.");
+    // Pause-Flag zurücksetzen, damit der nächste Stream nicht pausiert startet
+    ctx.app
+        .stream_paused
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    if !was {
+        status(ctx, "Es läuft kein Streaming.");
     }
-    // Der Stream-Task meldet sich mit client_stream_finished und räumt auf.
+}
+
+/// Gestreamte Datei pausieren bzw. fortsetzen (lokal, kein Server-Roundtrip).
+fn toggle_pause_stream(ctx: &Ctx) {
+    let streaming = ctx.app.inner.lock().stream_shutdown.is_some();
+    if !streaming {
+        status(ctx, "Es läuft kein Streaming.");
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    let paused = !ctx.app.stream_paused.load(Ordering::Relaxed);
+    ctx.app.stream_paused.store(paused, Ordering::Relaxed);
+    ctx.ui.append_chat(if paused {
+        "* Streaming pausiert."
+    } else {
+        "* Streaming fortgesetzt."
+    });
+    status(ctx, if paused { "Streaming pausiert" } else { "Streaming fortgesetzt" });
 }
 
 // ── Dateien ──
 
-fn upload_file(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(room_id) = state.inner.lock().current_room_id else {
-        set_status(ui, "Bitte zuerst einem Raum beitreten.");
+fn upload_file(ctx: &Ctx) {
+    let Some(room_id) = ctx.app.inner.lock().current_room_id else {
+        status(ctx, "Bitte zuerst einem Raum beitreten.");
         return;
     };
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Datei zum Hochladen wählen")
-        .pick_file()
-    else {
+    let dlg = FileDialog::builder(&ctx.ui.frame)
+        .with_message("Datei zum Hochladen wählen")
+        .with_style(FileDialogStyle::Open)
+        .build();
+    if dlg.show_modal() != ID_OK {
         return;
-    };
+    }
+    let Some(path) = dlg.get_path() else { return };
+    let path = std::path::PathBuf::from(path);
     let filename = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -737,369 +628,326 @@ fn upload_file(ui: &MainWindow, state: &Arc<AppState>) {
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            set_status(ui, &format!("Datei konnte nicht gelesen werden: {}", e));
+            status(ctx, &format!("Datei konnte nicht gelesen werden: {}", e));
             return;
         }
     };
     let size = data.len() as i64;
-    {
-        let mut inner = state.inner.lock();
-        inner.pending_upload = Some(PendingUpload {
-            filename: filename.clone(),
-            data,
-        });
-    }
-    // Der Server antwortet mit file_upload_ack und der upload_id;
-    // die Chunks werden im Event-Handler gesendet.
+    ctx.app.inner.lock().pending_upload = Some(PendingUpload {
+        filename: filename.clone(),
+        data,
+    });
     send_or_status(
-        ui,
-        state,
+        ctx,
         Message::new(
             "file_upload_start",
-            serde_json::json!({
-                "room_id": room_id,
-                "filename": filename,
-                "size": size,
-            }),
+            serde_json::json!({ "room_id": room_id, "filename": filename, "size": size }),
         ),
     );
 }
 
-fn download_file(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(file) = selected_file(ui, state) else {
-        set_status(ui, "Bitte zuerst eine Datei in der Liste auswählen.");
+fn download_file(ctx: &Ctx) {
+    let Some(file) = selected_file(ctx) else {
+        status(ctx, "Bitte zuerst eine Datei auswählen.");
         return;
     };
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Speicherort wählen")
-        .set_file_name(&file.filename)
-        .save_file()
-    else {
+    let dlg = FileDialog::builder(&ctx.ui.frame)
+        .with_message("Speicherort wählen")
+        .with_default_file(&file.filename)
+        .with_style(FileDialogStyle::Save)
+        .build();
+    if dlg.show_modal() != ID_OK {
         return;
-    };
-    {
-        let mut inner = state.inner.lock();
-        inner
-            .download_targets
-            .insert(file.id, (path, Vec::with_capacity(file.size_bytes as usize)));
     }
+    let Some(path) = dlg.get_path() else { return };
+    ctx.app.inner.lock().download_targets.insert(
+        file.id,
+        (
+            std::path::PathBuf::from(path),
+            Vec::with_capacity(file.size_bytes.max(0) as usize),
+        ),
+    );
     if send_or_status(
-        ui,
-        state,
+        ctx,
         Message::new("file_download", serde_json::json!({ "file_id": file.id })),
     ) {
-        append_chat(ui, state, &format!("Lade {} herunter…", file.filename));
+        ctx.ui.append_chat(&format!("Lade {} herunter…", file.filename));
     }
 }
 
-fn refresh_files(ui: &MainWindow, state: &Arc<AppState>) {
-    let Some(room_id) = state.inner.lock().current_room_id else {
-        set_status(ui, "Bitte zuerst einem Raum beitreten.");
+fn refresh_files(ctx: &Ctx) {
+    let Some(room_id) = ctx.app.inner.lock().current_room_id else {
+        status(ctx, "Bitte zuerst einem Raum beitreten.");
         return;
     };
     send_or_status(
-        ui,
-        state,
+        ctx,
         Message::new("file_list", serde_json::json!({ "room_id": room_id })),
     );
 }
 
-// ── Einstellungen ──
+// ── Verwaltung ──
 
-fn open_settings(ui: &MainWindow) {
-    let cfg = crate::config::load_config();
-    let devices = crate::audio::device::list_devices();
-
-    let mut inputs: Vec<slint::SharedString> = vec!["Standardgerät".into()];
-    let mut outputs: Vec<slint::SharedString> = vec!["Standardgerät".into()];
-    for d in &devices {
-        if d.is_input {
-            inputs.push(d.name.clone().into());
-        }
-        if d.is_output {
-            outputs.push(d.name.clone().into());
-        }
-    }
-    ui.set_input_devices(slint::ModelRc::new(slint::VecModel::from(inputs)));
-    ui.set_output_devices(slint::ModelRc::new(slint::VecModel::from(outputs)));
-    ui.set_selected_input(
-        cfg.input_device
-            .unwrap_or_else(|| "Standardgerät".into())
-            .into(),
-    );
-    ui.set_selected_output(
-        cfg.output_device
-            .unwrap_or_else(|| "Standardgerät".into())
-            .into(),
-    );
-    ui.set_settings_visible(true);
-}
-
-pub fn settings_accepted(ui: &MainWindow, state: &Arc<AppState>, input: &str, output: &str) {
-    let to_opt = |s: &str| {
-        if s.is_empty() || s == "Standardgerät" {
-            None
-        } else {
-            Some(s.to_string())
-        }
+fn kick_user(ctx: &Ctx) {
+    let Some(user_id) = selected_user(ctx) else {
+        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        return;
     };
-    let mut cfg = crate::config::load_config();
-    cfg.input_device = to_opt(input);
-    cfg.output_device = to_opt(output);
-    let _ = crate::config::save_config(&cfg);
-    {
-        let mut inner = state.inner.lock();
-        inner.input_device = cfg.input_device.clone();
-        inner.output_device = cfg.output_device.clone();
+    let reason = ask_text(ctx, "Grund (optional):", "Nutzer kicken", "");
+    let mut data = serde_json::json!({ "user_id": user_id });
+    if let Some(r) = reason {
+        data["reason"] = serde_json::Value::String(r);
     }
-    set_status(ui, "Einstellungen gespeichert (gelten ab nächster Verbindung).");
+    send_or_status(ctx, Message::new("admin_kick", data));
 }
 
-// ── Dialog-Ergebnisse ──
-
-pub fn dialog_accepted(ui: &MainWindow, state: &Arc<AppState>, mode: &str, f1: &str, f2: &str) {
-    let (kind, arg) = match mode.split_once(':') {
-        Some((k, a)) => (k, Some(a)),
-        None => (mode, None),
+fn ban_user(ctx: &Ctx) {
+    let Some(user_id) = selected_user(ctx) else {
+        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        return;
     };
-    let arg_id: Option<i64> = arg.and_then(|a| a.parse().ok());
+    let reason = ask_text(ctx, "Grund (optional):", "Nutzer bannen", "");
+    let duration = ask_text(ctx, "Dauer in Minuten (leer = dauerhaft):", "Nutzer bannen", "");
+    let mut data = serde_json::json!({ "user_id": user_id });
+    if let Some(r) = reason {
+        data["reason"] = serde_json::Value::String(r);
+    }
+    if let Some(d) = duration.and_then(|s| s.trim().parse::<i64>().ok()) {
+        data["duration_minutes"] = serde_json::json!(d);
+    }
+    send_or_status(ctx, Message::new("admin_ban", data));
+}
 
-    match kind {
-        "room-password" => {
-            let pending = {
-                let mut inner = state.inner.lock();
-                inner.pending_join_room.take()
-            };
-            if let Some(room_id) = pending {
-                join_room(ui, state, room_id, Some(f1.to_string()));
-            }
-        }
-        "create-room" | "create-subroom" => {
-            if f1.trim().is_empty() {
-                set_status(ui, "Raumname darf nicht leer sein.");
-                return;
-            }
-            let mut data = serde_json::json!({ "name": f1.trim() });
-            if kind == "create-subroom" {
-                if let Some(pid) = arg_id {
-                    data["parent_id"] = serde_json::json!(pid);
-                }
-            }
-            if !f2.trim().is_empty() {
-                data["password"] = serde_json::Value::String(f2.trim().to_string());
-            }
-            send_or_status(ui, state, Message::new("room_create", data));
-        }
-        "delete-room" => {
-            if let Some(room_id) = arg_id {
-                send_or_status(
-                    ui,
-                    state,
-                    Message::new("room_delete", serde_json::json!({ "room_id": room_id })),
-                );
-            }
-        }
-        "kick" => {
-            if let Some(user_id) = arg_id {
-                let mut data = serde_json::json!({ "user_id": user_id });
-                if !f1.trim().is_empty() {
-                    data["reason"] = serde_json::Value::String(f1.trim().to_string());
-                }
-                send_or_status(ui, state, Message::new("admin_kick", data));
-            }
-        }
-        "ban" => {
-            if let Some(user_id) = arg_id {
-                let mut data = serde_json::json!({ "user_id": user_id });
-                if !f1.trim().is_empty() {
-                    data["reason"] = serde_json::Value::String(f1.trim().to_string());
-                }
-                if let Ok(minutes) = f2.trim().parse::<i64>() {
-                    data["duration_minutes"] = serde_json::json!(minutes);
-                }
-                send_or_status(ui, state, Message::new("admin_ban", data));
-            }
-        }
-        "server-message" => {
-            if !f1.trim().is_empty() {
-                send_or_status(
-                    ui,
-                    state,
-                    Message::new(
-                        "admin_server_message",
-                        serde_json::json!({ "message": f1.trim() }),
-                    ),
-                );
-            }
-        }
-        _ => {}
+fn move_user(ctx: &Ctx) {
+    let Some(user_id) = selected_user(ctx) else {
+        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        return;
+    };
+    let Some(room_id) = selected_room(ctx) else {
+        status(ctx, "Bitte zuerst den Zielraum auswählen.");
+        return;
+    };
+    send_or_status(
+        ctx,
+        Message::new(
+            "admin_move",
+            serde_json::json!({ "user_id": user_id, "room_id": room_id }),
+        ),
+    );
+}
+
+fn admin_mute(ctx: &Ctx, muted: bool) {
+    let Some(user_id) = selected_user(ctx) else {
+        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        return;
+    };
+    send_or_status(
+        ctx,
+        Message::new(
+            "admin_mute",
+            serde_json::json!({ "user_id": user_id, "muted": muted }),
+        ),
+    );
+}
+
+fn server_message(ctx: &Ctx) {
+    if let Some(text) = ask_text(ctx, "Nachricht an alle:", "Servernachricht", "") {
+        send_or_status(
+            ctx,
+            Message::new("admin_server_message", serde_json::json!({ "message": text })),
+        );
     }
 }
+
+// ── Account-Verwaltung ──
+
+/// Passwort-Eingabe (maskiert).
+fn ask_secret(ctx: &Ctx, message: &str, caption: &str) -> Option<String> {
+    let dlg = TextEntryDialog::builder(&ctx.ui.frame, message, caption)
+        .password()
+        .build();
+    if dlg.show_modal() == ID_OK {
+        dlg.get_value().filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
+/// Ja/Nein-Frage, ob das Konto Administrator sein soll.
+fn ask_admin(ctx: &Ctx, caption: &str) -> bool {
+    let dlg = MessageDialog::builder(&ctx.ui.frame, "Soll dieses Konto Administrator sein?", caption)
+        .with_style(MessageDialogStyle::YesNo)
+        .build();
+    dlg.show_modal() == ID_YES
+}
+
+/// Account-Liste vom Server anfordern (Antwort: account_list_result).
+fn request_accounts(ctx: &Ctx) {
+    send_or_status(ctx, Message::new("account_list", serde_json::json!({})));
+}
+
+/// Vom Handler aufgerufen, um die empfangene Liste anzuzeigen.
+pub fn show_account_list(ctx: &Ctx, text: &str) {
+    info_box(ctx, text, "Konten");
+}
+
+fn account_create(ctx: &Ctx) {
+    let Some(name) = ask_text(ctx, "Benutzername:", "Konto anlegen", "") else {
+        return;
+    };
+    let Some(pw) = ask_secret(ctx, "Passwort:", "Konto anlegen") else {
+        return;
+    };
+    let role = if ask_admin(ctx, "Konto anlegen") { "admin" } else { "user" };
+    send_or_status(
+        ctx,
+        Message::new(
+            "account_create",
+            serde_json::json!({ "username": name, "password": pw, "role": role }),
+        ),
+    );
+}
+
+fn account_password(ctx: &Ctx) {
+    let Some(name) = ask_text(ctx, "Benutzername:", "Passwort zurücksetzen", "") else {
+        return;
+    };
+    let Some(pw) = ask_secret(ctx, "Neues Passwort:", "Passwort zurücksetzen") else {
+        return;
+    };
+    send_or_status(
+        ctx,
+        Message::new(
+            "account_set_password",
+            serde_json::json!({ "username": name, "password": pw }),
+        ),
+    );
+}
+
+fn account_role(ctx: &Ctx) {
+    let Some(name) = ask_text(ctx, "Benutzername:", "Rolle ändern", "") else {
+        return;
+    };
+    let role = if ask_admin(ctx, "Rolle ändern") { "admin" } else { "user" };
+    send_or_status(
+        ctx,
+        Message::new(
+            "account_set_role",
+            serde_json::json!({ "username": name, "role": role }),
+        ),
+    );
+}
+
+fn account_delete(ctx: &Ctx) {
+    let Some(name) = ask_text(ctx, "Benutzername:", "Konto löschen", "") else {
+        return;
+    };
+    let dlg = MessageDialog::builder(
+        &ctx.ui.frame,
+        &format!("Konto „{}“ wirklich löschen?", name),
+        "Konto löschen",
+    )
+    .with_style(MessageDialogStyle::YesNo)
+    .build();
+    if dlg.show_modal() == ID_YES {
+        send_or_status(
+            ctx,
+            Message::new("account_delete", serde_json::json!({ "username": name })),
+        );
+    }
+}
+
+fn toggle_registration(ctx: &Ctx) {
+    let open = !ctx.st.borrow().registration_open;
+    send_or_status(
+        ctx,
+        Message::new("account_set_registration", serde_json::json!({ "open": open })),
+    );
+}
+
+fn change_password(ctx: &Ctx) {
+    let Some(old) = ask_secret(ctx, "Aktuelles Passwort:", "Passwort ändern") else {
+        return;
+    };
+    let Some(new) = ask_secret(ctx, "Neues Passwort:", "Passwort ändern") else {
+        return;
+    };
+    send_or_status(
+        ctx,
+        Message::new(
+            "password_change",
+            serde_json::json!({ "old_password": old, "new_password": new }),
+        ),
+    );
+}
+
+const HELP_TEXT: &str = "Kurztasten (unter macOS Cmd statt Strg):\n\n\
+Strg+M  Mikrofon stumm/laut\n\
+Strg+D  Ton aus/an (taub)\n\
+Strg+L  Loopback an/aus\n\
+Strg+S  Audiodatei streamen\n\
+Strg+P  Streaming pausieren/fortsetzen\n\
+Strg+Umschalt+S  Streaming stoppen\n\
+Strg+J  Ausgewähltem Raum beitreten\n\
+Strg+U  Datei hochladen\n\
+Strg+H  Datei herunterladen\n\
+Strg+R  Dateiliste aktualisieren\n\
+Strg+Umschalt+P  Privatnachricht an ausgewählten Nutzer\n\
+Strg+Q  Beenden\n\n\
+Im Baum: Pfeil rechts/links klappt auf/zu, Enter tritt einem Raum bei.";
 
 // ── Menü-Dispatcher ──
 
-pub fn menu_action(
-    ui: &MainWindow,
-    state: &Arc<AppState>,
-    rt: &tokio::runtime::Handle,
-    ev_tx: &mpsc::UnboundedSender<Message>,
-    action: &str,
-) {
-    match action {
-        "quit" => {
-            save_volume(state);
-            do_disconnect(ui, state);
-            let _ = slint::quit_event_loop();
+pub fn handle_menu(ctx: &Ctx, id: i32) {
+    match id {
+        ID_EXIT => {
+            save_volume(ctx);
+            ctx.ui.frame.close(true);
         }
-        "disconnect" => {
-            do_disconnect(ui, state);
-            append_chat(ui, state, "Verbindung getrennt.");
+        ui::ID_DISCONNECT => {
+            do_disconnect(ctx);
+            ctx.ui.append_chat("Verbindung getrennt.");
         }
-        "settings" => open_settings(ui),
-
-        "toggle-mute" => toggle_mute(ui, state),
-        "toggle-deafen" => toggle_deafen(ui, state),
-        "toggle-loopback" => toggle_loopback(ui, state),
-        "stream-file" => stream_file(ui, state, rt, ev_tx),
-        "stop-stream" => stop_stream(ui, state),
-
-        "join-room" => join_selected(ui, state),
-        "leave-room" => leave_room(ui, state),
-        "create-room" => show_dialog(
-            ui,
-            "create-room",
-            "Raum erstellen",
-            "",
-            "Raumname:",
-            true,
-            "Passwort (optional):",
-            true,
-            false,
+        ui::ID_TOGGLE_MUTE => toggle_mute(ctx),
+        ui::ID_TOGGLE_DEAFEN => toggle_deafen(ctx),
+        ui::ID_TOGGLE_LOOPBACK => toggle_loopback(ctx),
+        ui::ID_STREAM_FILE => stream_file(ctx),
+        ui::ID_PAUSE_STREAM => toggle_pause_stream(ctx),
+        ui::ID_STOP_STREAM => stop_stream(ctx),
+        ui::ID_JOIN_ROOM => join_selected(ctx),
+        ui::ID_LEAVE_ROOM => leave_room(ctx),
+        ui::ID_CREATE_ROOM => create_room(ctx, None),
+        ui::ID_CREATE_SUBROOM => {
+            if let Some(parent) = selected_room(ctx) {
+                create_room(ctx, Some(parent));
+            } else {
+                status(ctx, "Bitte zuerst den übergeordneten Raum auswählen.");
+            }
+        }
+        ui::ID_DELETE_ROOM => delete_room(ctx),
+        ui::ID_UPLOAD => upload_file(ctx),
+        ui::ID_DOWNLOAD => download_file(ctx),
+        ui::ID_REFRESH_FILES => refresh_files(ctx),
+        ui::ID_PM => private_message(ctx),
+        ui::ID_KICK => kick_user(ctx),
+        ui::ID_BAN => ban_user(ctx),
+        ui::ID_MOVE_USER => move_user(ctx),
+        ui::ID_ADMIN_MUTE => admin_mute(ctx, true),
+        ui::ID_ADMIN_UNMUTE => admin_mute(ctx, false),
+        ui::ID_SERVER_MSG => server_message(ctx),
+        ui::ID_ACCOUNTS => request_accounts(ctx),
+        ui::ID_ACCOUNT_CREATE => account_create(ctx),
+        ui::ID_ACCOUNT_PASSWORD => account_password(ctx),
+        ui::ID_ACCOUNT_ROLE => account_role(ctx),
+        ui::ID_ACCOUNT_DELETE => account_delete(ctx),
+        ui::ID_REGISTRATION => toggle_registration(ctx),
+        ui::ID_CHANGE_PW => change_password(ctx),
+        ui::ID_HELP_KEYS => info_box(ctx, HELP_TEXT, "Kurztasten"),
+        ID_ABOUT => info_box(
+            ctx,
+            "TeamConference-Client\nNative Oberfläche mit wxWidgets (wxDragon).",
+            "Über TeamConference",
         ),
-        "create-subroom" => {
-            let Some(parent) = selected_room(ui, state) else {
-                set_status(ui, "Bitte zuerst den übergeordneten Raum auswählen.");
-                return;
-            };
-            let parent_name = state.inner.lock().room_name(parent);
-            show_dialog(
-                ui,
-                &format!("create-subroom:{}", parent),
-                "Unterraum erstellen",
-                &format!("Übergeordneter Raum: {}", parent_name),
-                "Raumname:",
-                true,
-                "Passwort (optional):",
-                true,
-                false,
-            );
-        }
-        "delete-room" => {
-            let Some(room_id) = selected_room(ui, state) else {
-                set_status(ui, "Bitte zuerst einen Raum auswählen.");
-                return;
-            };
-            let name = state.inner.lock().room_name(room_id);
-            show_dialog(
-                ui,
-                &format!("delete-room:{}", room_id),
-                "Raum löschen",
-                &format!("Raum „{}“ wirklich löschen?", name),
-                "",
-                false,
-                "",
-                false,
-                false,
-            );
-        }
-
-        "upload-file" => upload_file(ui, state),
-        "download-file" => download_file(ui, state),
-        "refresh-files" => refresh_files(ui, state),
-
-        "private-message" => send_private_message(ui, state),
-        "kick" => {
-            let Some(user_id) = selected_user(ui, state) else {
-                set_status(ui, "Bitte zuerst einen Nutzer auswählen.");
-                return;
-            };
-            let nick = state.inner.lock().nickname_of(user_id);
-            show_dialog(
-                ui,
-                &format!("kick:{}", user_id),
-                "Nutzer kicken",
-                &format!("Nutzer: {}", nick),
-                "Grund (optional):",
-                true,
-                "",
-                false,
-                false,
-            );
-        }
-        "ban" => {
-            let Some(user_id) = selected_user(ui, state) else {
-                set_status(ui, "Bitte zuerst einen Nutzer auswählen.");
-                return;
-            };
-            let nick = state.inner.lock().nickname_of(user_id);
-            show_dialog(
-                ui,
-                &format!("ban:{}", user_id),
-                "Nutzer bannen",
-                &format!("Nutzer: {}", nick),
-                "Grund (optional):",
-                true,
-                "Dauer in Minuten (leer = unbegrenzt):",
-                true,
-                false,
-            );
-        }
-        "move-user" => {
-            let Some(user_id) = selected_user(ui, state) else {
-                set_status(ui, "Bitte zuerst einen Nutzer auswählen.");
-                return;
-            };
-            let Some(room_id) = selected_room(ui, state) else {
-                set_status(ui, "Bitte zuerst den Zielraum in der Raumliste auswählen.");
-                return;
-            };
-            send_or_status(
-                ui,
-                state,
-                Message::new(
-                    "admin_move",
-                    serde_json::json!({ "user_id": user_id, "room_id": room_id }),
-                ),
-            );
-        }
-        "admin-mute" | "admin-unmute" => {
-            let Some(user_id) = selected_user(ui, state) else {
-                set_status(ui, "Bitte zuerst einen Nutzer auswählen.");
-                return;
-            };
-            send_or_status(
-                ui,
-                state,
-                Message::new(
-                    "admin_mute",
-                    serde_json::json!({ "user_id": user_id, "muted": action == "admin-mute" }),
-                ),
-            );
-        }
-        "server-message" => show_dialog(
-            ui,
-            "server-message",
-            "Servernachricht senden",
-            "",
-            "Nachricht:",
-            true,
-            "",
-            false,
-            false,
-        ),
-
-        "help" => show_dialog(ui, "help", "Kurztasten", HELP_TEXT, "", false, "", false, false),
-
-        other => tracing::warn!("Unbekannte Menü-Aktion: {}", other),
+        _ => {}
     }
 }

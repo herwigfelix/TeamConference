@@ -7,29 +7,37 @@ Screenreader-Beschriftungen (VoiceOver, NVDA, JAWS, Orca) und alle wichtigen
 Aktionen sind über Kurztasten erreichbar.
 
 - **Server**: Rust (Tokio) — Windows, macOS, Linux, Docker
-- **Client**: Rust ([Slint](https://slint.dev)) — Windows, macOS, Linux
+- **Client**: Rust mit nativer Oberfläche über [wxDragon](https://github.com/AllenDang/wxDragon)
+  (wxWidgets) — Windows, macOS, Linux. Native Bedienelemente bedeuten native
+  Barrierefreiheit (UI Automation/MSAA, NSAccessibility, ATK).
 - **Audio**: Opus-kodiert über UDP (Fallback: rohes PCM), adaptiver Jitter-Puffer
 - **Sicherheit**: TLS (selbstsignierte Zertifikate werden automatisch erzeugt),
   Argon2-Passwort-Hashes
 
 ## Features
 
+- **Serverliste** (Lesezeichen): Server speichern, auswählen, entfernen
 - Hierarchische Räume und Unterräume, optional mit Passwort und Nutzerlimit
+- Räume und Nutzer als nativer Baum (Pfeiltasten klappen auf/zu, Enter tritt bei)
 - Raum-Chat, Privatnachrichten, Server-Durchsagen
 - Datei-Upload/-Download pro Raum
 - Audiodateien in einen Raum streamen (MP3, WAV, FLAC, OGG, M4A, …)
 - Mikrofon stumm / Ton aus (taub) / Loopback, Lautstärkeregler
 - Admin-Funktionen: Kicken, Bannen (zeitlich oder dauerhaft), Verschieben,
   Stummschalten, Räume verwalten
+- **Account-Verwaltung** (Admin): Konten anlegen, löschen, Passwort/Rolle
+  setzen, Selbstregistrierung an/aus; jeder Nutzer kann sein eigenes Passwort ändern
+- **Selbstregistrierung** (optional): bei aktivierter Option legt ein Login mit
+  unbekanntem Benutzernamen den Account automatisch an
 - Deutsche Oberfläche, Kurztasten mit Strg (Windows/Linux) bzw. Cmd (macOS)
 
 ## Projektstruktur
 
 ```
 teamconference/
-├── client/             Slint-Client (aktiv)
-│   ├── ui/main.slint   Oberfläche: Chat, Räume, Nutzer, Lautstärke, Dateien, Menüs
-│   └── src/            Netzwerk (WebSocket/UDP), Audio (cpal/Opus/Symphonia), Logik
+├── client/             wxDragon-Client (aktiv)
+│   └── src/            ui.rs (Oberfläche), handlers.rs (Server-Events),
+│                       actions.rs (Aktionen), net/ + audio/ (Netzwerk & Audio)
 ├── server/             Rust-Server
 │   └── src/            control/ audio/ room/ user/ chat/ files/ admin/ db/
 ├── docker/             Dockerfile + Container-Konfiguration
@@ -56,9 +64,13 @@ Benutzername/Passwort `admin` / `admin`.
 
 | Plattform | Benötigt |
 |---|---|
-| alle | Rust (stable), CMake (für den Opus-Codec) |
+| alle | Rust (stable), CMake + C++-Compiler (für Opus und wxWidgets) |
 | Windows | MSVC-Toolchain mit Visual Studio Build Tools |
-| Linux | `libasound2-dev` (ALSA) sowie die üblichen GUI-Pakete für winit |
+| macOS | Xcode Command Line Tools (`xcode-select --install`) |
+| Linux | `libgtk-3-dev` (wxWidgets) und `libasound2-dev` (ALSA) |
+
+Hinweis: Der Client bindet wxWidgets statisch ein; beim **ersten** Build wird
+wxWidgets aus dem Quellcode kompiliert (dauert einige Minuten, danach gecacht).
 
 Alles Erforderliche in einem Befehl installieren:
 
@@ -119,9 +131,33 @@ winget install Rustlang.Rustup
 **Linux** (Debian/Ubuntu):
 
 ```sh
-sudo apt install build-essential cmake libasound2-dev
+sudo apt install build-essential cmake libgtk-3-dev libasound2-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
+
+### Fertige Releases (GitHub Actions)
+
+Wer nicht selbst bauen will, nutzt die vorkompilierten Client-Pakete: Der
+Workflow [`.github/workflows/release.yml`](.github/workflows/release.yml) baut
+den Client auf echten Windows- und macOS-Runnern (macOS arm64 + x86_64,
+Windows x64) und hängt die Archive an ein GitHub-Release.
+
+Release auslösen — einen Versions-Tag pushen:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Die fertigen Pakete erscheinen dann unter *Releases*: **`.dmg`** für macOS
+(enthält das `TeamConference.app`-Bundle), **`.zip`** für Windows und
+**`.tar.gz`** für Linux. Ein manueller Lauf über *Actions → Release Client →
+Run workflow* erzeugt die Artefakte zum Testen auch ohne Tag.
+
+Auf macOS fragt die App beim ersten Start nach der Mikrofon-Berechtigung
+(das `.app`-Bundle trägt die nötige `NSMicrophoneUsageDescription` und ist
+ad-hoc signiert). Wird sie versehentlich abgelehnt, lässt sie sich unter
+*Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon* wieder aktivieren.
 
 ## Server
 
@@ -164,6 +200,7 @@ die Umgebung (so arbeitet das Docker-Setup).
 | `server.name` | `TC_SERVER_NAME` | TeamConference Server |
 | `server.welcome_message` | `TC_WELCOME_MESSAGE` | Willkommen … |
 | `server.max_users` | `TC_MAX_USERS` | 100 |
+| `server.allow_registration` | `TC_ALLOW_REGISTRATION` | false (Anfangswert; Admin schaltet zur Laufzeit) |
 | `network.control_host` | `TC_CONTROL_HOST` | 0.0.0.0 |
 | `network.control_port` | `TC_CONTROL_PORT` | 9500 |
 | `network.audio_host` | `TC_AUDIO_HOST` | 0.0.0.0 |
@@ -211,11 +248,13 @@ cd client
 cargo run --release
 ```
 
-Das Hauptfenster enthält Chatverlauf, Chateingabe, die Raum-/Unterraumliste,
-die Nutzerliste des aktuellen Raums, den Lautstärkeregler und die Dateiliste.
-Alles Weitere (Verbindung, Audio, Raum- und Nutzerverwaltung, Datei-Streaming)
-läuft über die Menüleiste oder Kurztasten — vollständige Liste mit F1 im
-Client oder in [client/README.md](client/README.md).
+Zuerst erscheint die Verbindungsansicht mit der **Serverliste**: gespeicherte
+Server auswählen, per *Als Lesezeichen speichern* anlegen oder entfernen, dann
+*Verbinden*. Nach der Anmeldung zeigt das Hauptfenster Räume und Nutzer als
+Baum, den Chatverlauf mit Eingabefeld, den Lautstärkeregler und die Dateiliste.
+Alles Weitere (Audio, Raum- und Nutzerverwaltung, Datei-Streaming) läuft über
+die Menüleiste oder Kurztasten — Kurztasten-Übersicht über *Hilfe → Kurztasten*
+(F1) oder in [client/README.md](client/README.md).
 
 Die wichtigsten Kurztasten (Strg unter Windows/Linux, Cmd unter macOS):
 
@@ -224,9 +263,11 @@ Die wichtigsten Kurztasten (Strg unter Windows/Linux, Cmd unter macOS):
 | Strg+M | Mikrofon stumm/laut |
 | Strg+D | Ton aus/an (taub) |
 | Strg+S | Audiodatei streamen |
+| Strg+P | Streaming pausieren/fortsetzen |
+| Strg+Umschalt+S | Streaming stoppen |
 | Strg+J | Ausgewähltem Raum beitreten |
 | Strg+U / Strg+H | Datei hochladen / herunterladen |
-| Strg+P | Privatnachricht an ausgewählten Nutzer |
+| Strg+Umschalt+P | Privatnachricht an ausgewählten Nutzer |
 | F1 | Kurztasten-Hilfe |
 
 Einstellungen (Server, Benutzername, Audiogeräte, Lautstärke) werden
@@ -238,14 +279,16 @@ plattformüblich gespeichert:
 
 ## Barrierefreiheit
 
-- Slint nutzt [AccessKit](https://accesskit.dev) — der Client funktioniert mit
-  VoiceOver (macOS), NVDA/JAWS (Windows) und Orca (Linux).
-- Jedes Bedienelement hat ein deutsches `accessible-label`; Listen sind mit
-  den Pfeiltasten navigierbar, Tab/Umschalt+Tab wechselt zwischen Elementen.
+- Die Oberfläche nutzt **native wxWidgets-Bedienelemente** und damit die native
+  Barrierefreiheitsschicht jeder Plattform: UI Automation/MSAA (Windows),
+  NSAccessibility (macOS) und ATK/AT-SPI (Linux) — funktioniert mit VoiceOver,
+  NVDA, JAWS und Orca ohne Zusatzschicht.
+- Vollständige Tastaturbedienung: Menü-Beschleuniger (Strg/Cmd), Tab-Navigation,
+  native Baum-Navigation (Pfeil rechts/links klappt auf/zu, Enter tritt bei).
 - Statusänderungen (stumm, Raum betreten, Upload fertig, …) werden zusätzlich
   als Textzeile im Chatverlauf protokolliert und sind damit nachlesbar.
-- Unterräume werden in der Raumliste durch Einrückung dargestellt und
-  passwortgeschützte Räume textuell gekennzeichnet (kein reines Icon).
+- Räume und Nutzer stehen in einem nativen Baum; passwortgeschützte Räume und
+  stumm/taub-Zustände sind textuell gekennzeichnet (nicht nur per Icon).
 
 ## Protokoll
 

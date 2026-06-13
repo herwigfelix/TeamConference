@@ -32,7 +32,9 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 
 if [ "$OSNAME" = "macos" ]; then
-    # Doppelklickbares .app-Bundle (mit sprechendem Namen für VoiceOver)
+    # Doppelklickbares .app-Bundle (mit sprechendem Namen für VoiceOver).
+    # NSMicrophoneUsageDescription ist nötig, damit macOS beim ersten
+    # Mikrofonzugriff die Berechtigung abfragt.
     APP="$OUT/TeamConference.app"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp "$BIN" "$APP/Contents/MacOS/$BIN_NAME"
@@ -46,27 +48,41 @@ if [ "$OSNAME" = "macos" ]; then
     <key>CFBundleIdentifier</key>      <string>org.accessy.TCClient</string>
     <key>CFBundleExecutable</key>      <string>$BIN_NAME</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>0.2.0</string>
+    <key>CFBundleShortVersionString</key> <string>0.3.0</string>
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
-    <key>NSMicrophoneUsageDescription</key> <string>TeamConference benötigt das Mikrofon für Sprachübertragung.</string>
+    <key>NSMicrophoneUsageDescription</key> <string>TeamConference benötigt das Mikrofon für die Sprachübertragung.</string>
 </dict>
 </plist>
 PLIST
+
+    # Ad-hoc-Signatur: ohne Signatur merkt sich macOS die einmal erteilte
+    # Mikrofon-Berechtigung nicht zuverlässig (TCC). "-" = ad-hoc, kein Zertifikat nötig.
+    codesign --force --deep --sign - "$APP" 2>/dev/null \
+        && echo "Ad-hoc signiert." \
+        || echo "WARNUNG: codesign nicht verfügbar — Mikrofon-Prompt evtl. unzuverlässig."
+
+    cp "$CLIENT_DIR/README.md" "$OUT/README.md" 2>/dev/null || true
+
+    # DMG aus dem Ordner erzeugen (enthält die .app)
+    DMG="$DIST_DIR/$PKG.dmg"
+    rm -f "$DMG"
+    hdiutil create -volname "TeamConference" -srcfolder "$OUT" -ov -format UDZO "$DMG" >/dev/null
+    echo ""
+    echo "=== Fertig ==="
+    echo "App:  $APP"
+    echo "DMG:  $DMG"
 else
     # Linux: nacktes Binary (statisch genug für moderne Distributionen)
     cp "$BIN" "$OUT/$BIN_NAME"
     chmod +x "$OUT/$BIN_NAME"
+    cp "$CLIENT_DIR/README.md" "$OUT/README.md" 2>/dev/null || true
+
+    # Archiv erstellen
+    cd "$DIST_DIR"
+    tar -czf "$PKG.tar.gz" "$PKG"
+    echo ""
+    echo "=== Fertig ==="
+    echo "Ordner:  $OUT"
+    echo "Archiv:  $DIST_DIR/$PKG.tar.gz"
 fi
-
-# README mitliefern
-cp "$CLIENT_DIR/README.md" "$OUT/README.md" 2>/dev/null || true
-
-# Archiv erstellen
-cd "$DIST_DIR"
-tar -czf "$PKG.tar.gz" "$PKG"
-
-echo ""
-echo "=== Fertig ==="
-echo "Ordner:  $OUT"
-echo "Archiv:  $DIST_DIR/$PKG.tar.gz"

@@ -28,44 +28,53 @@ pub async fn handle_login(
         };
     }
 
-    // Authenticate
-    let db_user = match queries::authenticate_user(db, login.username.clone(), login.password).await {
+    let reject = |msg: &str| AuthResponse {
+        success: false,
+        user_id: None,
+        token: None,
+        server_name: None,
+        rooms: None,
+        error: Some(msg.to_string()),
+    };
+
+    // Authenticate. Bei unbekanntem Benutzer und aktivierter Registrierung wird
+    // der Account mit dem angegebenen Passwort angelegt und der Login fortgesetzt.
+    let username = login.username.clone();
+    let password = login.password.clone();
+    let db_user = match queries::authenticate_user(db, username.clone(), password.clone()).await {
         Ok(Some(user)) => user,
         Ok(None) => {
-            // Auto-register if user doesn't exist
-            match queries::create_user(db, login.username.clone(), String::new(), "user".to_string()).await {
-                Ok(_) => {
-                    return AuthResponse {
-                        success: false,
-                        user_id: None,
-                        token: None,
-                        server_name: None,
-                        rooms: None,
-                        error: Some("Invalid username or password".to_string()),
-                    };
+            let exists = queries::find_user_by_username(db, username.clone())
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if exists {
+                // Benutzer existiert → falsches Passwort
+                return reject("Invalid username or password");
+            }
+            if !queries::is_registration_open(db).await {
+                return reject("Invalid username or password");
+            }
+            // Registrierung: neuen Account anlegen und einloggen
+            match queries::create_user(db, username.clone(), password, "user".to_string()).await {
+                Ok(id) => {
+                    tracing::info!("Neuer Account per Registrierung angelegt: {}", username);
+                    crate::db::queries::DbUser {
+                        id,
+                        username: username.clone(),
+                        role: "user".to_string(),
+                    }
                 }
-                Err(_) => {
-                    return AuthResponse {
-                        success: false,
-                        user_id: None,
-                        token: None,
-                        server_name: None,
-                        rooms: None,
-                        error: Some("Invalid username or password".to_string()),
-                    };
+                Err(e) => {
+                    tracing::error!("Registrierung fehlgeschlagen: {}", e);
+                    return reject("Konto konnte nicht angelegt werden");
                 }
             }
         }
         Err(e) => {
             tracing::error!("Auth error: {}", e);
-            return AuthResponse {
-                success: false,
-                user_id: None,
-                token: None,
-                server_name: None,
-                rooms: None,
-                error: Some("Internal server error".to_string()),
-            };
+            return reject("Internal server error");
         }
     };
 

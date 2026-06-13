@@ -89,6 +89,33 @@ TeamConference uses two channels:
 | `stream_file_stop` | C→S | `{}` |
 | `stream_file_status` | S→C | `{ user_id, filename, playing }` |
 
+### Account Management
+
+Admin-only außer `password_change` (jeder angemeldete Nutzer) und der
+Registrierung (siehe unten). Operationen referenzieren Konten über den
+eindeutigen `username`.
+
+| Type | Direction | Data |
+|------|-----------|------|
+| `account_list` | C→S | `{}` (Admin) |
+| `account_list_result` | S→C | `{ accounts: [{ username, role }], registration_open }` |
+| `account_create` | C→S | `{ username, password, role }` (Admin) |
+| `account_delete` | C→S | `{ username }` (Admin) |
+| `account_set_password` | C→S | `{ username, password }` (Admin) |
+| `account_set_role` | C→S | `{ username, role }` (Admin, role = user/admin) |
+| `account_set_registration` | C→S | `{ open: bool }` (Admin) |
+| `password_change` | C→S | `{ old_password, new_password }` (eigener Account) |
+| `account_ack` | S→C | `{ success, message }` |
+
+### Registrierung (Selbstregistrierung)
+
+Ist sie aktiviert (`account_set_registration { open: true }`, persistiert in der
+DB-Tabelle `settings`), so legt ein `auth_login` mit **unbekanntem**
+Benutzernamen den Account mit dem angegebenen Passwort und Rolle `user` an und
+meldet ihn direkt an. Existiert der Benutzer bereits, gilt ein falsches Passwort
+weiterhin als Fehler. Anfangswert über `[server] allow_registration` bzw.
+`TC_ALLOW_REGISTRATION` (Standard: aus).
+
 ## Audio Channel (UDP, Binary)
 
 ### Packet Format

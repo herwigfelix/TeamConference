@@ -417,3 +417,125 @@ pub async fn delete_room_file(conn: &Connection, file_id: i64) -> anyhow::Result
     .await
     .map_err(|e| anyhow::anyhow!("Failed to delete room file: {}", e))
 }
+
+// ── Account-Verwaltung ──
+
+/// Find a user by name without verifying a password (existence check).
+pub async fn find_user_by_username(
+    conn: &Connection,
+    username: String,
+) -> anyhow::Result<Option<DbUser>> {
+    conn.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT id, username, role FROM users WHERE username = ?1")?;
+        let result = stmt.query_row(rusqlite::params![username], |row| {
+            Ok(DbUser {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                role: row.get(2)?,
+            })
+        });
+        match result {
+            Ok(u) => Ok(Some(u)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Lookup failed: {}", e))
+}
+
+/// List all accounts (id, username, role), sorted by name.
+pub async fn list_users(conn: &Connection) -> anyhow::Result<Vec<DbUser>> {
+    conn.call(|conn| {
+        let mut stmt = conn.prepare("SELECT id, username, role FROM users ORDER BY username")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DbUser {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                role: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Listing users failed: {}", e))
+}
+
+pub async fn delete_user(conn: &Connection, user_id: i64) -> anyhow::Result<()> {
+    conn.call(move |conn| {
+        conn.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![user_id])?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Deleting user failed: {}", e))
+}
+
+pub async fn update_password(conn: &Connection, user_id: i64, new_password: String) -> anyhow::Result<()> {
+    let hash = hash_password(&new_password)?;
+    conn.call(move |conn| {
+        conn.execute(
+            "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+            rusqlite::params![hash, user_id],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Updating password failed: {}", e))
+}
+
+pub async fn update_role(conn: &Connection, user_id: i64, role: String) -> anyhow::Result<()> {
+    conn.call(move |conn| {
+        conn.execute(
+            "UPDATE users SET role = ?1 WHERE id = ?2",
+            rusqlite::params![role, user_id],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Updating role failed: {}", e))
+}
+
+// ── Server-Einstellungen (Key-Value) ──
+
+pub async fn get_setting(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
+    let key = key.to_string();
+    conn.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let result = stmt.query_row(rusqlite::params![key], |row| row.get::<_, String>(0));
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Reading setting failed: {}", e))
+}
+
+pub async fn set_setting(conn: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
+    let key = key.to_string();
+    let value = value.to_string();
+    conn.call(move |conn| {
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Writing setting failed: {}", e))
+}
+
+/// Whether self-registration on login is currently enabled.
+pub async fn is_registration_open(conn: &Connection) -> bool {
+    matches!(get_setting(conn, "registration_open").await, Ok(Some(ref v)) if v == "true")
+}
+
+pub async fn set_registration(conn: &Connection, open: bool) -> anyhow::Result<()> {
+    set_setting(conn, "registration_open", if open { "true" } else { "false" }).await
+}

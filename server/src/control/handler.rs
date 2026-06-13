@@ -8,6 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use crate::config::Config;
 use crate::control::protocol::*;
 use crate::control::auth;
+use crate::db::queries;
 use crate::chat::handler as chat_handler;
 use crate::admin::handler as admin_handler;
 use crate::files::handler::FileHandler;
@@ -15,6 +16,38 @@ use crate::user::manager::UserManager;
 use crate::room::manager::RoomManager;
 use crate::audio::file_stream::AudioFileStreamer;
 use crate::audio::udp_server::UdpAudioServer;
+
+/// True, wenn der angemeldete Nutzer Admin ist.
+async fn is_admin(state: &SharedState, uid: i64) -> bool {
+    matches!(state.users.get_user(uid).await, Some(u) if u.is_admin())
+}
+
+/// Standard-Antwort bei fehlenden Rechten.
+fn deny() -> Message {
+    Message::new("error", serde_json::json!({ "message": "Insufficient permissions" }))
+}
+
+/// Bestätigung/Fehler für Account-Operationen.
+fn account_ack(success: bool, message: &str) -> Message {
+    Message::new(
+        "account_ack",
+        serde_json::json!({ "success": success, "message": message }),
+    )
+}
+
+/// Aktuelle Account-Liste + Registrierungsstatus als Nachricht.
+async fn account_list_msg(state: &SharedState) -> Message {
+    let users = queries::list_users(&state.db).await.unwrap_or_default();
+    let open = queries::is_registration_open(&state.db).await;
+    let accounts: Vec<serde_json::Value> = users
+        .iter()
+        .map(|u| serde_json::json!({ "username": u.username, "role": u.role }))
+        .collect();
+    Message::new(
+        "account_list_result",
+        serde_json::json!({ "accounts": accounts, "registration_open": open }),
+    )
+}
 
 pub struct SharedState {
     pub config: Config,
@@ -551,6 +584,151 @@ pub async fn handle_connection<S>(
                     streamer.stop();
                 }
                 audio_streamer = None;
+            }
+
+            // ── Account-Verwaltung (admin-only, außer password_change) ──
+
+            "account_list" => {
+                let Some(uid) = user_id else { continue };
+                if !is_admin(&state, uid).await {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let _ = tx.send(account_list_msg(&state).await);
+            }
+
+            "account_create" => {
+                let Some(uid) = user_id else { continue };
+                if !is_admin(&state, uid).await {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                let password = parsed.data.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let role = match parsed.data.get("role").and_then(|v| v.as_str()) {
+                    Some("admin") => "admin",
+                    _ => "user",
+                }.to_string();
+                if username.is_empty() || password.is_empty() {
+                    let _ = tx.send(account_ack(false, "Benutzername und Passwort sind erforderlich"));
+                    continue;
+                }
+                if queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten().is_some() {
+                    let _ = tx.send(account_ack(false, "Benutzername existiert bereits"));
+                    continue;
+                }
+                match queries::create_user(&state.db, username.clone(), password, role).await {
+                    Ok(_) => {
+                        let _ = tx.send(account_ack(true, &format!("Konto '{}' angelegt", username)));
+                        let _ = tx.send(account_list_msg(&state).await);
+                    }
+                    Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                }
+            }
+
+            "account_delete" => {
+                let Some(uid) = user_id else { continue };
+                if !is_admin(&state, uid).await {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
+                    Some(target) if target.id == uid => {
+                        let _ = tx.send(account_ack(false, "Das eigene Konto kann nicht gelöscht werden"));
+                    }
+                    Some(target) => match queries::delete_user(&state.db, target.id).await {
+                        Ok(()) => {
+                            let _ = tx.send(account_ack(true, &format!("Konto '{}' gelöscht", username)));
+                            let _ = tx.send(account_list_msg(&state).await);
+                        }
+                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                    },
+                    None => { let _ = tx.send(account_ack(false, "Konto nicht gefunden")); }
+                }
+            }
+
+            "account_set_password" => {
+                let Some(uid) = user_id else { continue };
+                if !is_admin(&state, uid).await {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                let password = parsed.data.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if password.is_empty() {
+                    let _ = tx.send(account_ack(false, "Passwort darf nicht leer sein"));
+                    continue;
+                }
+                match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
+                    Some(target) => match queries::update_password(&state.db, target.id, password).await {
+                        Ok(()) => { let _ = tx.send(account_ack(true, &format!("Passwort für '{}' geändert", username))); }
+                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                    },
+                    None => { let _ = tx.send(account_ack(false, "Konto nicht gefunden")); }
+                }
+            }
+
+            "account_set_role" => {
+                let Some(uid) = user_id else { continue };
+                if !is_admin(&state, uid).await {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                let role = match parsed.data.get("role").and_then(|v| v.as_str()) {
+                    Some("admin") => "admin",
+                    _ => "user",
+                }.to_string();
+                match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
+                    Some(target) => match queries::update_role(&state.db, target.id, role.clone()).await {
+                        Ok(()) => {
+                            let _ = tx.send(account_ack(true, &format!("Rolle von '{}' = {}", username, role)));
+                            let _ = tx.send(account_list_msg(&state).await);
+                        }
+                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                    },
+                    None => { let _ = tx.send(account_ack(false, "Konto nicht gefunden")); }
+                }
+            }
+
+            "account_set_registration" => {
+                let Some(uid) = user_id else { continue };
+                if !is_admin(&state, uid).await {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let open = parsed.data.get("open").and_then(|v| v.as_bool()).unwrap_or(false);
+                match queries::set_registration(&state.db, open).await {
+                    Ok(()) => {
+                        let _ = tx.send(account_ack(true, if open { "Registrierung aktiviert" } else { "Registrierung deaktiviert" }));
+                        let _ = tx.send(account_list_msg(&state).await);
+                    }
+                    Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                }
+            }
+
+            "password_change" => {
+                // Self-Service: jeder angemeldete Nutzer ändert sein eigenes Passwort
+                let Some(uid) = user_id else { continue };
+                let old = parsed.data.get("old_password").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let new = parsed.data.get("new_password").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if new.is_empty() {
+                    let _ = tx.send(account_ack(false, "Neues Passwort darf nicht leer sein"));
+                    continue;
+                }
+                let username = match state.users.get_user(uid).await {
+                    Some(u) => u.username.clone(),
+                    None => continue,
+                };
+                // Altes Passwort prüfen
+                match queries::authenticate_user(&state.db, username, old).await {
+                    Ok(Some(_)) => match queries::update_password(&state.db, uid, new).await {
+                        Ok(()) => { let _ = tx.send(account_ack(true, "Dein Passwort wurde geändert")); }
+                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                    },
+                    _ => { let _ = tx.send(account_ack(false, "Altes Passwort ist falsch")); }
+                }
             }
 
             _ => {

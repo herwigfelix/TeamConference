@@ -23,6 +23,9 @@ pub struct ServerConfig {
     pub name: String,
     pub welcome_message: String,
     pub max_users: u32,
+    /// Anfangswert für die Selbstregistrierung beim ersten Start. Zur Laufzeit
+    /// kann ein Admin sie umschalten (in der DB-Tabelle `settings` gespeichert).
+    pub allow_registration: bool,
 }
 
 impl Default for ServerConfig {
@@ -31,6 +34,7 @@ impl Default for ServerConfig {
             name: "TeamConference Server".into(),
             welcome_message: "Willkommen auf dem TeamConference Server!".into(),
             max_users: 100,
+            allow_registration: false,
         }
     }
 }
@@ -164,6 +168,7 @@ impl Config {
         env_override(&mut self.server.name, "TC_SERVER_NAME");
         env_override(&mut self.server.welcome_message, "TC_WELCOME_MESSAGE");
         env_override(&mut self.server.max_users, "TC_MAX_USERS");
+        env_override(&mut self.server.allow_registration, "TC_ALLOW_REGISTRATION");
 
         env_override(&mut self.network.control_host, "TC_CONTROL_HOST");
         env_override(&mut self.network.control_port, "TC_CONTROL_PORT");

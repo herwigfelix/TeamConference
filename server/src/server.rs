@@ -32,6 +32,11 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
         }
     }
 
+    // Seed the registration setting from config on first run (admin can toggle it later)
+    if queries::get_setting(&db, "registration_open").await.ok().flatten().is_none() {
+        let _ = queries::set_registration(&db, config.server.allow_registration).await;
+    }
+
     // Create admin user from environment (for Docker: TC_ADMIN_USERNAME / TC_ADMIN_PASSWORD)
     if let (Ok(username), Ok(password)) = (
         std::env::var("TC_ADMIN_USERNAME"),

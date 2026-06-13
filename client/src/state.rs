@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -35,25 +35,8 @@ pub struct PendingUpload {
     pub data: Vec<u8>,
 }
 
-/// Art eines Knotens in der Windows-Baumansicht.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TreeKind {
-    Room,
-    User,
-}
-
-/// Ein sichtbarer (aufgeklappter) Knoten der Windows-Baumansicht.
-/// Das flache `ui_tree` bildet die `StandardListView`-Zeilen 1:1 ab.
-#[derive(Debug, Clone)]
-pub struct TreeNode {
-    pub kind: TreeKind,
-    /// Raum-ID (bei Room) bzw. Nutzer-ID (bei User)
-    pub id: i64,
-    /// Zugehöriger Raum: bei Room == id, bei User der Raum, in dem er ist
-    pub room_id: i64,
-}
-
 /// Mutable inner state protected by parking_lot::Mutex.
+/// Shared between the UI thread and the tokio network/audio tasks.
 #[derive(Debug, Default)]
 pub struct InnerState {
     // Connection
@@ -95,18 +78,8 @@ pub struct InnerState {
     pub stream_shutdown: Option<tokio::sync::watch::Sender<bool>>,
     pub streaming_file: bool,
 
-    // UI bookkeeping: maps list indices to ids (rebuilt with the models)
-    pub ui_room_ids: Vec<i64>,
-    pub ui_user_ids: Vec<i64>,
-    pub ui_files: Vec<FileInfo>,
-    pub chat_log: String,
-
-    // Windows-Baumansicht: flache Knotenliste + aufgeklappte Räume
-    pub ui_tree: Vec<TreeNode>,
-    pub expanded_rooms: HashSet<i64>,
-
-    // Join that waits for a password dialog
-    pub pending_join_room: Option<i64>,
+    // Files in the current room (updated on file_list, read by download action)
+    pub current_files: Vec<FileInfo>,
 
     // Upload that waits for the server-assigned upload_id
     pub pending_upload: Option<PendingUpload>,
@@ -143,10 +116,10 @@ pub struct AppState {
     pub playback_rx: Mutex<Option<crossbeam_channel::Receiver<Vec<u8>>>>,
     /// Atomic flag: file streaming is active, playback should mix audio
     pub file_streaming: AtomicBool,
+    /// Atomic flag: file streaming is paused (no UDP packets are sent while true)
+    pub stream_paused: AtomicBool,
     /// Playback volume as f32 bits (0.0 – 1.0), read lock-free in the audio callback
     pub volume_bits: Arc<AtomicU32>,
-    /// Baumansicht statt zweier Listen (nur Windows). Steuert UI und Auswahl-Logik.
-    pub tree_mode: bool,
 }
 
 impl AppState {
@@ -159,8 +132,8 @@ impl AppState {
             playback_tx: Mutex::new(None),
             playback_rx: Mutex::new(None),
             file_streaming: AtomicBool::new(false),
+            stream_paused: AtomicBool::new(false),
             volume_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
-            tree_mode: cfg!(target_os = "windows"),
         }
     }
 
