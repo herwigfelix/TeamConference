@@ -44,14 +44,14 @@ die Mikrofonrechte des Terminals.
 
 ## Hauptfenster
 
-- **Raumliste** (native Liste, Unterräume eingerückt) und darunter die
-  **Nutzerliste** des aktuellen Raums. Beitreten per Knopf „Beitreten", Strg+J
-  oder Doppelklick auf den Raum. (Native Listen statt Tree-Widget, weil
-  Tree-Controls in wxWidgets je nach Plattform nicht screenreader-tauglich sind.)
+- **Räume und Nutzer** als plattformnativer Baum (wxTreeCtrl auf Windows,
+  DataViewTreeCtrl auf macOS/Linux — jeweils das screenreader-taugliche native
+  Widget). Beitreten per Enter/Doppelklick auf den Raum bzw. Strg+J; auf
+  macOS/Linux zusätzlich „Beitreten"-Knopf (auf Windows bewusst keiner).
 - **Chatverlauf** (schreibgeschützt) und **Chateingabe** (Enter sendet).
 - **Lautstärkeregler** (0–100 %, wirkt auf die Wiedergabe).
 - **Dateiliste des aktuellen Raums** mit Herunterladen/Aktualisieren.
-- Audio-Qualität (Samplerate, Bittiefe, Mono/Stereo) über *Audio → Audio-Einstellungen*.
+- Mikrofon und Lautsprecher über *Audio → Audio-Einstellungen* wählbar.
 
 Alles Weitere läuft über die Menüleiste (Server, Audio, Räume, Dateien,
 Verwaltung, Hilfe) oder über Kurztasten.

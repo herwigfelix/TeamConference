@@ -7,100 +7,18 @@ use wxdragon::prelude::*;
 
 use crate::app::Ctx;
 use crate::protocol::{
-    AudioUserState, AuthResponse, FileDownloadData, FileInfo, FileUploadAck, Message, RoomInfo,
+    AudioUserState, AuthResponse, FileDownloadData, FileInfo, FileUploadAck, Message,
     StreamFileStatus, UserInfo,
 };
 
-fn user_label(u: &UserInfo) -> String {
-    let mut label = u.nickname.clone();
-    if !u.role.is_empty() && u.role != "user" {
-        label.push_str(&format!(" [{}]", u.role));
-    }
-    if u.muted {
-        label.push_str(", stumm");
-    }
-    if u.deafened {
-        label.push_str(", taub");
-    }
-    label
-}
-
-/// Räume + Unterräume flach in die Raum-ListBox schreiben (Unterräume eingerückt),
-/// und die Index→Raum-ID-Zuordnung aktualisieren. Erhält die Auswahl per Raum-ID.
-pub fn rebuild_rooms(ctx: &Ctx) {
-    let (rooms, prev_id) = {
-        let inner = ctx.app.inner.lock();
-        let prev = ctx.ui.rooms.get_selection();
-        let prev_id = prev.and_then(|i| ctx.st.borrow().room_ids.get(i as usize).copied());
-        (inner.rooms.clone(), prev_id)
-    };
-
-    let mut ids: Vec<i64> = Vec::new();
-    ctx.ui.rooms.clear();
-
-    // rekursiv, alphabetisch je Ebene, mit Einrückung nach Tiefe
-    fn add_level(
-        lb: &ListBox,
-        rooms: &[RoomInfo],
-        parent: Option<i64>,
-        depth: usize,
-        ids: &mut Vec<i64>,
-    ) {
-        let mut level: Vec<&RoomInfo> = rooms.iter().filter(|r| r.parent_id == parent).collect();
-        level.sort_by(|a, b| a.name.cmp(&b.name));
-        for room in level {
-            let indent = "    ".repeat(depth);
-            let lock = if room.has_password { ", Passwort" } else { "" };
-            lb.append(&format!(
-                "{}{} ({} Nutzer{})",
-                indent,
-                room.name,
-                room.users.len(),
-                lock
-            ));
-            ids.push(room.id);
-            add_level(lb, rooms, Some(room.id), depth + 1, ids);
-        }
-    }
-    add_level(&ctx.ui.rooms, &rooms, None, 0, &mut ids);
-
-    // vorherige Auswahl per Raum-ID wiederherstellen
-    if let Some(pid) = prev_id {
-        if let Some(pos) = ids.iter().position(|&r| r == pid) {
-            ctx.ui.rooms.set_selection(pos as u32, true);
-        }
-    }
-    ctx.st.borrow_mut().room_ids = ids;
-}
-
-/// Nutzer des aktuellen Raums in die Nutzer-ListBox schreiben.
-pub fn rebuild_users(ctx: &Ctx) {
-    let users = {
-        let inner = ctx.app.inner.lock();
-        match inner.current_room_id {
-            Some(rid) => inner
-                .rooms
-                .iter()
-                .find(|r| r.id == rid)
-                .map(|r| r.users.clone())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
-    };
-
-    ctx.ui.users.clear();
-    let mut ids: Vec<i64> = Vec::new();
-    for u in &users {
-        ctx.ui.users.append(&user_label(u));
-        ids.push(u.id);
-    }
-    ctx.st.borrow_mut().user_ids = ids;
-}
-
-/// Raum- und Nutzerliste zusammen neu aufbauen.
+/// Räume-und-Nutzer-Baum neu aufbauen.
 pub fn rebuild_tree(ctx: &Ctx) {
-    rebuild_rooms(ctx);
-    rebuild_users(ctx);
+    let (rooms, current) = {
+        let inner = ctx.app.inner.lock();
+        (inner.rooms.clone(), inner.current_room_id)
+    };
+    let mut st = ctx.st.borrow_mut();
+    crate::roomtree::rebuild(&ctx.ui.rooms_tree, &rooms, current, &mut st.tree_map);
 }
 
 /// Dateiliste neu aufbauen.
@@ -165,7 +83,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 rebuild_files(ctx);
                 refresh_status(ctx);
                 // Fokus in die Hauptansicht setzen, damit der Screenreader mitwandert
-                ui.rooms.set_focus();
+                ui.rooms_tree.set_focus();
             }
             Ok(resp) => {
                 let err = resp.error.unwrap_or_else(|| "Unbekannter Fehler".into());

@@ -18,8 +18,9 @@ Aktionen sind über Kurztasten erreichbar.
 
 - **Serverliste** (Lesezeichen): Server speichern, auswählen, entfernen
 - Hierarchische Räume und Unterräume, optional mit Passwort und Nutzerlimit
-- Räume (mit eingerückten Unterräumen) und Nutzer als native Listen — auf allen Plattformen screenreader-tauglich
-- Audio-Einstellungen: Samplerate, Bittiefe, Mono/Stereo
+- Räume und Nutzer als **plattformnativer Baum** (wxTreeCtrl auf Windows,
+  DataViewTreeCtrl auf macOS/Linux) — auf jeder Plattform screenreader-tauglich
+- Audiogeräte (Mikrofon/Lautsprecher) im Client wählbar
 - Raum-Chat, Privatnachrichten, Server-Durchsagen
 - Datei-Upload/-Download pro Raum
 - Audiodateien in einen Raum streamen (MP3, WAV, FLAC, OGG, M4A, …)
@@ -305,9 +306,11 @@ plattformüblich gespeichert:
   NVDA, JAWS und Orca ohne Zusatzschicht.
 - Vollständige Tastaturbedienung: Menü-Beschleuniger (Strg/Cmd), Tab-Navigation,
   Listen mit Pfeiltasten; Beitreten per Knopf, Strg+J oder Doppelklick.
-- Räume und Nutzer sind **native Listen** (`wxListBox`) statt eines Tree-Widgets —
-  Tree-Controls sind in wxWidgets je nach Plattform nicht screenreader-tauglich,
-  Listboxen überall. Unterräume werden eingerückt dargestellt.
+- Räume und Nutzer stehen in einem **plattformnativen Baum**: `wxTreeCtrl` auf
+  Windows (SysTreeView32/MSAA), `wxDataViewTreeCtrl` auf macOS/Linux
+  (NSOutlineView/GtkTreeView) — denn kein einzelnes Tree-Widget ist in wxWidgets
+  auf allen Plattformen barrierefrei. Auf Windows tritt man per Enter/Doppelklick
+  bei (kein eigener Knopf), auf macOS/Linux zusätzlich per „Beitreten"-Knopf.
 - Wichtige Rückmeldungen (Verbindungs-/Anmeldefehler, Konto-Ergebnisse) kommen
   als **Dialog** — die Statuszeile wird von Screenreadern nicht vorgelesen.
 - Statusänderungen (stumm, Raum betreten, Upload fertig, …) werden zusätzlich

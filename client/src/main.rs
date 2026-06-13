@@ -16,6 +16,7 @@ mod config;
 mod handlers;
 mod net;
 mod protocol;
+mod roomtree;
 mod state;
 mod ui;
 
@@ -78,8 +79,7 @@ fn main() {
             st: Rc::new(RefCell::new(UiState {
                 servers: cfg.servers.clone(),
                 files: Vec::new(),
-                room_ids: Vec::new(),
-                user_ids: Vec::new(),
+                tree_map: std::collections::HashMap::new(),
                 registration_open: false,
             })),
         };
@@ -165,6 +165,8 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.chat_in.on_text_enter(move |_| actions::send_chat(&ctx));
     }
+    // Beitreten-Knopf nur auf macOS/Linux
+    #[cfg(not(target_os = "windows"))]
     {
         let ctx = ctx.clone();
         ui.join_btn.on_click(move |_| actions::join_selected(&ctx));
@@ -183,9 +185,10 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.volume.on_slider(move |_| actions::volume_changed(&ctx));
     }
-    // Doppelklick auf einen Raum tritt ihm bei (zusätzlich zu Knopf/Strg+J)
+    // Enter/Doppelklick auf einen Baumeintrag tritt dem Raum bei
     {
         let ctx = ctx.clone();
-        ui.rooms.on_item_double_clicked(move |_| actions::join_selected(&ctx));
+        ui.rooms_tree
+            .on_item_activated(move |_| actions::join_selected(&ctx));
     }
 }

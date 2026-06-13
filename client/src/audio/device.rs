@@ -1,8 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use serde::Serialize;
 
-// Für eine künftige Geräteauswahl im UI vorgehalten.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {
     pub name: String,
@@ -12,7 +10,6 @@ pub struct DeviceInfo {
 }
 
 /// List all available audio input and output devices.
-#[allow(dead_code)]
 pub fn list_devices() -> Vec<DeviceInfo> {
     let host = cpal::default_host();
     let mut devices = Vec::new();

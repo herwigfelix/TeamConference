@@ -25,16 +25,14 @@ fn send_or_status(ctx: &Ctx, msg: Message) -> bool {
     }
 }
 
-/// In der Raumliste ausgewählte Raum-ID.
+/// Im Baum ausgewählte Raum-ID (bei Nutzer-Knoten dessen Raum).
 fn selected_room(ctx: &Ctx) -> Option<i64> {
-    let idx = ctx.ui.rooms.get_selection()? as usize;
-    ctx.st.borrow().room_ids.get(idx).copied()
+    crate::roomtree::selected_room(&ctx.ui.rooms_tree, &ctx.st.borrow().tree_map)
 }
 
-/// In der Nutzerliste ausgewählte Nutzer-ID.
+/// Im Baum ausgewählte Nutzer-ID.
 fn selected_user(ctx: &Ctx) -> Option<i64> {
-    let idx = ctx.ui.users.get_selection()? as usize;
-    ctx.st.borrow().user_ids.get(idx).copied()
+    crate::roomtree::selected_user(&ctx.ui.rooms_tree, &ctx.st.borrow().tree_map)
 }
 
 fn selected_file(ctx: &Ctx) -> Option<crate::protocol::FileInfo> {
@@ -485,17 +483,35 @@ pub fn volume_changed(ctx: &Ctx) {
     ctx.app.set_volume(v as f32 / 100.0);
 }
 
-/// Dialog für Audio-Qualität: Samplerate, Bittiefe, Kanäle (Mono/Stereo).
+/// Dialog zur Auswahl von Mikrofon und Lautsprecher. Die Audio-Qualität
+/// (Samplerate, Mono/Stereo) bestimmt dagegen der Raum (siehe Raum-Dialog).
 fn audio_settings(ctx: &Ctx) {
-    const RATES: [u32; 5] = [48000, 44100, 24000, 16000, 8000];
-    const DEPTHS: [u8; 3] = [16, 24, 32];
+    let devices = crate::audio::device::list_devices();
+    let mut inputs: Vec<String> = vec!["Standardgerät".to_string()];
+    let mut outputs: Vec<String> = vec!["Standardgerät".to_string()];
+    for d in &devices {
+        if d.is_input {
+            inputs.push(d.name.clone());
+        }
+        if d.is_output {
+            outputs.push(d.name.clone());
+        }
+    }
 
-    let (cur_rate, cur_depth, cur_ch) = {
-        let a = &ctx.app.inner.lock().audio_config;
-        (a.sample_rate, a.bit_depth, a.channels)
+    let (cur_in, cur_out) = {
+        let inner = ctx.app.inner.lock();
+        (inner.input_device.clone(), inner.output_device.clone())
     };
+    let in_idx = cur_in
+        .as_ref()
+        .and_then(|n| inputs.iter().position(|d| d == n))
+        .unwrap_or(0);
+    let out_idx = cur_out
+        .as_ref()
+        .and_then(|n| outputs.iter().position(|d| d == n))
+        .unwrap_or(0);
 
-    let dialog = Dialog::builder(&ctx.ui.frame, "Audio-Einstellungen").build();
+    let dialog = Dialog::builder(&ctx.ui.frame, "Audiogeräte").build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
 
     let row = |label: &str, choice: &Choice| {
@@ -510,28 +526,21 @@ fn audio_settings(ctx: &Ctx) {
         v.add_sizer(&r, 0, SizerFlag::Expand, 0);
     };
 
-    let rate_choice = Choice::builder(&dialog).build();
-    for r in RATES {
-        rate_choice.append(&r.to_string());
+    let in_choice = Choice::builder(&dialog).build();
+    for d in &inputs {
+        in_choice.append(d);
     }
-    rate_choice.set_selection(RATES.iter().position(|&r| r == cur_rate).unwrap_or(0) as u32);
-    ui::set_a11y_name(&rate_choice, "Samplerate in Hertz");
-    row("Samplerate (Hz):", &rate_choice);
+    in_choice.set_selection(in_idx as u32);
+    ui::set_a11y_name(&in_choice, "Mikrofon");
+    row("Mikrofon:", &in_choice);
 
-    let depth_choice = Choice::builder(&dialog).build();
-    for d in DEPTHS {
-        depth_choice.append(&d.to_string());
+    let out_choice = Choice::builder(&dialog).build();
+    for d in &outputs {
+        out_choice.append(d);
     }
-    depth_choice.set_selection(DEPTHS.iter().position(|&d| d == cur_depth).unwrap_or(0) as u32);
-    ui::set_a11y_name(&depth_choice, "Bittiefe");
-    row("Bittiefe (Bit):", &depth_choice);
-
-    let ch_choice = Choice::builder(&dialog).build();
-    ch_choice.append("Mono");
-    ch_choice.append("Stereo");
-    ch_choice.set_selection(if cur_ch >= 2 { 1 } else { 0 });
-    ui::set_a11y_name(&ch_choice, "Kanäle Mono oder Stereo");
-    row("Kanäle:", &ch_choice);
+    out_choice.set_selection(out_idx as u32);
+    ui::set_a11y_name(&out_choice, "Lautsprecher");
+    row("Lautsprecher:", &out_choice);
 
     let btns = BoxSizer::builder(Orientation::Horizontal).build();
     let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
@@ -553,39 +562,29 @@ fn audio_settings(ctx: &Ctx) {
 
     let result = dialog.show_modal();
     if result == ID_OK {
-        let rate = RATES[rate_choice.get_selection().unwrap_or(0) as usize];
-        let depth = DEPTHS[depth_choice.get_selection().unwrap_or(0) as usize];
-        let channels = if ch_choice.get_selection().unwrap_or(0) == 1 { 2u8 } else { 1u8 };
-
+        // Index 0 = Standardgerät = None
+        let pick = |sel: Option<u32>, list: &[String]| -> Option<String> {
+            match sel {
+                Some(0) | None => None,
+                Some(i) => list.get(i as usize).cloned(),
+            }
+        };
+        let input = pick(in_choice.get_selection(), &inputs);
+        let output = pick(out_choice.get_selection(), &outputs);
         {
             let mut inner = ctx.app.inner.lock();
-            inner.audio_config.sample_rate = rate;
-            inner.audio_config.bit_depth = depth;
-            inner.audio_config.channels = channels;
+            inner.input_device = input.clone();
+            inner.output_device = output.clone();
         }
         let mut cfg = config::load_config();
-        cfg.sample_rate = rate;
-        cfg.bit_depth = depth;
-        cfg.channels = channels;
+        cfg.input_device = input;
+        cfg.output_device = output;
         let _ = config::save_config(&cfg);
-
-        // Falls in einem Raum: dem Server die neue Konfiguration melden
-        if ctx.app.inner.lock().current_room_id.is_some() {
-            let _ = ctx.app.send_ws(Message::new(
-                "audio_config",
-                serde_json::json!({ "sample_rate": rate, "bit_depth": depth, "channels": channels, "enabled": true }),
-            ));
-        }
         dialog.destroy();
         notify(
             ctx,
-            &format!(
-                "Audio gespeichert: {} Hz, {} Bit, {}.\nGilt ab der nächsten Verbindung.",
-                rate,
-                depth,
-                if channels == 2 { "Stereo" } else { "Mono" }
-            ),
-            "Audio-Einstellungen",
+            "Audiogeräte gespeichert. Gilt ab der nächsten Verbindung.",
+            "Audiogeräte",
         );
     } else {
         dialog.destroy();

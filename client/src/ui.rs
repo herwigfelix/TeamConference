@@ -77,11 +77,12 @@ pub struct Ui {
     pub bookmark_btn: Button,
     pub remove_btn: Button,
 
-    // Hauptansicht — Räume und Nutzer als native ListBoxen (auf allen
-    // Plattformen screenreader-tauglich; Unterräume eingerückt).
+    // Hauptansicht — Räume/Nutzer als nativer Baum (plattformspezifisch:
+    // wxTreeCtrl auf Windows, DataViewTreeCtrl auf macOS/Linux).
     pub main_panel: Panel,
-    pub rooms: ListBox,
-    pub users: ListBox,
+    pub rooms_tree: crate::roomtree::Widget,
+    // Beitreten-Knopf nur auf macOS/Linux; auf Windows per Enter/Doppelklick.
+    #[cfg(not(target_os = "windows"))]
     pub join_btn: Button,
     pub chat_log: TextCtrl,
     pub chat_in: TextCtrl,
@@ -156,31 +157,25 @@ impl Ui {
         let main_panel = Panel::builder(&frame).build();
         let mh = BoxSizer::builder(Orientation::Horizontal).build();
 
-        // Linke Spalte: Räume und Nutzer als native ListBoxen (barrierefrei
-        // auf allen Plattformen). Unterräume werden in der Raumliste eingerückt.
+        // Linke Spalte: Räume und Nutzer als nativer Baum.
         let left = BoxSizer::builder(Orientation::Vertical).build();
         left.add(
             &StaticText::builder(&main_panel)
-                .with_label("Räume und Unterräume")
+                .with_label("Räume und Nutzer")
                 .build(),
             0,
             SizerFlag::All,
             4,
         );
-        let rooms = ListBox::builder(&main_panel).build();
-        left.add(&rooms, 1, SizerFlag::Expand | SizerFlag::All, 4);
-        let join_btn = Button::builder(&main_panel).with_label("Beitreten").build();
-        left.add(&join_btn, 0, SizerFlag::Expand | SizerFlag::All, 4);
-        left.add(
-            &StaticText::builder(&main_panel)
-                .with_label("Nutzer im aktuellen Raum")
-                .build(),
-            0,
-            SizerFlag::All,
-            4,
-        );
-        let users = ListBox::builder(&main_panel).build();
-        left.add(&users, 1, SizerFlag::Expand | SizerFlag::All, 4);
+        let rooms_tree = crate::roomtree::build(&main_panel);
+        left.add(&rooms_tree, 1, SizerFlag::Expand | SizerFlag::All, 4);
+        // Auf Windows kein Beitreten-Knopf: Enter/Doppelklick im Baum tritt bei.
+        #[cfg(not(target_os = "windows"))]
+        let join_btn = {
+            let b = Button::builder(&main_panel).with_label("Beitreten").build();
+            left.add(&b, 0, SizerFlag::Expand | SizerFlag::All, 4);
+            b
+        };
         mh.add_sizer(&left, 2, SizerFlag::Expand | SizerFlag::All, 4);
 
         // Mitte: Chat
@@ -261,8 +256,7 @@ impl Ui {
         set_a11y_name(&user_in, "Benutzername");
         set_a11y_name(&pass_in, "Passwort");
         set_a11y_name(&nick_in, "Spitzname");
-        set_a11y_name(&rooms, "Räume und Unterräume");
-        set_a11y_name(&users, "Nutzer im aktuellen Raum");
+        set_a11y_name(&rooms_tree, "Räume und Nutzer");
         set_a11y_name(&chat_log, "Chatverlauf");
         set_a11y_name(&chat_in, "Chatnachricht eingeben");
         set_a11y_name(&volume, "Lautstärke in Prozent");
@@ -282,8 +276,8 @@ impl Ui {
             bookmark_btn,
             remove_btn,
             main_panel,
-            rooms,
-            users,
+            rooms_tree,
+            #[cfg(not(target_os = "windows"))]
             join_btn,
             chat_log,
             chat_in,
