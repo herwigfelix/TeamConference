@@ -165,23 +165,24 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 rebuild_tree(ctx);
                 rebuild_files(ctx);
                 refresh_status(ctx);
+                // Fokus in die Hauptansicht setzen, damit der Screenreader mitwandert
+                ui.tree.set_focus();
             }
             Ok(resp) => {
                 let err = resp.error.unwrap_or_else(|| "Unbekannter Fehler".into());
-                ui.set_status(&format!("Anmeldung fehlgeschlagen: {}", err));
-                ui.append_chat(&format!("Anmeldung fehlgeschlagen: {}", err));
                 crate::actions::do_disconnect(ctx);
+                crate::actions::notify(ctx, &format!("Anmeldung fehlgeschlagen: {}", err), "Verbinden");
             }
-            Err(e) => ui.set_status(&format!("Ungültige Serverantwort: {}", e)),
+            Err(e) => crate::actions::notify(ctx, &format!("Ungültige Serverantwort: {}", e), "Verbinden"),
         },
 
         "connection_lost" => {
             crate::actions::do_disconnect(ctx);
-            ui.set_status("Verbindung zum Server verloren");
             ui.append_chat("Verbindung zum Server verloren.");
+            crate::actions::notify(ctx, "Verbindung zum Server verloren.", "Verbindung");
         }
 
-        // synthetisch aus eigenen Tokio-Tasks
+        // synthetisch aus eigenen Tokio-Tasks (Verbindungs-/Streaming-Fehler, Hinweise)
         "client_error" => {
             let text = msg
                 .data
@@ -189,8 +190,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unbekannter Fehler")
                 .to_string();
-            ui.set_status(&text);
             ui.append_chat(&text);
+            crate::actions::notify(ctx, &text, "TeamConference");
         }
 
         "client_stream_finished" => {

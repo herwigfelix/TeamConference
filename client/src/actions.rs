@@ -67,18 +67,26 @@ fn info_box(ctx: &Ctx, message: &str, caption: &str) {
     dlg.show_modal();
 }
 
+/// Screenreader-taugliche Rückmeldung als modaler Dialog (die Statuszeile wird
+/// von Screenreadern nicht vorgelesen). Setzt zusätzlich die Statuszeile.
+pub fn notify(ctx: &Ctx, message: &str, caption: &str) {
+    ctx.ui.set_status(message);
+    let dlg = MessageDialog::builder(&ctx.ui.frame, message, caption).build();
+    dlg.show_modal();
+}
+
 // ── Verbindung ──
 
 pub fn do_connect(ctx: &Ctx) {
     if ctx.app.inner.lock().connected {
-        status(ctx, "Bereits verbunden — bitte zuerst trennen.");
+        notify(ctx, "Bereits verbunden — bitte zuerst trennen.", "Verbinden");
         return;
     }
     let host = ctx.ui.host_in.get_value().trim().to_string();
     let port: u16 = match ctx.ui.port_in.get_value().trim().parse() {
         Ok(p) => p,
         Err(_) => {
-            status(ctx, "Ungültiger Port.");
+            notify(ctx, "Ungültiger Port.", "Verbinden");
             return;
         }
     };
@@ -90,7 +98,11 @@ pub fn do_connect(ctx: &Ctx) {
         nickname = username.clone();
     }
     if host.is_empty() || username.is_empty() || password.is_empty() {
-        status(ctx, "Host, Benutzername und Passwort sind erforderlich.");
+        notify(
+            ctx,
+            "Host, Benutzername und Passwort sind erforderlich.",
+            "Verbinden",
+        );
         return;
     }
 
