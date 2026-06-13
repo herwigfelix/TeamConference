@@ -14,8 +14,15 @@ struct NamedAccessible {
 }
 
 impl AccessibleImpl for NamedAccessible {
-    fn get_name(&self, _child_id: i32) -> (AccStatus, Option<String>) {
-        (wxdragon::ffi::wxd_AccStatus_WXD_ACC_OK, Some(self.name.clone()))
+    fn get_name(&self, child_id: i32) -> (AccStatus, Option<String>) {
+        // child_id 0 = das Control selbst → unser Name. Für Kind-Elemente
+        // (Listen-/Baumeinträge) NOT_IMPLEMENTED, damit wxWidgets den echten
+        // Eintragstext liefert statt überall den Control-Namen.
+        if child_id == 0 {
+            (wxdragon::ffi::wxd_AccStatus_WXD_ACC_OK, Some(self.name.clone()))
+        } else {
+            (wxdragon::ffi::wxd_AccStatus_WXD_ACC_NOT_IMPLEMENTED, None)
+        }
     }
 }
 
