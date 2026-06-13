@@ -4,6 +4,9 @@
 #   docker compose up -d --build
 #
 # Danach im Client verbinden mit: Host = <Server-IP>, Port = 9500, SSL an.
+#
+# Die gesamte Server-Konfiguration läuft über TC_*-Umgebungsvariablen —
+# eine config.toml ist nicht nötig. Auskommentierte Werte zeigen die Defaults.
 
 services:
   server:
@@ -15,16 +18,50 @@ services:
     restart: unless-stopped
 
     ports:
-      - "9500:9500"        # Steuerkanal (WebSocket/TLS)
-      - "9501:9501/udp"    # Audiokanal (UDP)
+      - "9500:9500"        # Steuerkanal (WebSocket/TLS) — muss zu TC_CONTROL_PORT passen
+      - "9501:9501/udp"    # Audiokanal (UDP) — muss zu TC_AUDIO_PORT passen
 
     environment:
-      - RUST_LOG=info
-      # Standard-Admin: wird beim ersten Start angelegt, falls er noch nicht
-      # existiert. Passwort vor dem ersten Start unbedingt ändern!
-      # (Ein späterer Wechsel hier ändert keinen bereits existierenden Account.)
+      # ── Standard-Admin ──
+      # Wird beim ersten Start angelegt, falls er noch nicht existiert.
+      # Passwort vor dem ersten Start unbedingt ändern! (Ein späterer Wechsel
+      # hier ändert keinen bereits existierenden Account.)
       - TC_ADMIN_USERNAME=admin
       - TC_ADMIN_PASSWORD=bitte-aendern
+
+      # ── Server ──
+      - TC_SERVER_NAME=TeamConference Server
+      - TC_WELCOME_MESSAGE=Willkommen auf dem TeamConference Server!
+      # - TC_MAX_USERS=100
+
+      # ── Netzwerk ──
+      # - TC_CONTROL_HOST=0.0.0.0
+      # - TC_CONTROL_PORT=9500
+      # - TC_AUDIO_HOST=0.0.0.0
+      # - TC_AUDIO_PORT=9501
+
+      # ── TLS ──
+      # Zertifikate werden beim ersten Start automatisch erzeugt (Volume unten).
+      # - TC_TLS_ENABLED=true
+      # - TC_TLS_AUTO_GENERATE=true
+      - TC_TLS_CERT_FILE=/certs/server.crt
+      - TC_TLS_KEY_FILE=/certs/server.key
+
+      # ── Audio ──
+      # - TC_AUDIO_DEFAULT_SAMPLE_RATE=48000
+      # - TC_AUDIO_DEFAULT_BIT_DEPTH=16
+      # - TC_AUDIO_DEFAULT_CHANNELS=1
+      # - TC_AUDIO_MAX_SAMPLE_RATE=192000
+      # - TC_AUDIO_MAX_BIT_DEPTH=32
+
+      # ── Speicher ──
+      - TC_DATABASE_PATH=/data/teamconference.db
+      - TC_UPLOAD_DIR=/data/uploads
+      # - TC_MAX_UPLOAD_SIZE_MB=100
+
+      # ── Logging ──
+      # - TC_LOG_LEVEL=info
+      - RUST_LOG=info
 
     volumes:
       # Persistente Daten: SQLite-Datenbank und hochgeladene Dateien
@@ -32,8 +69,6 @@ services:
       # TLS-Zertifikate; werden beim ersten Start automatisch erzeugt.
       # Eigene Zertifikate: server.crt/server.key in das Volume legen.
       - teamconference-certs:/certs
-      # Server-Konfiguration (Ports, Audio-Limits, Uploadgröße, …)
-      - ./docker/config.toml:/etc/teamconference/config.toml:ro
 
 volumes:
   teamconference-data:

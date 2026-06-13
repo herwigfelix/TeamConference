@@ -60,6 +60,30 @@ Benutzername/Passwort `admin` / `admin`.
 | Windows | MSVC-Toolchain mit Visual Studio Build Tools |
 | Linux | `libasound2-dev` (ALSA) sowie die üblichen GUI-Pakete für winit |
 
+Alles Erforderliche in einem Befehl installieren:
+
+**macOS** ([Homebrew](https://brew.sh)):
+
+```sh
+xcode-select --install        # einmalig: Compiler/Toolchain
+brew install rust cmake
+```
+
+**Windows** ([Chocolatey](https://chocolatey.org), in einer Admin-PowerShell):
+
+```powershell
+choco install rustup.install visualstudio2022-workload-vctools -y
+choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+rustup default stable-msvc    # danach: neues Terminal öffnen
+```
+
+**Linux** (Debian/Ubuntu):
+
+```sh
+sudo apt install build-essential cmake libasound2-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
 ## Server
 
 ```sh
@@ -88,16 +112,40 @@ Ein Admin-Konto kann alternativ über Umgebungsvariablen angelegt werden
 TC_ADMIN_USERNAME=admin TC_ADMIN_PASSWORD=geheim cargo run --release -- --config config.default.toml
 ```
 
-### Server-Konfiguration (`config.default.toml`)
+### Server-Konfiguration
 
-| Sektion | Inhalt |
-|---|---|
-| `[server]` | Servername, Begrüßungsnachricht, max. Nutzer |
-| `[network]` | Hosts/Ports für Steuer- und Audiokanal |
-| `[tls]` | TLS an/aus, Zertifikatspfade, Auto-Generierung |
-| `[audio]` | Standard- und Maximalwerte für Samplerate/Bittiefe/Kanäle |
-| `[storage]` | SQLite-Pfad, Upload-Verzeichnis, max. Uploadgröße |
-| `[logging]` | Loglevel (überschreibbar per `RUST_LOG`) |
+Jeder Wert hat einen eingebauten Default und kann über eine `config.toml`
+**und/oder** über Umgebungsvariablen gesetzt werden. Vorrang:
+Umgebungsvariable → `config.toml` → Default. Eine Konfigurationsdatei ist
+damit optional — fehlt sie, startet der Server mit Defaults und liest nur
+die Umgebung (so arbeitet das Docker-Setup).
+
+| `config.toml` | Umgebungsvariable | Default |
+|---|---|---|
+| `server.name` | `TC_SERVER_NAME` | TeamConference Server |
+| `server.welcome_message` | `TC_WELCOME_MESSAGE` | Willkommen … |
+| `server.max_users` | `TC_MAX_USERS` | 100 |
+| `network.control_host` | `TC_CONTROL_HOST` | 0.0.0.0 |
+| `network.control_port` | `TC_CONTROL_PORT` | 9500 |
+| `network.audio_host` | `TC_AUDIO_HOST` | 0.0.0.0 |
+| `network.audio_port` | `TC_AUDIO_PORT` | 9501 |
+| `tls.enabled` | `TC_TLS_ENABLED` | true |
+| `tls.cert_file` | `TC_TLS_CERT_FILE` | certs/server.crt |
+| `tls.key_file` | `TC_TLS_KEY_FILE` | certs/server.key |
+| `tls.auto_generate` | `TC_TLS_AUTO_GENERATE` | true |
+| `audio.default_sample_rate` | `TC_AUDIO_DEFAULT_SAMPLE_RATE` | 48000 |
+| `audio.default_bit_depth` | `TC_AUDIO_DEFAULT_BIT_DEPTH` | 16 |
+| `audio.default_channels` | `TC_AUDIO_DEFAULT_CHANNELS` | 1 |
+| `audio.max_sample_rate` | `TC_AUDIO_MAX_SAMPLE_RATE` | 192000 |
+| `audio.max_bit_depth` | `TC_AUDIO_MAX_BIT_DEPTH` | 32 |
+| `storage.database_path` | `TC_DATABASE_PATH` | data/teamconference.db |
+| `storage.upload_dir` | `TC_UPLOAD_DIR` | data/uploads |
+| `storage.max_upload_size_mb` | `TC_MAX_UPLOAD_SIZE_MB` | 100 |
+| `logging.level` | `TC_LOG_LEVEL` | info |
+
+Dazu kommen `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD` (Standard-Admin,
+wird beim Start angelegt, falls er noch nicht existiert) und `RUST_LOG`
+(überschreibt das Loglevel zur Laufzeit).
 
 ## Docker (Server)
 
@@ -106,11 +154,13 @@ TC_ADMIN_USERNAME=admin TC_ADMIN_PASSWORD=geheim cargo run --release -- --config
 docker compose up -d --build
 ```
 
+- Die **gesamte Konfiguration** läuft über die `TC_*`-Umgebungsvariablen in
+  der `docker-compose.yml` (siehe Tabelle oben) — eine `config.toml` ist
+  nicht nötig. Alle Werte stehen dort auskommentiert mit ihren Defaults.
 - Datenbank und Uploads liegen im benannten Volume `teamconference-data`,
   TLS-Zertifikate in `teamconference-certs` — beides überlebt Rebuilds.
-- Die Server-Konfiguration wird read-only aus `docker/config.toml` gemountet.
 - Der Standard-Admin wird über `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD`
-  in der Compose-Datei angelegt — **Passwort vor dem ersten Start ändern**.
+  angelegt — **Passwort vor dem ersten Start ändern**.
 
 Logs ansehen: `docker compose logs -f` · Stoppen: `docker compose down`
 (Daten bleiben erhalten; `down -v` löscht auch die Volumes).

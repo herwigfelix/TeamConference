@@ -13,7 +13,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/teamconference-server /usr/local/bin/
-COPY docker/config.toml /etc/teamconference/config.toml
+WORKDIR /
 EXPOSE 9500/tcp 9501/udp
 VOLUME ["/data", "/certs"]
+# Konfiguration komplett über TC_*-Umgebungsvariablen (siehe README bzw.
+# docker-compose.yml). Optional kann eine config.toml nach
+# /etc/teamconference/config.toml gemountet werden — Umgebungsvariablen
+# haben Vorrang; fehlt die Datei, gelten die eingebauten Defaults.
 ENTRYPOINT ["teamconference-server", "--config", "/etc/teamconference/config.toml"]
