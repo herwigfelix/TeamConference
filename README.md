@@ -1,130 +1,180 @@
 # TeamConference
 
-A TeamSpeak/Mumble-style voice conferencing application with:
-- **Server** in Rust (Tokio) - Windows, macOS, Linux + Docker
-- **Client** in Rust (Slint) - Windows, macOS, Linux — accessibility-focused (screen reader support, full keyboard control)
-- Opus-encoded audio over UDP (raw PCM fallback) with adaptive jitter buffer
-- SSL/TLS encryption, hierarchical rooms, chat, file sharing, admin functions
+TeamConference ist eine selbst gehostete Sprachkonferenz-Anwendung im Stil von
+TeamSpeak/Mumble — mit Fokus auf **Barrierefreiheit**: Der Client ist
+vollständig per Tastatur bedienbar, alle Bedienelemente tragen
+Screenreader-Beschriftungen (VoiceOver, NVDA, JAWS, Orca) und alle wichtigen
+Aktionen sind über Kurztasten erreichbar.
 
-## Quick Start
+- **Server**: Rust (Tokio) — Windows, macOS, Linux, Docker
+- **Client**: Rust ([Slint](https://slint.dev)) — Windows, macOS, Linux
+- **Audio**: Opus-kodiert über UDP (Fallback: rohes PCM), adaptiver Jitter-Puffer
+- **Sicherheit**: TLS (selbstsignierte Zertifikate werden automatisch erzeugt),
+  Argon2-Passwort-Hashes
 
-The easiest way — build and start server + client together:
+## Features
 
-```bash
+- Hierarchische Räume und Unterräume, optional mit Passwort und Nutzerlimit
+- Raum-Chat, Privatnachrichten, Server-Durchsagen
+- Datei-Upload/-Download pro Raum
+- Audiodateien in einen Raum streamen (MP3, WAV, FLAC, OGG, M4A, …)
+- Mikrofon stumm / Ton aus (taub) / Loopback, Lautstärkeregler
+- Admin-Funktionen: Kicken, Bannen (zeitlich oder dauerhaft), Verschieben,
+  Stummschalten, Räume verwalten
+- Deutsche Oberfläche, Kurztasten mit Strg (Windows/Linux) bzw. Cmd (macOS)
+
+## Projektstruktur
+
+```
+teamconference/
+├── client/             Slint-Client (aktiv)
+│   ├── ui/main.slint   Oberfläche: Chat, Räume, Nutzer, Lautstärke, Dateien, Menüs
+│   └── src/            Netzwerk (WebSocket/UDP), Audio (cpal/Opus/Symphonia), Logik
+├── server/             Rust-Server
+│   └── src/            control/ audio/ room/ user/ chat/ files/ admin/ db/
+├── docker/             Dockerfile + Container-Konfiguration
+├── docker-compose.yml  Server-Deployment
+├── docs/protocol.md    Protokoll-Spezifikation
+├── start.sh            Entwicklung: Server + Client bauen und starten (macOS/Linux)
+└── start.bat           dito für Windows
+```
+
+## Schnellstart (Entwicklung)
+
+Beide Skripte bauen Server und Client im Release-Modus, starten den Server
+mit einem Standard-Admin (`admin` / `admin`) und öffnen den Client:
+
+```sh
 ./start.sh        # macOS / Linux
 start.bat         # Windows
 ```
 
-Both scripts create a default admin user (`admin` / `admin`) for local development.
+Im Client dann verbinden mit **Host** `localhost`, **Port** `9500`, **SSL an**,
+Benutzername/Passwort `admin` / `admin`.
 
-### Build requirements
+### Build-Voraussetzungen
 
-- Rust (stable) — on Windows the MSVC toolchain with Build Tools
-- CMake — needed to build the bundled Opus codec
-- Linux only: ALSA dev packages (`libasound2-dev`) and the usual GUI libs for Slint/winit
+| Plattform | Benötigt |
+|---|---|
+| alle | Rust (stable), CMake (für den Opus-Codec) |
+| Windows | MSVC-Toolchain mit Visual Studio Build Tools |
+| Linux | `libasound2-dev` (ALSA) sowie die üblichen GUI-Pakete für winit |
 
-### Server
+## Server
 
-```bash
+```sh
 cd server
 
-# First run: creates admin user
-cargo run -- --config config.default.toml --create-admin
+# Erster Start: legt den Admin admin/admin an
+cargo run --release -- --config config.default.toml --create-admin
 
-# Subsequent runs
-cargo run -- --config config.default.toml
+# Danach
+cargo run --release -- --config config.default.toml
 ```
 
-Default ports:
-- **9500/TCP** - Control channel (WebSocket, optional TLS)
-- **9501/UDP** - Audio channel
+Standard-Ports:
 
-Self-signed TLS certificates are generated automatically on first start
-(pure Rust via rcgen, no openssl binary needed).
+- **9500/TCP** — Steuerkanal (WebSocket, optional TLS)
+- **9501/UDP** — Audiokanal
 
-A default admin can also be created via environment variables
-(`TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD`) — used by the Docker setup.
+TLS-Zertifikate werden beim ersten Start automatisch erzeugt (pure Rust via
+`rcgen`, kein externes openssl nötig). Eigene Zertifikate: Pfade in der
+Config anpassen.
 
-### Client
+Ein Admin-Konto kann alternativ über Umgebungsvariablen angelegt werden
+(wird beim Start erstellt, falls es noch nicht existiert):
 
-```bash
-cd client
-cargo run --release
+```sh
+TC_ADMIN_USERNAME=admin TC_ADMIN_PASSWORD=geheim cargo run --release -- --config config.default.toml
 ```
 
-See [client/README.md](client/README.md) for the keyboard shortcuts and
-accessibility documentation (German).
+### Server-Konfiguration (`config.default.toml`)
 
-### Docker (server)
+| Sektion | Inhalt |
+|---|---|
+| `[server]` | Servername, Begrüßungsnachricht, max. Nutzer |
+| `[network]` | Hosts/Ports für Steuer- und Audiokanal |
+| `[tls]` | TLS an/aus, Zertifikatspfade, Auto-Generierung |
+| `[audio]` | Standard- und Maximalwerte für Samplerate/Bittiefe/Kanäle |
+| `[storage]` | SQLite-Pfad, Upload-Verzeichnis, max. Uploadgröße |
+| `[logging]` | Loglevel (überschreibbar per `RUST_LOG`) |
 
-```bash
+## Docker (Server)
+
+```sh
 # Admin-Zugangsdaten in docker-compose.yml anpassen, dann im Projektstamm:
 docker compose up -d --build
 ```
 
-Database, uploads and TLS certificates are kept in named volumes
-(`teamconference-data`, `teamconference-certs`); the server config is
-bind-mounted from `docker/config.toml`.
+- Datenbank und Uploads liegen im benannten Volume `teamconference-data`,
+  TLS-Zertifikate in `teamconference-certs` — beides überlebt Rebuilds.
+- Die Server-Konfiguration wird read-only aus `docker/config.toml` gemountet.
+- Der Standard-Admin wird über `TC_ADMIN_USERNAME` / `TC_ADMIN_PASSWORD`
+  in der Compose-Datei angelegt — **Passwort vor dem ersten Start ändern**.
 
-## Architecture
+Logs ansehen: `docker compose logs -f` · Stoppen: `docker compose down`
+(Daten bleiben erhalten; `down -v` löscht auch die Volumes).
 
-### Server (Rust)
+## Client
 
-| Module | Purpose |
-|--------|---------|
-| `control/` | WebSocket server, message routing, auth |
-| `audio/` | UDP audio relay, file streaming |
-| `room/` | Hierarchical room management |
-| `user/` | Online user sessions, permissions |
-| `chat/` | Room chat, private messages, offline messages |
-| `files/` | File upload/download (chunked, base64) |
-| `admin/` | Kick, ban, move, mute |
-| `db/` | SQLite with Argon2 password hashing |
+```sh
+cd client
+cargo run --release
+```
 
-### Client (Rust/Slint, `client/`)
+Das Hauptfenster enthält Chatverlauf, Chateingabe, die Raum-/Unterraumliste,
+die Nutzerliste des aktuellen Raums, den Lautstärkeregler und die Dateiliste.
+Alles Weitere (Verbindung, Audio, Raum- und Nutzerverwaltung, Datei-Streaming)
+läuft über die Menüleiste oder Kurztasten — vollständige Liste mit F1 im
+Client oder in [client/README.md](client/README.md).
 
-| Module | Purpose |
-|--------|---------|
-| `ui/main.slint` | Accessible UI: chat, rooms, users, volume, files, menus |
-| `net/` | WebSocket control + UDP audio (Opus) |
-| `audio/` | Capture, playback (cpal), file streaming (Symphonia) |
-| `events.rs` | Server events → UI updates |
-| `actions.rs` | Menu/shortcut/dialog actions → protocol messages |
+Die wichtigsten Kurztasten (Strg unter Windows/Linux, Cmd unter macOS):
 
-Older clients (`client-tauri/`, `legazy client(abandoned)/`) are deprecated.
+| Kurztaste | Aktion |
+|---|---|
+| Strg+M | Mikrofon stumm/laut |
+| Strg+D | Ton aus/an (taub) |
+| Strg+S | Audiodatei streamen |
+| Strg+J | Ausgewähltem Raum beitreten |
+| Strg+U / Strg+H | Datei hochladen / herunterladen |
+| Strg+P | Privatnachricht an ausgewählten Nutzer |
+| F1 | Kurztasten-Hilfe |
 
-## Configuration
+Einstellungen (Server, Benutzername, Audiogeräte, Lautstärke) werden
+plattformüblich gespeichert:
 
-### Server (`config.default.toml`)
+- Linux: `~/.config/teamconference/client.json`
+- macOS: `~/Library/Application Support/teamconference/client.json`
+- Windows: `%APPDATA%\teamconference\client.json`
 
-- Network ports, TLS settings (auto-generate self-signed certs)
-- Audio defaults (sample rate, bit depth, channels)
-- Storage paths, max upload size
-- Logging level
+## Barrierefreiheit
 
-### Client
+- Slint nutzt [AccessKit](https://accesskit.dev) — der Client funktioniert mit
+  VoiceOver (macOS), NVDA/JAWS (Windows) und Orca (Linux).
+- Jedes Bedienelement hat ein deutsches `accessible-label`; Listen sind mit
+  den Pfeiltasten navigierbar, Tab/Umschalt+Tab wechselt zwischen Elementen.
+- Statusänderungen (stumm, Raum betreten, Upload fertig, …) werden zusätzlich
+  als Textzeile im Chatverlauf protokolliert und sind damit nachlesbar.
+- Unterräume werden in der Raumliste durch Einrückung dargestellt und
+  passwortgeschützte Räume textuell gekennzeichnet (kein reines Icon).
 
-Stored in the platform config dir (Linux: `~/.config/teamconference/client.json`,
-macOS: `~/Library/Application Support/teamconference/client.json`,
-Windows: `%APPDATA%\teamconference\client.json`):
+## Protokoll
 
-- Server, username, nickname
-- Audio device selection, playback volume
+Vollständige Spezifikation in [docs/protocol.md](docs/protocol.md).
 
-## Protocol
+- **Steuerkanal**: JSON über WebSocket (`{"type": "...", "data": {...}}`) —
+  Auth, Räume, Chat, Dateien, Admin
+- **Audiokanal**: binäre UDP-Pakete mit 22-Byte-Header (Magic `TCON`,
+  Session-Token, Sequenz, Zeitstempel, Format); Payload ist Opus
+  (`bit_depth = 0`) oder rohes PCM
 
-See [docs/protocol.md](docs/protocol.md) for the full protocol specification.
+## Entwicklung
 
-- **Control Channel**: JSON over WebSocket (optional TLS)
-- **Audio Channel**: Binary UDP packets with 22-byte header, Opus payload (bit_depth=0) or raw PCM
+```sh
+cd server && cargo check          # Server prüfen
+cd client && cargo check          # Client prüfen (kompiliert auch die .slint-UI)
+RUST_LOG=debug cargo run          # mit ausführlichem Logging starten
+```
 
-## Features
-
-- Hierarchical rooms with passwords and user limits
-- Room chat, private messages, server broadcasts
-- File upload/download per room
-- Audio file streaming into rooms (MP3, WAV, OGG, FLAC, M4A, …)
-- Admin: kick, ban (timed/permanent), move, mute users
-- Accessibility: screen reader labels (AccessKit), full keyboard operation,
-  shortcuts (Ctrl/Cmd+M mute, Ctrl/Cmd+S stream file, …), German UI
-- Adaptive jitter buffer, Opus encoding with PCM fallback
+Die veralteten Vorgänger-Clients (`client-tauri/`, `legazy client(abandoned)/`)
+sind nicht Teil des Repos und dienen höchstens als Referenz.
