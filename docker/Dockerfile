@@ -1,7 +1,8 @@
 # TeamConference Server
 # Build:  docker build -f docker/Dockerfile -t teamconference-server .
 #         (aus dem Projekt-Wurzelverzeichnis)
-FROM rust:1.83 AS builder
+# Aktuelles stabiles Rust (einige Abhängigkeiten brauchen Edition 2024 → ≥ 1.85)
+FROM rust:1 AS builder
 WORKDIR /app
 COPY server/ .
 # Cargo-Caches zwischen Builds wiederverwenden
