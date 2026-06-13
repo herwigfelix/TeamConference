@@ -2,7 +2,28 @@
 //! wxWidgets liefert native Bedienelemente und damit native Barrierefreiheit
 //! (UI Automation/MSAA unter Windows, NSAccessibility auf macOS, ATK auf Linux).
 
+use wxdragon::accessible::{AccStatus, AccessibleImpl};
 use wxdragon::prelude::*;
+
+/// Liefert einem ansonsten namenlosen Bedienelement (Eingabefeld, Checkbox)
+/// einen stabilen Accessible-Namen. wxWidgets' Standard-`GetName` nutzt das
+/// dynamische Label (bei TextCtrl den Inhalt), weshalb leere Felder sonst nur
+/// generisch als „Eingabefeld"/„Kontrollkästchen" angesagt werden.
+struct NamedAccessible {
+    name: String,
+}
+
+impl AccessibleImpl for NamedAccessible {
+    fn get_name(&self, _child_id: i32) -> (AccStatus, Option<String>) {
+        (wxdragon::ffi::wxd_AccStatus_WXD_ACC_OK, Some(self.name.clone()))
+    }
+}
+
+/// Setzt Fenster- und Accessible-Namen eines Bedienelements.
+fn set_a11y_name(widget: &dyn WxWidget, name: &str) {
+    widget.set_name(name);
+    widget.set_accessible(Accessible::new(widget, NamedAccessible { name: name.to_string() }));
+}
 
 // ── Menü-/Befehls-IDs ──
 pub const ID_DISCONNECT: i32 = ID_HIGHEST + 1;
@@ -234,6 +255,20 @@ impl Ui {
         frame.set_sizer(frame_sizer, true);
         main_panel.show(false);
         frame.layout();
+
+        // Accessible-Namen für sonst namenlose Bedienelemente (Screenreader)
+        set_a11y_name(&server_list, "Gespeicherte Server");
+        set_a11y_name(&host_in, "Host");
+        set_a11y_name(&port_in, "Port");
+        set_a11y_name(&ssl_chk, "SSL/TLS verwenden");
+        set_a11y_name(&user_in, "Benutzername");
+        set_a11y_name(&pass_in, "Passwort");
+        set_a11y_name(&nick_in, "Spitzname");
+        set_a11y_name(&tree, "Räume und Nutzer");
+        set_a11y_name(&chat_log, "Chatverlauf");
+        set_a11y_name(&chat_in, "Chatnachricht eingeben");
+        set_a11y_name(&volume, "Lautstärke in Prozent");
+        set_a11y_name(&files, "Dateien im aktuellen Raum");
 
         Ui {
             frame,

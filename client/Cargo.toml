@@ -24,5 +24,9 @@ dirs = "6"
 parking_lot = "0.12"
 chrono = "0.4"
 
+[build-dependencies]
+# Bettet unter Windows das Anwendungs-Manifest ein (Common Controls v6, DPI).
+embed-manifest = "1.4"
+
 [profile.dev]
 opt-level = 2
