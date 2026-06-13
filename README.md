@@ -69,12 +69,41 @@ xcode-select --install        # einmalig: Compiler/Toolchain
 brew install rust cmake
 ```
 
-**Windows** ([Chocolatey](https://chocolatey.org), in einer Admin-PowerShell):
+**Windows** ([Chocolatey](https://chocolatey.org), in einer Admin-PowerShell —
+Reihenfolge einhalten):
 
 ```powershell
-choco install rustup.install visualstudio2022-workload-vctools -y
-choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-rustup default stable-msvc    # danach: neues Terminal öffnen
+# 1. Visual C++ Build Tools (MSVC-Compiler/Linker + Windows SDK)
+choco install visualstudio2022buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart" -y
+
+# 2. CMake (die inneren Anführungszeichen sind nötig, sonst landet CMake nicht im PATH)
+choco install cmake --installargs '"ADD_CMAKE_TO_PATH=System"' -y
+
+# 3. Rust
+choco install rustup.install -y
+```
+
+Danach ein **neues** Terminal öffnen (PATH-Änderungen!) und die
+MSVC-Toolchain aktivieren:
+
+```powershell
+rustup toolchain install stable-msvc
+rustup default stable-msvc
+```
+
+Hinweise:
+- Exit-Code **3010** beim Build-Tools-Schritt ist **kein Fehler**, sondern
+  „erfolgreich, Neustart erforderlich" — einmal neu starten und weitermachen.
+- Das Paket `visualstudio2022-workload-vctools` schlägt häufig fehl
+  (hängender Installer, Exit-Code 1) — deshalb oben der direkte Weg über
+  `visualstudio2022buildtools` mit `--package-parameters`.
+
+Alternative ohne Chocolatey (winget ist auf Windows 10/11 vorinstalliert):
+
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart"
+winget install Kitware.CMake
+winget install Rustlang.Rustup
 ```
 
 **Linux** (Debian/Ubuntu):
