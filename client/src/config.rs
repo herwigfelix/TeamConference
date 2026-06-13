@@ -14,6 +14,9 @@ pub struct ServerEntry {
     pub username: String,
     #[serde(default)]
     pub nickname: String,
+    /// Passwort im Klartext in der lokalen client.json (Lesezeichen-Komfort).
+    #[serde(default)]
+    pub password: String,
 }
 
 impl ServerEntry {

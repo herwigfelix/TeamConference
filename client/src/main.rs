@@ -94,6 +94,7 @@ fn main() {
             ui.ssl_chk.set_value(first.ssl);
             ui.user_in.set_value(&first.username);
             ui.nick_in.set_value(&first.nickname);
+            ui.pass_in.set_value(&first.password);
         }
 
         wire_events(&ctx);

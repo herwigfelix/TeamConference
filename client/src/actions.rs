@@ -207,6 +207,7 @@ pub fn fill_form_from_server(ctx: &Ctx) {
         ctx.ui.ssl_chk.set_value(s.ssl);
         ctx.ui.user_in.set_value(&s.username);
         ctx.ui.nick_in.set_value(&s.nickname);
+        ctx.ui.pass_in.set_value(&s.password);
     }
 }
 
@@ -224,6 +225,7 @@ pub fn save_bookmark(ctx: &Ctx) {
         ssl: ctx.ui.ssl_chk.is_checked(),
         username: ctx.ui.user_in.get_value().trim().to_string(),
         nickname: ctx.ui.nick_in.get_value().trim().to_string(),
+        password: ctx.ui.pass_in.get_value(),
     };
     ctx.st.borrow_mut().servers.push(entry);
     persist_servers(ctx);
