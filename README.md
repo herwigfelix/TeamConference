@@ -64,10 +64,15 @@ Benutzername/Passwort `admin` / `admin`.
 
 | Plattform | Benötigt |
 |---|---|
-| alle | Rust (stable), CMake + C++-Compiler (für Opus und wxWidgets) |
-| Windows | MSVC-Toolchain mit Visual Studio Build Tools |
-| macOS | Xcode Command Line Tools (`xcode-select --install`) |
-| Linux | `libgtk-3-dev` (wxWidgets) und `libasound2-dev` (ALSA) |
+| alle | Rust (stable), CMake + C++-Compiler (für Opus und wxWidgets), **LLVM/libclang** (bindgen erzeugt die wxWidgets-FFI-Bindings) |
+| Windows | MSVC-Toolchain mit Visual Studio Build Tools, **LLVM** (`winget install LLVM.LLVM`) |
+| macOS | Xcode Command Line Tools (`xcode-select --install`) — enthält libclang |
+| Linux | `libgtk-3-dev` (wxWidgets), `libasound2-dev` (ALSA), `libclang-dev` (bindgen) |
+
+Fehler **`Unable to find libclang … clang.dll/libclang.dll`** beim Bauen von
+`wxdragon-sys` heißt: LLVM/libclang fehlt. Unter Windows `winget install
+LLVM.LLVM` (oder `choco install llvm -y`), neues Terminal; falls bindgen es
+dann nicht findet, `setx LIBCLANG_PATH "C:\Program Files\LLVM\bin"` setzen.
 
 Hinweis: Der Client bindet wxWidgets statisch ein; beim **ersten** Build wird
 wxWidgets aus dem Quellcode kompiliert (dauert einige Minuten, danach gecacht).
@@ -91,7 +96,10 @@ choco install visualstudio2022buildtools --package-parameters "--add Microsoft.V
 # 2. CMake (die inneren Anführungszeichen sind nötig, sonst landet CMake nicht im PATH)
 choco install cmake --installargs '"ADD_CMAKE_TO_PATH=System"' -y
 
-# 3. Rust
+# 3. LLVM/libclang (für bindgen in wxdragon-sys)
+choco install llvm -y
+
+# 4. Rust
 choco install rustup.install -y
 ```
 
@@ -125,13 +133,14 @@ Alternative ohne Chocolatey (winget ist auf Windows 10/11 vorinstalliert):
 ```powershell
 winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart"
 winget install Kitware.CMake
+winget install LLVM.LLVM
 winget install Rustlang.Rustup
 ```
 
 **Linux** (Debian/Ubuntu):
 
 ```sh
-sudo apt install build-essential cmake libgtk-3-dev libasound2-dev
+sudo apt install build-essential cmake libgtk-3-dev libasound2-dev libclang-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
