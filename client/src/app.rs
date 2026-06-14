@@ -13,6 +13,16 @@ use crate::roomtree::NodeRef;
 use crate::state::AppState;
 use crate::ui::Ui;
 
+/// Live-Verweise auf den (modalen) Benutzerkonten-Dialog, damit eingehende
+/// Server-Antworten (account_list_result) die Liste aktualisieren können,
+/// während der Dialog offen ist. Widgets sind Copy-Handles.
+pub struct AccountDialogRef {
+    pub list: wxdragon::widgets::ListBox,
+    pub reg_chk: wxdragon::widgets::CheckBox,
+    /// (Benutzername, Rolle) je Listeneintrag — für die Auswahl-Aktionen.
+    pub accounts: Vec<(String, String)>,
+}
+
 /// UI-Thread-eigene Daten (nicht thread-shared): Index→Daten-Zuordnungen.
 #[derive(Default)]
 pub struct UiState {
@@ -24,6 +34,10 @@ pub struct UiState {
     pub tree_map: HashMap<usize, NodeRef>,
     /// Zuletzt vom Server gemeldeter Registrierungsstatus (für das Umschalten)
     pub registration_open: bool,
+    /// Ob der angemeldete Nutzer Administrator ist (steuert Menü-Sichtbarkeit)
+    pub is_admin: bool,
+    /// Offener Benutzerkonten-Dialog (für Live-Aktualisierung der Liste)
+    pub account_dialog: Option<AccountDialogRef>,
 }
 
 /// Bündelt alles, was Event-Handler brauchen. Clone ist billig

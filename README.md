@@ -1,5 +1,14 @@
 # TeamConference
 
+> ⚠️ **Alpha-Stadium.** TeamConference befindet sich noch in einer frühen
+> Entwicklungsphase. Es gibt derzeit **keinen Stable-Branch** — alle Releases
+> sind fortlaufende Entwicklungsversionen (Rolling Development Releases). Ein
+> getrennter Stable-Branch ist für später geplant. Rechne mit Fehlern und
+> Breaking Changes.
+>
+> Für die Lauffähigkeit des Programms wird von **accessy applications
+> (Felix Valentin Herwig)** keine Haftung übernommen. Nutzung auf eigene Gefahr.
+
 TeamConference ist eine selbst gehostete Sprachkonferenz-Anwendung im Stil von
 TeamSpeak/Mumble — mit Fokus auf **Barrierefreiheit**: Der Client ist
 vollständig per Tastatur bedienbar, alle Bedienelemente tragen

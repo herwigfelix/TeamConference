@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS rooms (
     sort_order INTEGER DEFAULT 0,
     sample_rate INTEGER NOT NULL DEFAULT 48000,
     bit_depth INTEGER NOT NULL DEFAULT 16,
-    channels INTEGER NOT NULL DEFAULT 1
+    channels INTEGER NOT NULL DEFAULT 1,
+    -- Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
+    bitrate INTEGER NOT NULL DEFAULT 0
 );
 
 -- Bans

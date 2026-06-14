@@ -49,7 +49,6 @@ pub const ID_CREATE_SUBROOM: i32 = ID_HIGHEST + 10;
 pub const ID_DELETE_ROOM: i32 = ID_HIGHEST + 11;
 pub const ID_UPLOAD: i32 = ID_HIGHEST + 12;
 pub const ID_DOWNLOAD: i32 = ID_HIGHEST + 13;
-pub const ID_REFRESH_FILES: i32 = ID_HIGHEST + 14;
 pub const ID_PM: i32 = ID_HIGHEST + 15;
 pub const ID_KICK: i32 = ID_HIGHEST + 16;
 pub const ID_BAN: i32 = ID_HIGHEST + 17;
@@ -58,14 +57,12 @@ pub const ID_ADMIN_MUTE: i32 = ID_HIGHEST + 19;
 pub const ID_ADMIN_UNMUTE: i32 = ID_HIGHEST + 20;
 pub const ID_SERVER_MSG: i32 = ID_HIGHEST + 21;
 pub const ID_HELP_KEYS: i32 = ID_HIGHEST + 22;
-// Account-Verwaltung
+// Benutzerkonten-Dialog (nur Admins; wird dynamisch ein-/ausgeblendet)
 pub const ID_ACCOUNTS: i32 = ID_HIGHEST + 23;
-pub const ID_ACCOUNT_CREATE: i32 = ID_HIGHEST + 24;
-pub const ID_ACCOUNT_PASSWORD: i32 = ID_HIGHEST + 25;
-pub const ID_ACCOUNT_ROLE: i32 = ID_HIGHEST + 26;
-pub const ID_ACCOUNT_DELETE: i32 = ID_HIGHEST + 27;
-pub const ID_REGISTRATION: i32 = ID_HIGHEST + 28;
+// Eigenes Passwort ändern (alle Nutzer)
 pub const ID_CHANGE_PW: i32 = ID_HIGHEST + 29;
+// Auto-Updater: nach Aktualisierung suchen
+pub const ID_CHECK_UPDATE: i32 = ID_HIGHEST + 33;
 
 /// Alle Widget-Handles der Oberfläche. Widgets sind Copy → frei in Closures kopierbar.
 #[derive(Clone, Copy)]
@@ -98,7 +95,6 @@ pub struct Ui {
     pub volume: Slider,
     pub files: ListBox,
     pub download_btn: Button,
-    pub refresh_btn: Button,
 }
 
 impl Ui {
@@ -235,16 +231,12 @@ impl Ui {
         );
         let files = ListBox::builder(&main_panel).build();
         right.add(&files, 1, SizerFlag::Expand | SizerFlag::All, 4);
-        let file_btns = BoxSizer::builder(Orientation::Horizontal).build();
+        // Datei-Liste aktualisiert sich automatisch (beim Betreten eines Raums
+        // und wenn Dateien hoch- oder runtergeladen werden) — kein Knopf nötig.
         let download_btn = Button::builder(&main_panel)
             .with_label("Herunterladen")
             .build();
-        let refresh_btn = Button::builder(&main_panel)
-            .with_label("Aktualisieren")
-            .build();
-        file_btns.add(&download_btn, 0, SizerFlag::All, 4);
-        file_btns.add(&refresh_btn, 0, SizerFlag::All, 4);
-        right.add_sizer(&file_btns, 0, SizerFlag::All, 4);
+        right.add(&download_btn, 0, SizerFlag::All, 4);
         mh.add_sizer(&right, 2, SizerFlag::Expand | SizerFlag::All, 4);
 
         main_panel.set_sizer(mh, true);
@@ -294,7 +286,6 @@ impl Ui {
             volume,
             files,
             download_btn,
-            refresh_btn,
         }
     }
 
@@ -356,27 +347,28 @@ fn build_menu_bar(frame: &Frame) {
     let file_menu = Menu::builder()
         .append_item(ID_UPLOAD, "Datei &hochladen…\tCtrl+U", "Datei in den aktuellen Raum hochladen")
         .append_item(ID_DOWNLOAD, "Datei &herunterladen…\tCtrl+H", "Ausgewählte Datei herunterladen")
-        .append_item(ID_REFRESH_FILES, "Dateiliste &aktualisieren\tCtrl+R", "Dateiliste neu laden")
         .build();
 
-    let admin_menu = Menu::builder()
+    // Nutzerbezogene Aktionen (am im Baum ausgewählten Nutzer).
+    let user_menu = Menu::builder()
         .append_item(ID_PM, "&Privatnachricht senden\tCtrl+Shift+P", "An ausgewählten Nutzer (Text im Eingabefeld)")
         .append_item(ID_KICK, "Nutzer &kicken…", "Ausgewählten Nutzer kicken")
         .append_item(ID_BAN, "Nutzer &bannen…", "Ausgewählten Nutzer bannen")
         .append_item(ID_MOVE_USER, "Nutzer &verschieben", "In ausgewählten Raum verschieben")
         .append_item(ID_ADMIN_MUTE, "Nutzer stummschalten (Admin)", "Ausgewählten Nutzer stummschalten")
         .append_item(ID_ADMIN_UNMUTE, "Stummschaltung aufheben (Admin)", "Stummschaltung aufheben")
+        .build();
+
+    // Verwaltung: serverweite Aktionen und eigenes Konto. „Benutzerkonten
+    // verwalten" wird nur für Admins dynamisch eingefügt (siehe
+    // actions::update_account_menu).
+    let admin_menu = Menu::builder()
         .append_item(ID_SERVER_MSG, "&Servernachricht senden…", "Nachricht an alle senden")
-        .append_item(ID_ACCOUNTS, "&Konten anzeigen…", "Account-Liste vom Server abrufen")
-        .append_item(ID_ACCOUNT_CREATE, "Konto an&legen…", "Neuen Account anlegen")
-        .append_item(ID_ACCOUNT_PASSWORD, "Konto-Passwort zurücksetzen…", "Passwort eines Accounts setzen")
-        .append_item(ID_ACCOUNT_ROLE, "Konto-Rolle ändern…", "Rolle user/admin setzen")
-        .append_item(ID_ACCOUNT_DELETE, "Konto löschen…", "Account löschen")
-        .append_check_item(ID_REGISTRATION, "&Selbstregistrierung erlauben", "Häkchen = neue Nutzer können sich per Login registrieren")
         .append_item(ID_CHANGE_PW, "Eigenes &Passwort ändern…", "Eigenes Passwort ändern")
         .build();
 
     let help_menu = Menu::builder()
+        .append_item(ID_CHECK_UPDATE, "Nach &Aktualisierung suchen…", "Auf neue Version prüfen")
         .append_item(ID_HELP_KEYS, "&Kurztasten\tF1", "Kurztasten anzeigen")
         .append_item(ID_ABOUT, "&Über…", "Über TeamConference")
         .build();
@@ -386,6 +378,7 @@ fn build_menu_bar(frame: &Frame) {
         .append(audio_menu, "&Audio")
         .append(room_menu, "&Räume")
         .append(file_menu, "&Dateien")
+        .append(user_menu, "&Nutzer")
         .append(admin_menu, "&Verwaltung")
         .append(help_menu, "&Hilfe")
         .build();

@@ -82,6 +82,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 rebuild_tree(ctx);
                 rebuild_files(ctx);
                 refresh_status(ctx);
+                // Admin-only-Menüpunkte je nach eigener Rolle ein-/ausblenden
+                crate::actions::update_account_menu(ctx);
                 // Fokus in die Hauptansicht setzen, damit der Screenreader mitwandert
                 ui.rooms_tree.set_focus();
             }
@@ -111,6 +113,46 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             crate::actions::notify(ctx, &text, "TeamConference");
         }
 
+        // Auto-Updater: neue Version verfügbar → nachfragen und ggf. laden.
+        "client_update" => {
+            let version = msg.data.get("version").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let url = msg.data.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let filename = msg.data.get("filename").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let q = MessageDialog::builder(
+                &ui.frame,
+                &format!(
+                    "Eine neue Version ({}) ist verfügbar. Du nutzt {}. Jetzt herunterladen?",
+                    version,
+                    crate::update::current_version()
+                ),
+                "Aktualisierung verfügbar",
+            )
+            .with_style(MessageDialogStyle::YesNo)
+            .build();
+            if q.show_modal() == ID_YES {
+                if url.is_empty() {
+                    // Kein passendes Paket gefunden → Release-Seite öffnen.
+                    crate::update::open_path(&crate::update::releases_page());
+                } else {
+                    ui.append_chat("Lade Aktualisierung herunter…");
+                    crate::update::download_update(ctx.ev_tx.clone(), url, filename);
+                }
+            }
+        }
+
+        "client_update_done" => {
+            let path = msg.data.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            crate::actions::notify(
+                ctx,
+                &format!(
+                    "Aktualisierung heruntergeladen:\n{}\n\nDie Datei wird zum Installieren geöffnet.",
+                    path
+                ),
+                "Aktualisierung",
+            );
+            crate::update::open_path(&path);
+        }
+
         "client_stream_finished" => {
             ctx.app.inner.lock().streaming_file = false;
             ctx.app
@@ -124,6 +166,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         "room_list" => {
             // inner.rooms wurde bereits im Netzwerk-Task aktualisiert
             rebuild_tree(ctx);
+            // Eigene Rolle kann sich geändert haben → Admin-Menü anpassen.
+            crate::actions::update_account_menu(ctx);
         }
 
         "room_user_joined" => {
@@ -361,6 +405,10 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             let prefix = if success { "Konten" } else { "Konten-Fehler" };
             ui.set_status(&format!("{}: {}", prefix, text));
             ui.append_chat(&format!("[{}] {}", prefix, text));
+            // Bei offenem Konten-Dialog für Screenreader-Nutzer rückmelden.
+            if ctx.st.borrow().account_dialog.is_some() {
+                crate::actions::notify(ctx, &text, prefix);
+            }
         }
 
         "account_list_result" => {
@@ -370,25 +418,27 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             ctx.st.borrow_mut().registration_open = open;
-            crate::actions::set_menu_check(ctx, crate::ui::ID_REGISTRATION, open);
 
-            let mut lines = vec![format!(
-                "Registrierung: {}",
-                if open { "AN" } else { "AUS" }
-            )];
+            // (Benutzername, Rolle) sammeln.
+            let mut accounts: Vec<(String, String)> = Vec::new();
             if let Some(arr) = msg.data.get("accounts").and_then(|v| v.as_array()) {
-                lines.push(format!("Konten ({}):", arr.len()));
                 for a in arr {
                     let name = a.get("username").and_then(|v| v.as_str()).unwrap_or("?");
                     let role = a.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                    lines.push(format!("  • {} [{}]", name, role));
+                    accounts.push((name.to_string(), role.to_string()));
                 }
             }
-            let text = lines.join("\n");
-            // Liste im Chatverlauf protokollieren (per Screenreader nachlesbar) …
-            ui.append_chat(&text);
-            // … und als Dialog anzeigen.
-            crate::actions::show_account_list(ctx, &text);
+
+            // Offenen Konten-Dialog live aktualisieren.
+            let mut st = ctx.st.borrow_mut();
+            if let Some(ad) = st.account_dialog.as_mut() {
+                ad.list.clear();
+                for (name, role) in &accounts {
+                    ad.list.append(&format!("{} [{}]", name, role));
+                }
+                ad.reg_chk.set_value(open);
+                ad.accounts = accounts;
+            }
         }
 
         "error" => {

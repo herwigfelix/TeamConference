@@ -194,6 +194,9 @@ pub fn do_disconnect(ctx: &Ctx) {
     ctx.ui.show_main(false);
     rebuild_tree(ctx);
     rebuild_files(ctx);
+    // Admin-Menü zurücksetzen (kein angemeldeter Admin mehr).
+    ctx.st.borrow_mut().account_dialog = None;
+    update_account_menu(ctx);
     status(ctx, "Nicht verbunden");
 }
 
@@ -320,12 +323,12 @@ fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
     let (sr, bd, ch) = {
         let mut inner = ctx.app.inner.lock();
         inner.current_room_id = Some(room_id);
-        let (mut sr, mut bd, mut ch) = inner
+        let (mut sr, mut bd, mut ch, br) = inner
             .rooms
             .iter()
             .find(|r| r.id == room_id)
-            .map(|r| (r.sample_rate, r.bit_depth, r.channels))
-            .unwrap_or((48000, 16, 1));
+            .map(|r| (r.sample_rate, r.bit_depth, r.channels, r.bitrate))
+            .unwrap_or((48000, 16, 1, 0));
         if sr <= 0 {
             sr = 48000;
         }
@@ -338,6 +341,8 @@ fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
         inner.audio_config.sample_rate = sr as u32;
         inner.audio_config.bit_depth = bd as u8;
         inner.audio_config.channels = ch as u8;
+        // Bitrate des Raums (0 = automatisch) – der Encoder übernimmt sie laufend.
+        inner.audio_config.bitrate = br.max(0) as u32;
         (sr, bd, ch)
     };
     let _ = ctx.app.send_ws(Message::new(
@@ -406,24 +411,51 @@ fn leave_room(ctx: &Ctx) {
 const RATES: [i64; 5] = [48000, 44100, 24000, 16000, 8000];
 const DEPTHS: [i64; 3] = [16, 24, 32];
 
+/// Raum-Vorlage: typische Audio-Einstellungen für einen Anwendungsfall.
+struct RoomTemplate {
+    label: &'static str,
+    sample_rate: i64,
+    bit_depth: i64,
+    channels: i64,
+    /// Opus-Bitrate in kbit/s
+    bitrate_kbps: i64,
+}
+
+/// Auswählbare Vorlagen. Der letzte Eintrag „Erweitert" blendet alle Felder
+/// zur freien Konfiguration ein.
+const TEMPLATES: [RoomTemplate; 3] = [
+    // Sprachchat in guter Qualität (wie ein Discord-Sprachkanal)
+    RoomTemplate { label: "Discord-Raum (Sprache)", sample_rate: 48000, bit_depth: 16, channels: 1, bitrate_kbps: 64 },
+    // Schmalbandige Sprache wie ein klassisches Telefonat
+    RoomTemplate { label: "Klassisches Telefonat", sample_rate: 8000, bit_depth: 16, channels: 1, bitrate_kbps: 16 },
+    // Musik/Übertragung in Stereo, hohe Qualität
+    RoomTemplate { label: "Radio-Übertragung (Musik)", sample_rate: 48000, bit_depth: 16, channels: 2, bitrate_kbps: 256 },
+];
+/// Index der „Erweitert"-Auswahl (nach allen Vorlagen).
+const ADVANCED_IDX: usize = TEMPLATES.len();
+
 /// Was der Raum-Dialog erstellt/bearbeitet.
 enum RoomMode {
     Create { parent: Option<i64> },
     Edit { room_id: i64 },
 }
 
-/// Gemeinsamer Dialog zum Erstellen und Bearbeiten eines Raums:
-/// Name, Passwort, max. Nutzer und die raumweite Audio-Qualität.
+/// Gemeinsamer Dialog zum Erstellen und Bearbeiten eines Raums.
+///
+/// Aufbau: Name, Passwort (gilt, sobald etwas im Feld steht), max. Nutzer und
+/// ein Vorlagen-Auswahlfeld. Vorlagen setzen die raumweite Audio-Qualität auf
+/// typische Werte; „Erweitert" blendet Samplerate, Bittiefe, Kanäle und Bitrate
+/// zur freien Einstellung ein.
 fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     // Vorbelegung bei Bearbeiten
-    let (title, name0, max0, sr0, bd0, ch0, had_pw) = match &mode {
+    let (title, name0, max0, sr0, bd0, ch0, br0_kbps, edit) = match &mode {
         RoomMode::Create { parent } => {
             let t = if parent.is_some() {
                 "Unterraum erstellen"
             } else {
                 "Raum erstellen"
             };
-            (t, String::new(), 0i64, 48000i64, 16i64, 1i64, false)
+            (t, String::new(), 0i64, 48000i64, 16i64, 1i64, 0i64, false)
         }
         RoomMode::Edit { room_id } => {
             let inner = ctx.app.inner.lock();
@@ -435,26 +467,25 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
                     if r.sample_rate > 0 { r.sample_rate } else { 48000 },
                     if r.bit_depth > 0 { r.bit_depth } else { 16 },
                     if r.channels > 0 { r.channels } else { 1 },
-                    r.has_password,
+                    if r.bitrate > 0 { r.bitrate / 1000 } else { 0 },
+                    true,
                 ),
-                None => ("Raum bearbeiten", String::new(), 0, 48000, 16, 1, false),
+                None => ("Raum bearbeiten", String::new(), 0, 48000, 16, 1, 0, true),
             }
         }
     };
 
     let dialog = Dialog::builder(&ctx.ui.frame, title).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
-    // generisch (Sizer::add braucht Sized), daher freie fn statt Closure
-    fn add_row<W: WxWidget>(dialog: &Dialog, v: &BoxSizer, label: &str, ctrl: &W) {
+    // Beschriftete Zeile; gibt das Label zurück, damit erweiterte Zeilen
+    // gemeinsam mit ihrem Control aus-/eingeblendet werden können.
+    fn add_row<W: WxWidget>(dialog: &Dialog, v: &BoxSizer, label: &str, ctrl: &W) -> StaticText {
         let r = BoxSizer::builder(Orientation::Horizontal).build();
-        r.add(
-            &StaticText::builder(dialog).with_label(label).build(),
-            0,
-            SizerFlag::AlignCenterVertical | SizerFlag::All,
-            6,
-        );
+        let lbl = StaticText::builder(dialog).with_label(label).build();
+        r.add(&lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 6);
         r.add(ctrl, 1, SizerFlag::Expand | SizerFlag::All, 6);
         v.add_sizer(&r, 0, SizerFlag::Expand, 0);
+        lbl
     }
 
     let name_in = TextCtrl::builder(&dialog).build();
@@ -462,13 +493,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     ui::set_a11y_name(&name_in, "Raumname");
     add_row(&dialog, &v, "Name:", &name_in);
 
-    // Passwort: Checkbox steuert, ob es gesetzt/geändert wird
-    let pw_chk = CheckBox::builder(&dialog)
-        .with_label("Passwort setzen/ändern")
-        .build();
-    pw_chk.set_value(false);
-    ui::set_a11y_name(&pw_chk, "Passwort setzen oder ändern");
-    v.add(&pw_chk, 0, SizerFlag::All, 6);
+    // Passwort ohne Checkbox: gilt, sobald etwas drinsteht.
     let pw_in = TextCtrl::builder(&dialog)
         .with_style(TextCtrlStyle::Password)
         .build();
@@ -476,10 +501,10 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     add_row(
         &dialog,
         &v,
-        if had_pw {
-            "Passwort (leer = entfernen):"
+        if edit {
+            "Passwort (leer = unverändert):"
         } else {
-            "Passwort:"
+            "Passwort (leer = keines):"
         },
         &pw_in,
     );
@@ -489,13 +514,23 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     ui::set_a11y_name(&max_in, "Maximale Nutzerzahl, 0 = unbegrenzt");
     add_row(&dialog, &v, "Max. Nutzer (0 = ∞):", &max_in);
 
+    // Vorlagen-Auswahl
+    let template_choice = Choice::builder(&dialog).build();
+    for t in &TEMPLATES {
+        template_choice.append(t.label);
+    }
+    template_choice.append("Erweitert (frei einstellbar)");
+    ui::set_a11y_name(&template_choice, "Vorlage für die Audio-Qualität");
+    add_row(&dialog, &v, "Vorlage:", &template_choice);
+
+    // Erweiterte Audio-Felder (anfangs ggf. ausgeblendet)
     let rate_choice = Choice::builder(&dialog).build();
     for r in RATES {
         rate_choice.append(&r.to_string());
     }
     rate_choice.set_selection(RATES.iter().position(|&r| r == sr0).unwrap_or(0) as u32);
     ui::set_a11y_name(&rate_choice, "Samplerate in Hertz");
-    add_row(&dialog, &v, "Samplerate (Hz):", &rate_choice);
+    let rate_lbl = add_row(&dialog, &v, "Samplerate (Hz):", &rate_choice);
 
     let depth_choice = Choice::builder(&dialog).build();
     for d in DEPTHS {
@@ -503,14 +538,53 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     }
     depth_choice.set_selection(DEPTHS.iter().position(|&d| d == bd0).unwrap_or(0) as u32);
     ui::set_a11y_name(&depth_choice, "Bittiefe");
-    add_row(&dialog, &v, "Bittiefe (Bit):", &depth_choice);
+    let depth_lbl = add_row(&dialog, &v, "Bittiefe (Bit):", &depth_choice);
 
     let ch_choice = Choice::builder(&dialog).build();
     ch_choice.append("Mono");
     ch_choice.append("Stereo");
     ch_choice.set_selection(if ch0 >= 2 { 1 } else { 0 });
     ui::set_a11y_name(&ch_choice, "Kanäle Mono oder Stereo");
-    add_row(&dialog, &v, "Kanäle:", &ch_choice);
+    let ch_lbl = add_row(&dialog, &v, "Kanäle:", &ch_choice);
+
+    let bitrate_in = TextCtrl::builder(&dialog).build();
+    bitrate_in.set_value(&br0_kbps.to_string());
+    ui::set_a11y_name(&bitrate_in, "Bitrate in kbit pro Sekunde, 0 = automatisch");
+    let br_lbl = add_row(&dialog, &v, "Bitrate (kbit/s, 0 = auto):", &bitrate_in);
+
+    // Ein-/Ausblenden der erweiterten Felder und Vorbelegen aus der Vorlage.
+    let toggle: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |idx: usize| {
+        let adv = idx >= ADVANCED_IDX;
+        for w in [&rate_lbl as &dyn WxWidget, &depth_lbl, &ch_lbl, &br_lbl] {
+            w.show(adv);
+        }
+        rate_choice.show(adv);
+        depth_choice.show(adv);
+        ch_choice.show(adv);
+        bitrate_in.show(adv);
+        if !adv {
+            // Felder aus der Vorlage setzen (auf „Speichern" daraus gelesen).
+            let t = &TEMPLATES[idx];
+            rate_choice.set_selection(RATES.iter().position(|&r| r == t.sample_rate).unwrap_or(0) as u32);
+            depth_choice.set_selection(DEPTHS.iter().position(|&d| d == t.bit_depth).unwrap_or(0) as u32);
+            ch_choice.set_selection(if t.channels >= 2 { 1 } else { 0 });
+            bitrate_in.set_value(&t.bitrate_kbps.to_string());
+        }
+        dialog.layout();
+        dialog.fit();
+    });
+
+    // Startauswahl: beim Bearbeiten „Erweitert" (zeigt die echten Werte),
+    // beim Erstellen die erste Vorlage.
+    let initial_idx = if edit { ADVANCED_IDX } else { 0 };
+    template_choice.set_selection(initial_idx as u32);
+    toggle(initial_idx);
+    {
+        let toggle = toggle.clone();
+        template_choice.on_selection_changed(move |_| {
+            toggle(template_choice.get_selection().unwrap_or(0) as usize);
+        });
+    }
 
     let btns = BoxSizer::builder(Orientation::Horizontal).build();
     let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
@@ -538,10 +612,12 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
 
     let name = name_in.get_value().trim().to_string();
     let max_users: i64 = max_in.get_value().trim().parse().unwrap_or(0);
+    // Audio-Werte immer aus den (ggf. von der Vorlage befüllten) Feldern lesen.
     let sample_rate = RATES[rate_choice.get_selection().unwrap_or(0) as usize];
     let bit_depth = DEPTHS[depth_choice.get_selection().unwrap_or(0) as usize];
     let channels = if ch_choice.get_selection().unwrap_or(0) == 1 { 2 } else { 1 };
-    let pw_change = pw_chk.is_checked();
+    let bitrate_kbps: i64 = bitrate_in.get_value().trim().parse().unwrap_or(0);
+    let bitrate = bitrate_kbps.max(0) * 1000;
     let pw_value = pw_in.get_value();
     dialog.destroy();
 
@@ -558,11 +634,13 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
                 "sample_rate": sample_rate,
                 "bit_depth": bit_depth,
                 "channels": channels,
+                "bitrate": bitrate,
             });
             if let Some(pid) = parent {
                 data["parent_id"] = serde_json::json!(pid);
             }
-            if pw_change && !pw_value.is_empty() {
+            // Passwort gilt, sobald etwas im Feld steht.
+            if !pw_value.is_empty() {
                 data["password"] = serde_json::Value::String(pw_value);
             }
             send_or_status(ctx, Message::new("room_create", data));
@@ -575,15 +653,11 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
                 "sample_rate": sample_rate,
                 "bit_depth": bit_depth,
                 "channels": channels,
+                "bitrate": bitrate,
             });
-            // Passwort nur anfassen, wenn die Checkbox aktiv ist:
-            // leeres Feld = entfernen (null), sonst setzen.
-            if pw_change {
-                data["password"] = if pw_value.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(pw_value)
-                };
+            // Leeres Feld = Passwort unverändert lassen; sonst neu setzen.
+            if !pw_value.is_empty() {
+                data["password"] = serde_json::Value::String(pw_value);
             }
             send_or_status(ctx, Message::new("room_update", data));
         }
@@ -833,18 +907,14 @@ fn stream_file(ctx: &Ctx) {
     set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let was_loopback = {
+    {
         let mut inner = ctx.app.inner.lock();
         inner.stream_shutdown = Some(shutdown_tx);
         inner.streaming_file = true;
-        inner.loopback
-    };
-    if !was_loopback {
-        let _ = ctx.app.send_ws(Message::new(
-            "audio_loopback",
-            serde_json::json!({ "enabled": true }),
-        ));
     }
+    // Kein Loopback mehr nötig: Das Datei-Audio wird clientseitig in den
+    // Mikrofon-Sendestrom gemischt (andere hören Mikro+Datei) und lokal
+    // abgespielt (der Streamer hört die Datei ohne Eigen-Echo).
 
     let filename = path
         .file_name()
@@ -863,12 +933,6 @@ fn stream_file(ctx: &Ctx) {
             let _ = ev_tx.send(Message::new(
                 "client_error",
                 serde_json::json!({ "message": format!("Streaming-Fehler: {}", e) }),
-            ));
-        }
-        if !was_loopback {
-            let _ = app.send_ws(Message::new(
-                "audio_loopback",
-                serde_json::json!({ "enabled": false }),
             ));
         }
         app.inner.lock().stream_shutdown = None;
@@ -986,17 +1050,6 @@ fn download_file(ctx: &Ctx) {
     }
 }
 
-fn refresh_files(ctx: &Ctx) {
-    let Some(room_id) = ctx.app.inner.lock().current_room_id else {
-        status(ctx, "Bitte zuerst einem Raum beitreten.");
-        return;
-    };
-    send_or_status(
-        ctx,
-        Message::new("file_list", serde_json::json!({ "room_id": room_id })),
-    );
-}
-
 // ── Verwaltung ──
 
 fn kick_user(ctx: &Ctx) {
@@ -1092,17 +1145,189 @@ fn ask_admin(ctx: &Ctx, caption: &str) -> bool {
     dlg.show_modal() == ID_YES
 }
 
-/// Account-Liste vom Server anfordern (Antwort: account_list_result).
-fn request_accounts(ctx: &Ctx) {
-    send_or_status(ctx, Message::new("account_list", serde_json::json!({})));
+/// Aktuell im Konten-Dialog ausgewähltes Konto (Benutzername, Rolle).
+fn selected_account(ctx: &Ctx) -> Option<(String, String)> {
+    let st = ctx.st.borrow();
+    let ad = st.account_dialog.as_ref()?;
+    let idx = ad.list.get_selection()? as usize;
+    ad.accounts.get(idx).cloned()
 }
 
-/// Vom Handler aufgerufen, um die empfangene Liste anzuzeigen.
-pub fn show_account_list(ctx: &Ctx, text: &str) {
-    info_box(ctx, text, "Konten");
+/// Zeigt anhand der eigenen Rolle den Menüpunkt „Benutzerkonten verwalten"
+/// (nur für Admins) und merkt sich den Status. Für Nicht-Admins wird er
+/// vollständig aus dem Menü entfernt.
+pub fn update_account_menu(ctx: &Ctx) {
+    let admin = ctx.app.inner.lock().is_self_admin();
+    ctx.st.borrow_mut().is_admin = admin;
+    let Some(mb) = ctx.ui.frame.get_menu_bar() else {
+        return;
+    };
+    let present = mb.find_item(ui::ID_ACCOUNTS).is_some();
+    if admin && !present {
+        // Über ein immer vorhandenes Verwaltung-Item das richtige Menü finden.
+        if let Some((_, menu)) = mb.find_item_and_menu(ui::ID_CHANGE_PW) {
+            menu.insert(
+                0,
+                ui::ID_ACCOUNTS,
+                "Benutzerkonten &verwalten…",
+                "Konten anzeigen, Rollen ändern, Passwörter zurücksetzen, löschen",
+                ItemKind::Normal,
+            );
+        }
+    } else if !admin && present {
+        if let Some((_, menu)) = mb.find_item_and_menu(ui::ID_ACCOUNTS) {
+            menu.delete(ui::ID_ACCOUNTS);
+        }
+    }
 }
 
-fn account_create(ctx: &Ctx) {
+/// Konten-Verwaltung (nur Admins): ein Dialog mit Kontenliste und Aktionen.
+/// Die Liste aktualisiert sich live aus den Server-Antworten, weil der
+/// UI-Timer auch während des modalen Dialogs weiterläuft.
+fn manage_accounts(ctx: &Ctx) {
+    let dialog = Dialog::builder(&ctx.ui.frame, "Benutzerkonten verwalten").build();
+    let v = BoxSizer::builder(Orientation::Vertical).build();
+
+    v.add(
+        &StaticText::builder(&dialog)
+            .with_label("Konten (Benutzername [Rolle]):")
+            .build(),
+        0,
+        SizerFlag::All,
+        6,
+    );
+    let list = ListBox::builder(&dialog).build();
+    ui::set_a11y_name(&list, "Benutzerkonten");
+    v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
+
+    let row = BoxSizer::builder(Orientation::Horizontal).build();
+    let btn_new = Button::builder(&dialog).with_label("Konto anlegen…").build();
+    let btn_pw = Button::builder(&dialog)
+        .with_label("Passwort zurücksetzen…")
+        .build();
+    let btn_role = Button::builder(&dialog).with_label("Rolle ändern…").build();
+    let btn_del = Button::builder(&dialog).with_label("Konto löschen…").build();
+    let btn_refresh = Button::builder(&dialog).with_label("Aktualisieren").build();
+    for b in [&btn_new, &btn_pw, &btn_role, &btn_del, &btn_refresh] {
+        row.add(b, 0, SizerFlag::All, 4);
+    }
+    v.add_sizer(&row, 0, SizerFlag::All, 4);
+
+    let reg_chk = CheckBox::builder(&dialog)
+        .with_label("Selbstregistrierung erlauben")
+        .build();
+    reg_chk.set_value(ctx.st.borrow().registration_open);
+    ui::set_a11y_name(&reg_chk, "Selbstregistrierung erlauben");
+    v.add(&reg_chk, 0, SizerFlag::All, 6);
+
+    let close = Button::builder(&dialog).with_label("Schließen").build();
+    {
+        let d = dialog;
+        close.on_click(move |_| d.end_modal(ID_OK));
+    }
+    v.add(&close, 0, SizerFlag::AlignRight | SizerFlag::All, 6);
+
+    // Live-Referenz hinterlegen, damit account_list_result die Liste füllt.
+    ctx.st.borrow_mut().account_dialog = Some(crate::app::AccountDialogRef {
+        list,
+        reg_chk,
+        accounts: Vec::new(),
+    });
+
+    {
+        let ctx = ctx.clone();
+        btn_new.on_click(move |_| account_create_new(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        btn_pw.on_click(move |_| {
+            let Some((name, _)) = selected_account(&ctx) else {
+                notify(&ctx, "Bitte zuerst ein Konto auswählen.", "Passwort zurücksetzen");
+                return;
+            };
+            if let Some(pw) = ask_secret(&ctx, &format!("Neues Passwort für „{}“:", name), "Passwort zurücksetzen") {
+                send_or_status(
+                    &ctx,
+                    Message::new("account_set_password", serde_json::json!({ "username": name, "password": pw })),
+                );
+            }
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        btn_role.on_click(move |_| {
+            let Some((name, role)) = selected_account(&ctx) else {
+                notify(&ctx, "Bitte zuerst ein Konto auswählen.", "Rolle ändern");
+                return;
+            };
+            let new_role = if role == "admin" { "user" } else { "admin" };
+            let q = MessageDialog::builder(
+                &ctx.ui.frame,
+                &format!("Rolle von „{}“ auf „{}“ ändern?", name, new_role),
+                "Rolle ändern",
+            )
+            .with_style(MessageDialogStyle::YesNo)
+            .build();
+            if q.show_modal() == ID_YES {
+                send_or_status(
+                    &ctx,
+                    Message::new("account_set_role", serde_json::json!({ "username": name, "role": new_role })),
+                );
+            }
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        btn_del.on_click(move |_| {
+            let Some((name, _)) = selected_account(&ctx) else {
+                notify(&ctx, "Bitte zuerst ein Konto auswählen.", "Konto löschen");
+                return;
+            };
+            let q = MessageDialog::builder(
+                &ctx.ui.frame,
+                &format!("Konto „{}“ wirklich löschen?", name),
+                "Konto löschen",
+            )
+            .with_style(MessageDialogStyle::YesNo)
+            .build();
+            if q.show_modal() == ID_YES {
+                send_or_status(
+                    &ctx,
+                    Message::new("account_delete", serde_json::json!({ "username": name })),
+                );
+            }
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        btn_refresh.on_click(move |_| {
+            let _ = ctx.app.send_ws(Message::new("account_list", serde_json::json!({})));
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        reg_chk.on_toggled(move |_| {
+            let open = reg_chk.is_checked();
+            send_or_status(
+                &ctx,
+                Message::new("account_set_registration", serde_json::json!({ "open": open })),
+            );
+        });
+    }
+
+    dialog.set_sizer(v, true);
+    dialog.fit();
+
+    // Liste initial anfordern.
+    let _ = ctx.app.send_ws(Message::new("account_list", serde_json::json!({})));
+
+    let _ = dialog.show_modal();
+    ctx.st.borrow_mut().account_dialog = None;
+    dialog.destroy();
+}
+
+/// „Konto anlegen" aus dem Konten-Dialog.
+fn account_create_new(ctx: &Ctx) {
     let Some(name) = ask_text(ctx, "Benutzername:", "Konto anlegen", "") else {
         return;
     };
@@ -1116,63 +1341,6 @@ fn account_create(ctx: &Ctx) {
             "account_create",
             serde_json::json!({ "username": name, "password": pw, "role": role }),
         ),
-    );
-}
-
-fn account_password(ctx: &Ctx) {
-    let Some(name) = ask_text(ctx, "Benutzername:", "Passwort zurücksetzen", "") else {
-        return;
-    };
-    let Some(pw) = ask_secret(ctx, "Neues Passwort:", "Passwort zurücksetzen") else {
-        return;
-    };
-    send_or_status(
-        ctx,
-        Message::new(
-            "account_set_password",
-            serde_json::json!({ "username": name, "password": pw }),
-        ),
-    );
-}
-
-fn account_role(ctx: &Ctx) {
-    let Some(name) = ask_text(ctx, "Benutzername:", "Rolle ändern", "") else {
-        return;
-    };
-    let role = if ask_admin(ctx, "Rolle ändern") { "admin" } else { "user" };
-    send_or_status(
-        ctx,
-        Message::new(
-            "account_set_role",
-            serde_json::json!({ "username": name, "role": role }),
-        ),
-    );
-}
-
-fn account_delete(ctx: &Ctx) {
-    let Some(name) = ask_text(ctx, "Benutzername:", "Konto löschen", "") else {
-        return;
-    };
-    let dlg = MessageDialog::builder(
-        &ctx.ui.frame,
-        &format!("Konto „{}“ wirklich löschen?", name),
-        "Konto löschen",
-    )
-    .with_style(MessageDialogStyle::YesNo)
-    .build();
-    if dlg.show_modal() == ID_YES {
-        send_or_status(
-            ctx,
-            Message::new("account_delete", serde_json::json!({ "username": name })),
-        );
-    }
-}
-
-fn toggle_registration(ctx: &Ctx) {
-    let open = !ctx.st.borrow().registration_open;
-    send_or_status(
-        ctx,
-        Message::new("account_set_registration", serde_json::json!({ "open": open })),
     );
 }
 
@@ -1202,7 +1370,6 @@ Strg+Umschalt+S  Streaming stoppen\n\
 Strg+J  Ausgewähltem Raum beitreten\n\
 Strg+U  Datei hochladen\n\
 Strg+H  Datei herunterladen\n\
-Strg+R  Dateiliste aktualisieren\n\
 Strg+Umschalt+P  Privatnachricht an ausgewählten Nutzer\n\
 Strg+Q  Beenden\n\n\
 Im Baum: Pfeil rechts/links klappt auf/zu, Enter tritt einem Raum bei.";
@@ -1240,7 +1407,6 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         ui::ID_DELETE_ROOM => delete_room(ctx),
         ui::ID_UPLOAD => upload_file(ctx),
         ui::ID_DOWNLOAD => download_file(ctx),
-        ui::ID_REFRESH_FILES => refresh_files(ctx),
         ui::ID_PM => private_message(ctx),
         ui::ID_KICK => kick_user(ctx),
         ui::ID_BAN => ban_user(ctx),
@@ -1248,13 +1414,9 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         ui::ID_ADMIN_MUTE => admin_mute(ctx, true),
         ui::ID_ADMIN_UNMUTE => admin_mute(ctx, false),
         ui::ID_SERVER_MSG => server_message(ctx),
-        ui::ID_ACCOUNTS => request_accounts(ctx),
-        ui::ID_ACCOUNT_CREATE => account_create(ctx),
-        ui::ID_ACCOUNT_PASSWORD => account_password(ctx),
-        ui::ID_ACCOUNT_ROLE => account_role(ctx),
-        ui::ID_ACCOUNT_DELETE => account_delete(ctx),
-        ui::ID_REGISTRATION => toggle_registration(ctx),
+        ui::ID_ACCOUNTS => manage_accounts(ctx),
         ui::ID_CHANGE_PW => change_password(ctx),
+        ui::ID_CHECK_UPDATE => crate::update::check_for_update(ctx, true),
         ui::ID_HELP_KEYS => info_box(ctx, HELP_TEXT, "Kurztasten"),
         ID_ABOUT => info_box(
             ctx,

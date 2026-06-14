@@ -31,6 +31,7 @@ impl RoomManager {
                 sample_rate: r.sample_rate,
                 bit_depth: r.bit_depth,
                 channels: r.channels,
+                bitrate: r.bitrate,
             });
         }
 
@@ -96,8 +97,9 @@ impl RoomManager {
         sample_rate: i64,
         bit_depth: i64,
         channels: i64,
+        bitrate: i64,
     ) -> anyhow::Result<i64> {
-        queries::create_room(&self.db, name, parent_id, password, max_users, sample_rate, bit_depth, channels).await
+        queries::create_room(&self.db, name, parent_id, password, max_users, sample_rate, bit_depth, channels, bitrate).await
     }
 
     pub async fn delete_room(&self, room_id: i64) -> anyhow::Result<()> {
@@ -120,8 +122,9 @@ impl RoomManager {
         sample_rate: Option<i64>,
         bit_depth: Option<i64>,
         channels: Option<i64>,
+        bitrate: Option<i64>,
     ) -> anyhow::Result<()> {
-        queries::update_room(&self.db, room_id, name, password, max_users, sample_rate, bit_depth, channels).await
+        queries::update_room(&self.db, room_id, name, password, max_users, sample_rate, bit_depth, channels, bitrate).await
     }
 
     pub async fn room_exists(&self, room_id: i64) -> anyhow::Result<bool> {

@@ -60,6 +60,9 @@ pub struct RoomInfo {
     pub bit_depth: i64,
     #[serde(default)]
     pub channels: i64,
+    /// Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
+    #[serde(default)]
+    pub bitrate: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +130,15 @@ pub struct StreamFileStatus {
 // ── Audio Packet (UDP) ──
 
 pub const AUDIO_MAGIC: [u8; 4] = [0x54, 0x43, 0x4F, 0x4E]; // "TCON"
-pub const AUDIO_HEADER_SIZE: usize = 22;
+// 22-Byte-Basiskopf + 1 Byte source_id (Quelle innerhalb eines Nutzers:
+// 0 = Mikrofon, 1 = Datei-Stream). Der Server liest nur das Token (Offset 4)
+// und leitet das Paket unverändert weiter, kennt die source_id also nicht.
+pub const AUDIO_HEADER_SIZE: usize = 23;
+
+/// Quelle 0 = Live-Mikrofon.
+pub const SOURCE_MIC: u8 = 0;
+/// Quelle 1 = gestreamte Datei (eigener Strom neben dem Mikrofon).
+pub const SOURCE_FILE: u8 = 1;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // einige Felder dienen nur der Diagnose/Vollständigkeit
@@ -139,6 +150,8 @@ pub struct AudioPacketHeader {
     pub bit_depth: u8,
     pub channels: u8,
     pub payload_length: u16,
+    /// Quelle innerhalb des Nutzers (0 = Mikro, 1 = Datei).
+    pub source_id: u8,
 }
 
 impl AudioPacketHeader {
@@ -157,6 +170,7 @@ impl AudioPacketHeader {
             bit_depth: data[18],
             channels: data[19],
             payload_length: u16::from_le_bytes([data[20], data[21]]),
+            source_id: data[22],
         })
     }
 
@@ -173,6 +187,7 @@ pub fn build_audio_packet(
     sample_rate: u16,
     bit_depth: u8,
     channels: u8,
+    source_id: u8,
     pcm_data: &[u8],
 ) -> Vec<u8> {
     let payload_len = pcm_data.len() as u16;
@@ -185,6 +200,7 @@ pub fn build_audio_packet(
     packet.push(bit_depth);
     packet.push(channels);
     packet.extend_from_slice(&payload_len.to_le_bytes());
+    packet.push(source_id);
     packet.extend_from_slice(pcm_data);
     packet
 }

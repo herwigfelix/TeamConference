@@ -227,6 +227,7 @@ pub async fn handle_connection<S>(
                     req.sample_rate.unwrap_or(48000),
                     req.bit_depth.unwrap_or(16),
                     req.channels.unwrap_or(1),
+                    req.bitrate.unwrap_or(0),
                 ).await {
                     Ok(_) => {
                         // Broadcast updated room list to all
@@ -294,7 +295,7 @@ pub async fn handle_connection<S>(
                     }
                 };
 
-                match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users, req.sample_rate, req.bit_depth, req.channels).await {
+                match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users, req.sample_rate, req.bit_depth, req.channels, req.bitrate).await {
                     Ok(()) => {
                         let room_list = state.rooms.get_room_list().await.unwrap_or_default();
                         let list_msg = Message::new("room_list", serde_json::json!({
@@ -435,7 +436,7 @@ pub async fn handle_connection<S>(
             }
 
             "file_upload_complete" => {
-                let Some(_uid) = user_id else { continue };
+                let Some(uid) = user_id else { continue };
                 let req: FileUploadComplete = match serde_json::from_value(parsed.data) {
                     Ok(r) => r,
                     Err(_) => continue,
@@ -445,6 +446,19 @@ pub async fn handle_connection<S>(
                         "file_id": file_id,
                         "success": true
                     })));
+                    // Aktualisierte Dateiliste an alle im Raum senden, damit der
+                    // Client ohne manuelles Aktualisieren die neue Datei sieht.
+                    if let Some(u) = state.users.get_user(uid).await {
+                        if let Some(room_id) = u.room_id {
+                            if let Ok(files) = state.files.get_file_list(room_id).await {
+                                let list_msg = Message::new("file_list", serde_json::json!({
+                                    "room_id": room_id,
+                                    "files": files
+                                }));
+                                state.users.broadcast_to_room(room_id, list_msg, None).await;
+                            }
+                        }
+                    }
                 }
             }
 

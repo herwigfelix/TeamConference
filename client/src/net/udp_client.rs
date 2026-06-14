@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
@@ -37,8 +38,12 @@ pub async fn start_udp_audio(
 
     let (send_shutdown_tx, _) = watch::channel(false);
 
-    // -- Recv task: UDP -> Opus decode -> playback --
-    let (recv_shutdown_tx, recv_shutdown_rx) = watch::channel(false);
+    // Kanal für lokal eingespeistes Audio (gestreamte Datei zum Mithören).
+    let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+    *state.local_audio_tx.lock() = Some(local_tx);
+
+    // -- Recv task: UDP -> Opus decode (pro Quelle) -> mischen -> playback --
+    let (recv_shutdown_tx, mut recv_shutdown_rx) = watch::channel(false);
     let recv_socket = socket.clone();
     let recv_state = state.clone();
 
@@ -46,93 +51,92 @@ pub async fn start_udp_audio(
         let mut buf = [0u8; 65536];
         let mut packets_received: u64 = 0;
         let mut parse_failures: u64 = 0;
-        let mut no_playback_tx: u64 = 0;
 
-        // Opus decoders — one for mono, one for stereo (created on demand)
-        let mut decoder_mono: Option<opus::Decoder> = None;
-        let mut decoder_stereo: Option<opus::Decoder> = None;
-        // PCM output buffer for Opus decoding (max 960 frames * 2 channels)
+        // Ein Opus-Decoder je logischer Quelle: (token, source_id, channels).
+        // So verfälschen sich gleichzeitige Ströme desselben Nutzers (Mikro +
+        // Datei) nicht gegenseitig den Decoder-Zustand.
+        let mut decoders: HashMap<(u32, u8, u8), opus::Decoder> = HashMap::new();
         let mut pcm_out = vec![0i16; 960 * 2];
 
-        // Inline pair-mixing: hold one chunk, mix with the next arrival, send immediately.
-        // This avoids timer jitter — behaves like the direct mic path but mixes pairs.
-        let mut pending_mix_chunk: Option<Vec<u8>> = None;
+        // Misch-Akkumulator: überlappende Quellen werden je Sample summiert.
+        // Geflusht wird, sobald dieselbe Quelle erneut sendet (= ein neues
+        // 20-ms-Fenster beginnt). Bei nur einer Quelle also Frame für Frame wie
+        // der direkte Pfad (kein Wanduhr-Takt → kein Schweben/Stottern); bei
+        // mehreren Quellen werden gleichzeitige Frames gemischt. Eine kurze
+        // Inaktivitäts-Frist gibt ein letztes hängendes Frame aus, wenn Quellen
+        // verstummen.
+        let mut acc: Vec<i32> = Vec::new();
+        let mut acc_sources: Vec<(u32, u8)> = Vec::new();
+        let mut acc_started: Option<tokio::time::Instant> = None;
+        let mut safety = tokio::time::interval(tokio::time::Duration::from_millis(8));
 
         loop {
-            if *recv_shutdown_rx.borrow() {
-                break;
-            }
-
-            let is_mixing = recv_state.file_streaming.load(std::sync::atomic::Ordering::Relaxed);
-
             tokio::select! {
+                _ = recv_shutdown_rx.changed() => { break; }
+
+                // Sicherheits-Flush: hängendes Frame ausgeben, wenn ~24 ms lang
+                // keine weitere (wiederholende) Quelle kam.
+                _ = safety.tick() => {
+                    if let Some(t0) = acc_started {
+                        if t0.elapsed() >= tokio::time::Duration::from_millis(24) {
+                            flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
+                        }
+                    }
+                }
+
+                // Lokal eingespeistes Audio (gestreamte Datei, Wiedergabeformat).
+                Some(frame) = local_rx.recv() => {
+                    let key = (u32::MAX, crate::protocol::SOURCE_FILE);
+                    if acc_sources.contains(&key) {
+                        flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
+                    }
+                    acc_add_i16(&mut acc, &frame);
+                    acc_sources.push(key);
+                    if acc_started.is_none() { acc_started = Some(tokio::time::Instant::now()); }
+                }
+
                 result = recv_socket.recv_from(&mut buf) => {
                     match result {
                         Ok((len, addr)) => {
                             if let Some(header) = AudioPacketHeader::parse(&buf[..len]) {
                                 let payload = header.payload(&buf[..len]);
 
-                                let deafened = {
+                                let (deafened, own_token) = {
                                     let inner = recv_state.inner.lock();
-                                    inner.deafened
+                                    (inner.deafened, inner.session_token.unwrap_or(0))
                                 };
+
+                                // Eigenen, vom Server zurückgespiegelten Datei-Strom
+                                // (Loopback) verwerfen – er wird bereits lokal
+                                // mitgehört, sonst doppelt.
+                                let own_file = header.token == own_token
+                                    && header.source_id == crate::protocol::SOURCE_FILE;
 
                                 if packets_received == 0 {
                                     tracing::info!(
-                                        "UDP recv: first packet from {}, len={}, sr={}, ch={}, bd={}, payload={}, deafened={}, opus={}",
-                                        addr, len, header.sample_rate, header.channels, header.bit_depth, payload.len(), deafened,
-                                        header.bit_depth == 0
+                                        "UDP recv: first packet from {}, len={}, sr={}, ch={}, src={}, bd={}, payload={}, deafened={}",
+                                        addr, len, header.sample_rate, header.channels, header.source_id,
+                                        header.bit_depth, payload.len(), deafened
                                     );
                                 }
 
-                                if !deafened && !payload.is_empty() {
-                                    // Decode: either Opus (bit_depth=0) or raw PCM
-                                    let pcm = if header.bit_depth == 0 {
-                                        // Opus decode
-                                        let decoder = if header.channels <= 1 {
-                                            decoder_mono.get_or_insert_with(|| {
-                                                match opus::Decoder::new(48000, opus::Channels::Mono) {
-                                                    Ok(d) => {
-                                                        tracing::info!("UDP recv: created Opus mono decoder");
-                                                        d
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!("Failed to create Opus mono decoder: {}", e);
-                                                        panic!("Opus decoder creation failed");
-                                                    }
-                                                }
-                                            })
-                                        } else {
-                                            decoder_stereo.get_or_insert_with(|| {
-                                                match opus::Decoder::new(48000, opus::Channels::Stereo) {
-                                                    Ok(d) => {
-                                                        tracing::info!("UDP recv: created Opus stereo decoder");
-                                                        d
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!("Failed to create Opus stereo decoder: {}", e);
-                                                        panic!("Opus decoder creation failed");
-                                                    }
-                                                }
-                                            })
-                                        };
-
-                                        let out_samples = 960 * (header.channels.max(1) as usize);
+                                if !deafened && !own_file && !payload.is_empty() {
+                                    let ch = header.channels.max(1);
+                                    let pcm: Option<Vec<u8>> = if header.bit_depth == 0 {
+                                        let key = (header.token, header.source_id, ch);
+                                        let decoder = decoders.entry(key).or_insert_with(|| {
+                                            let oc = if ch <= 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                                            opus::Decoder::new(48000, oc).expect("Opus decoder creation failed")
+                                        });
+                                        let out_samples = 960 * (ch as usize);
                                         if pcm_out.len() < out_samples {
                                             pcm_out.resize(out_samples, 0);
                                         }
-
                                         match decoder.decode(payload, &mut pcm_out[..out_samples], false) {
-                                            Ok(decoded_frames) => {
-                                                let total_samples = decoded_frames * (header.channels.max(1) as usize);
-                                                if packets_received == 0 {
-                                                    tracing::info!(
-                                                        "UDP recv: Opus decoded {} bytes → {} frames ({} samples)",
-                                                        payload.len(), decoded_frames, total_samples
-                                                    );
-                                                }
-                                                let mut bytes = Vec::with_capacity(total_samples * 2);
-                                                for &s in &pcm_out[..total_samples] {
+                                            Ok(frames) => {
+                                                let total = frames * (ch as usize);
+                                                let mut bytes = Vec::with_capacity(total * 2);
+                                                for &s in &pcm_out[..total] {
                                                     bytes.extend_from_slice(&s.to_le_bytes());
                                                 }
                                                 Some(bytes)
@@ -149,61 +153,21 @@ pub async fn start_udp_audio(
                                     };
 
                                     if let Some(pcm_data) = pcm {
-                                        let dev_ch = {
-                                            let inner = recv_state.inner.lock();
-                                            inner.playback_device_channels
-                                        };
-                                        let converted = convert_channels(&pcm_data, header.channels as u16, dev_ch);
-
-                                        // Determine what to send: either mix pair or send directly
-                                        let to_send = if is_mixing {
-                                            if let Some(pending) = pending_mix_chunk.take() {
-                                                // Mix pending + new and send immediately
-                                                Some(mix_chunks(&[pending, converted]))
-                                            } else {
-                                                // Hold as pending, wait for pair
-                                                pending_mix_chunk = Some(converted);
-                                                None
-                                            }
-                                        } else {
-                                            // Flush any leftover pending chunk from when mixing stopped
-                                            if let Some(pending) = pending_mix_chunk.take() {
-                                                let playback_tx = recv_state.playback_tx.lock();
-                                                if let Some(ref tx) = *playback_tx {
-                                                    let _ = tx.try_send(pending);
-                                                }
-                                            }
-                                            Some(converted)
-                                        };
-
-                                        if let Some(chunk) = to_send {
-                                            let playback_tx = recv_state.playback_tx.lock();
-                                            if let Some(ref tx) = *playback_tx {
-                                                match tx.try_send(chunk) {
-                                                    Ok(()) => {}
-                                                    Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                                        if packets_received % 500 == 0 {
-                                                            tracing::warn!("UDP recv: playback channel full, dropping audio");
-                                                        }
-                                                    }
-                                                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                                                        tracing::error!("UDP recv: playback channel disconnected");
-                                                    }
-                                                }
-                                            } else {
-                                                no_playback_tx += 1;
-                                                if no_playback_tx == 1 || no_playback_tx == 50 {
-                                                    tracing::warn!("UDP recv: no playback_tx available (count={})", no_playback_tx);
-                                                }
-                                            }
+                                        let dev_ch = recv_state.inner.lock().playback_device_channels;
+                                        let converted = convert_channels(&pcm_data, ch as u16, dev_ch);
+                                        let key = (header.token, header.source_id);
+                                        // Wiederholt sich die Quelle, beginnt ein neues
+                                        // Fenster → vorheriges Gemisch ausgeben.
+                                        if acc_sources.contains(&key) {
+                                            flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
                                         }
+                                        acc_add_bytes(&mut acc, &converted);
+                                        acc_sources.push(key);
+                                        if acc_started.is_none() { acc_started = Some(tokio::time::Instant::now()); }
                                     }
                                 }
 
                                 packets_received += 1;
-                                if packets_received == 50 {
-                                    tracing::info!("UDP recv: 50 packets received (1 second of audio)");
-                                }
                             } else {
                                 parse_failures += 1;
                                 if parse_failures <= 3 {
@@ -217,21 +181,62 @@ pub async fn start_udp_audio(
                         }
                     }
                 }
-                // Flush pending chunk if no pair arrives within 10ms
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)), if pending_mix_chunk.is_some() => {
-                    if let Some(chunk) = pending_mix_chunk.take() {
-                        let playback_tx = recv_state.playback_tx.lock();
-                        if let Some(ref tx) = *playback_tx {
-                            let _ = tx.try_send(chunk);
-                        }
-                    }
-                }
             }
         }
         tracing::info!("UDP recv task ended, total received: {}, parse failures: {}", packets_received, parse_failures);
     });
 
     Ok((send_shutdown_tx, recv_shutdown_tx))
+}
+
+/// i16-LE-Bytes in den Misch-Akkumulator addieren (resize bei Bedarf).
+fn acc_add_bytes(acc: &mut Vec<i32>, bytes: &[u8]) {
+    let n = bytes.len() / 2;
+    if acc.len() < n {
+        acc.resize(n, 0);
+    }
+    for i in 0..n {
+        acc[i] += i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as i32;
+    }
+}
+
+/// i16-Samples in den Misch-Akkumulator addieren (resize bei Bedarf).
+fn acc_add_i16(acc: &mut Vec<i32>, samples: &[i16]) {
+    if acc.len() < samples.len() {
+        acc.resize(samples.len(), 0);
+    }
+    for (i, &v) in samples.iter().enumerate() {
+        acc[i] += v as i32;
+    }
+}
+
+/// Aktuelles Gemisch an die Wiedergabe geben und den Akkumulator zurücksetzen.
+fn flush_acc(
+    acc: &mut Vec<i32>,
+    acc_sources: &mut Vec<(u32, u8)>,
+    acc_started: &mut Option<tokio::time::Instant>,
+    state: &Arc<AppState>,
+) {
+    acc_sources.clear();
+    *acc_started = None;
+    if acc.is_empty() {
+        return;
+    }
+    let out = acc_flush(acc); // leert acc
+    let tx = state.playback_tx.lock();
+    if let Some(ref tx) = *tx {
+        let _ = tx.try_send(out);
+    }
+}
+
+/// Akkumulator zu i16-LE-Bytes (mit Begrenzung) leeren.
+fn acc_flush(acc: &mut Vec<i32>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(acc.len() * 2);
+    for &v in acc.iter() {
+        out.extend_from_slice(&(v.clamp(-32768, 32767) as i16).to_le_bytes());
+    }
+    acc.clear();
+    out
 }
 
 /// Resolve a host:port string to a concrete IPv4 SocketAddr string.
@@ -251,25 +256,6 @@ fn resolve_ipv4(addr: &str) -> Result<String, String> {
         .first()
         .map(|a| a.to_string())
         .ok_or_else(|| format!("No addresses resolved for {}", addr))
-}
-
-/// Mix multiple i16 LE PCM byte chunks into one by adding samples with clamping.
-fn mix_chunks(chunks: &[Vec<u8>]) -> Vec<u8> {
-    let max_len = chunks.iter().map(|c| c.len()).max().unwrap_or(0);
-    let num_samples = max_len / 2;
-    let mut mixed = vec![0i32; num_samples];
-
-    for chunk in chunks {
-        for (i, bytes) in chunk.chunks_exact(2).enumerate() {
-            mixed[i] += i16::from_le_bytes([bytes[0], bytes[1]]) as i32;
-        }
-    }
-
-    let mut out = Vec::with_capacity(max_len);
-    for &s in &mixed {
-        out.extend_from_slice(&(s.clamp(-32768, 32767) as i16).to_le_bytes());
-    }
-    out
 }
 
 /// Convert i16 LE PCM bytes from one channel count to another.
@@ -325,6 +311,7 @@ pub fn convert_channels(data: &[u8], from_ch: u16, to_ch: u16) -> Vec<u8> {
 }
 
 /// Send audio data to the server via UDP.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_audio_packet(
     socket: &UdpSocket,
     server_addr: &str,
@@ -334,9 +321,10 @@ pub async fn send_audio_packet(
     sample_rate: u16,
     bit_depth: u8,
     channels: u8,
+    source_id: u8,
     data: &[u8],
 ) -> Result<(), String> {
-    let packet = build_audio_packet(token, seq, timestamp_ms, sample_rate, bit_depth, channels, data);
+    let packet = build_audio_packet(token, seq, timestamp_ms, sample_rate, bit_depth, channels, source_id, data);
     socket
         .send_to(&packet, server_addr)
         .await

@@ -88,6 +88,9 @@ pub fn start_capture(
         let mut seq: u32 = 0;
         let mut timestamp_ms: u32 = 0;
         let mut packets_sent: u64 = 0;
+        // Zuletzt am Encoder gesetzte Bitrate, um redundante set_bitrate-Aufrufe
+        // zu vermeiden. Die Soll-Bitrate kommt vom beigetretenen Raum.
+        let mut last_bitrate: i32 = -1;
 
         // 20ms frame size at 48kHz
         let frame_samples = (sample_rate / 50) as usize; // 960 frames
@@ -127,40 +130,40 @@ pub fn start_capture(
                     while accumulator.len() >= frame_bytes {
                         let frame: Vec<u8> = accumulator.drain(..frame_bytes).collect();
 
-                        let (socket, server_addr, token, muted) = {
+                        let (socket, server_addr, token, muted, bitrate_cfg) = {
                             let inner = send_state.inner.lock();
                             (
                                 inner.udp_socket.clone(),
                                 inner.server_udp_addr.clone(),
                                 inner.session_token.unwrap_or(0),
                                 inner.muted,
+                                inner.audio_config.bitrate,
                             )
                         };
-
-                        if packets_sent == 0 {
-                            tracing::info!(
-                                "Capture: sending first UDP packet, token={}, muted={}, has_socket={}, has_addr={}, frame_bytes={}, opus={}",
-                                token, muted, socket.is_some(), server_addr.is_some(), frame.len(), encoder.is_some()
-                            );
+                        // Soll-Bitrate des Raums anwenden (0 = automatisch).
+                        let want_bitrate =
+                            crate::state::effective_bitrate(bitrate_cfg, channels as u8);
+                        if want_bitrate != last_bitrate {
+                            if let Some(ref mut enc) = encoder {
+                                let _ = enc.set_bitrate(opus::Bitrate::Bits(want_bitrate));
+                            }
+                            last_bitrate = want_bitrate;
                         }
 
+                        // Bei Stummschaltung nichts senden (das Mikrofon ist die
+                        // Quelle 0; der Datei-Stream ist eine eigene Quelle und
+                        // läuft unabhängig in file_stream.rs).
                         if !muted {
                             if let (Some(ref sock), Some(ref addr)) = (socket, server_addr) {
-                                // Encode with Opus if available
-                                let (payload, bit_depth) = if let Some(ref mut enc) = encoder {
-                                    // Convert i16 LE bytes to i16 slice for Opus
-                                    let pcm_samples: Vec<i16> = frame
-                                        .chunks_exact(2)
-                                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                                        .collect();
+                                let pcm_samples: Vec<i16> = frame
+                                    .chunks_exact(2)
+                                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                    .collect();
 
+                                // Opus-kodieren (Fallback: rohes PCM).
+                                let (payload, bit_depth) = if let Some(ref mut enc) = encoder {
                                     match enc.encode(&pcm_samples, &mut opus_buf) {
-                                        Ok(len) => {
-                                            if packets_sent == 0 {
-                                                tracing::info!("Capture: Opus encoded {} PCM bytes → {} Opus bytes", frame.len(), len);
-                                            }
-                                            (opus_buf[..len].to_vec(), 0u8) // bit_depth=0 = Opus
-                                        }
+                                        Ok(len) => (opus_buf[..len].to_vec(), 0u8),
                                         Err(e) => {
                                             if packets_sent < 3 {
                                                 tracing::warn!("Capture: Opus encode failed: {}, sending raw PCM", e);
@@ -169,7 +172,7 @@ pub fn start_capture(
                                         }
                                     }
                                 } else {
-                                    (frame.clone(), 16u8) // raw PCM fallback
+                                    (frame.clone(), 16u8)
                                 };
 
                                 match send_audio_packet(
@@ -181,6 +184,7 @@ pub fn start_capture(
                                     sample_rate as u16,
                                     bit_depth,
                                     channels as u8,
+                                    crate::protocol::SOURCE_MIC,
                                     &payload,
                                 )
                                 .await
@@ -189,8 +193,6 @@ pub fn start_capture(
                                         packets_sent += 1;
                                         if packets_sent == 1 {
                                             tracing::info!("Capture: first UDP packet sent successfully to {}", addr);
-                                        } else if packets_sent == 50 {
-                                            tracing::info!("Capture: 50 UDP packets sent (1 second of audio), token={}", token);
                                         }
                                     }
                                     Err(e) => {

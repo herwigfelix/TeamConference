@@ -22,6 +22,8 @@ pub struct DbRoom {
     pub sample_rate: i64,
     pub bit_depth: i64,
     pub channels: i64,
+    /// Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
+    pub bitrate: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +211,7 @@ pub async fn create_ban(
 pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
     conn.call(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels
+            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels, bitrate
              FROM rooms ORDER BY sort_order, name"
         )?;
         let rooms = stmt.query_map([], |row| {
@@ -225,6 +227,7 @@ pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
                 sample_rate: row.get(8)?,
                 bit_depth: row.get(9)?,
                 channels: row.get(10)?,
+                bitrate: row.get(11)?,
             })
         })?.filter_map(|r| r.ok()).collect();
         Ok(rooms)
@@ -242,13 +245,14 @@ pub async fn create_room(
     sample_rate: i64,
     bit_depth: i64,
     channels: i64,
+    bitrate: i64,
 ) -> anyhow::Result<i64> {
     let password_hash = password.map(|p| hash_password(&p)).transpose()?;
     conn.call(move |conn| {
         conn.execute(
-            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels],
+            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate],
         )?;
         Ok(conn.last_insert_rowid())
     })
@@ -275,6 +279,7 @@ pub async fn update_room(
     sample_rate: Option<i64>,
     bit_depth: Option<i64>,
     channels: Option<i64>,
+    bitrate: Option<i64>,
 ) -> anyhow::Result<()> {
     let password_hash = match password {
         Some(Some(p)) => Some(Some(hash_password(&p)?)),
@@ -299,6 +304,9 @@ pub async fn update_room(
         }
         if let Some(ch) = channels {
             conn.execute("UPDATE rooms SET channels = ?1 WHERE id = ?2", rusqlite::params![ch, room_id])?;
+        }
+        if let Some(br) = bitrate {
+            conn.execute("UPDATE rooms SET bitrate = ?1 WHERE id = ?2", rusqlite::params![br, room_id])?;
         }
         Ok(())
     })

@@ -31,17 +31,20 @@ TeamConference uses two channels:
 |------|-----------|------|
 | `room_join` | C→S | `{ room_id, password? }` |
 | `room_leave` | C→S | `{ room_id }` |
-| `room_list` | S→C | `{ rooms: [{ id, name, parent_id, users, max_users, has_password, sample_rate, bit_depth, channels }] }` |
+| `room_list` | S→C | `{ rooms: [{ id, name, parent_id, users, max_users, has_password, sample_rate, bit_depth, channels, bitrate }] }` |
 | `room_user_joined` | S→C | `{ room_id, user: { id, nickname, ... } }` |
 | `room_user_left` | S→C | `{ room_id, user_id }` |
-| `room_create` | C→S | `{ name, parent_id?, password?, max_users?, sample_rate?, bit_depth?, channels? }` (Admin) |
+| `room_create` | C→S | `{ name, parent_id?, password?, max_users?, sample_rate?, bit_depth?, channels?, bitrate? }` (Admin) |
 | `room_delete` | C→S | `{ room_id }` (Admin) |
-| `room_update` | C→S | `{ room_id, name?, password?, max_users?, sample_rate?, bit_depth?, channels? }` (Admin) |
+| `room_update` | C→S | `{ room_id, name?, password?, max_users?, sample_rate?, bit_depth?, channels?, bitrate? }` (Admin) |
 
-Die Audio-Qualität (`sample_rate`/`bit_depth`/`channels`) ist **pro Raum**
+Die Audio-Qualität (`sample_rate`/`bit_depth`/`channels`/`bitrate`) ist **pro Raum**
 festgelegt; beim `room_join` übernimmt der Client diese Werte und meldet sie via
-`audio_config`. `password` bei `room_update`: weglassen = unverändert, `null` =
-entfernen, String = setzen.
+`audio_config`. `bitrate` ist die Opus-Bitrate in Bit/s; `0` = automatisch aus
+der Kanalzahl ableiten. Der Client-Raumdialog bietet Vorlagen (Discord-Raum,
+klassisches Telefonat, Radio-Übertragung) und einen „Erweitert"-Modus zur freien
+Einstellung. `password` bei `room_update`: weglassen = unverändert, String =
+setzen (das Entfernen erfolgt serverseitig über `null`).
 
 ### Chat
 
@@ -70,6 +73,10 @@ entfernen, String = setzen.
 | `file_upload_chunk` | C→S | `{ upload_id, data (base64), offset }` |
 | `file_upload_complete` | C→S | `{ upload_id }` |
 | `file_list` | C→S / S→C | `{ room_id, files: [...] }` |
+
+Nach einem abgeschlossenen Upload sendet der Server die aktualisierte
+`file_list` an **alle** im Raum (Auto-Refresh — der Client braucht keinen
+Aktualisieren-Knopf).
 | `file_download` | C→S | `{ file_id }` |
 | `file_download_data` | S→C | `{ file_id, data (base64), offset, total }` |
 
@@ -132,13 +139,24 @@ Offset  Size    Field
 8       4       Sequence Number (uint32, LE)
 12      4       Timestamp (uint32, milliseconds, LE)
 16      2       Sample Rate (uint16, LE)
-18      1       Bit Depth (uint8)
+18      1       Bit Depth (uint8, 0 = Opus, sonst PCM-Bittiefe)
 19      1       Channels (uint8, 1=Mono, 2=Stereo)
 20      2       Payload Length (uint16, LE)
-22      N       PCM Audio Data (Raw Samples, Little-Endian)
+22      1       Source ID (uint8: 0 = Mikrofon, 1 = Datei-Stream)
+23      N       Audio Payload (Opus oder rohes PCM, Little-Endian)
 ```
 
-Header size: 22 bytes. All multi-byte fields are little-endian.
+Header size: 23 bytes. All multi-byte fields are little-endian.
+
+**Source ID:** Ein Nutzer kann mehrere gleichzeitige Audioquellen senden — das
+Live-Mikrofon (`0`) und einen Datei-Stream (`1`) — jeweils unter demselben
+Session-Token. Der Server leitet Pakete unverändert weiter (er liest nur das
+Token); der Empfänger dekodiert **pro `(token, source_id)` getrennt** (eigener
+Opus-Decoder-Zustand) und **mischt** alle aktiven Quellen in einem 20-ms-Takt.
+So lässt sich über einen laufenden Datei-Stream sprechen, und Streamen
+funktioniert auch ohne Mikrofon. Der eigene Datei-Stream wird nicht vom Server
+zurückgespiegelt, sondern lokal zum Mithören in den Mischer eingespeist (kein
+Loopback, kein Eigen-Echo).
 
 ### Audio Data
 

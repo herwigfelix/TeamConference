@@ -19,6 +19,7 @@ mod protocol;
 mod roomtree;
 mod state;
 mod ui;
+mod update;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -81,6 +82,7 @@ fn main() {
                 files: Vec::new(),
                 tree_map: std::collections::HashMap::new(),
                 registration_open: false,
+                ..Default::default()
             })),
         };
 
@@ -98,6 +100,10 @@ fn main() {
         }
 
         wire_events(&ctx);
+
+        // Beim Start still nach einer neueren Version suchen (fragt nur nach,
+        // wenn tatsächlich ein Update vorliegt).
+        update::check_for_update(&ctx, false);
 
         // UI-Timer: Server-Nachrichten vom Kanal abholen und verarbeiten
         {
@@ -176,11 +182,6 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.download_btn
             .on_click(move |_| actions::handle_menu(&ctx, ui::ID_DOWNLOAD));
-    }
-    {
-        let ctx = ctx.clone();
-        ui.refresh_btn
-            .on_click(move |_| actions::handle_menu(&ctx, ui::ID_REFRESH_FILES));
     }
     {
         let ctx = ctx.clone();

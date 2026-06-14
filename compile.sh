@@ -48,7 +48,7 @@ if [ "$OSNAME" = "macos" ]; then
     <key>CFBundleIdentifier</key>      <string>org.accessy.TCClient</string>
     <key>CFBundleExecutable</key>      <string>$BIN_NAME</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>0.3.0</string>
+    <key>CFBundleShortVersionString</key> <string>0.2.0</string>
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSMicrophoneUsageDescription</key> <string>TeamConference benötigt das Mikrofon für die Sprachübertragung.</string>
@@ -62,9 +62,11 @@ PLIST
         && echo "Ad-hoc signiert." \
         || echo "WARNUNG: codesign nicht verfügbar — Mikrofon-Prompt evtl. unzuverlässig."
 
-    cp "$CLIENT_DIR/README.md" "$OUT/README.md" 2>/dev/null || true
+    # In die DMG gehört nur die .app plus ein Alias auf /Applications, damit man
+    # die App per Drag-and-drop installieren kann (keine README in der DMG).
+    ln -sf /Applications "$OUT/Applications"
 
-    # DMG aus dem Ordner erzeugen (enthält die .app)
+    # DMG aus dem Ordner erzeugen (enthält die .app und den Applications-Alias)
     DMG="$DIST_DIR/$PKG.dmg"
     rm -f "$DMG"
     hdiutil create -volname "TeamConference" -srcfolder "$OUT" -ov -format UDZO "$DMG" >/dev/null

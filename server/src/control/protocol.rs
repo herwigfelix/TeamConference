@@ -72,6 +72,9 @@ pub struct RoomInfo {
     pub bit_depth: i64,
     #[serde(default)]
     pub channels: i64,
+    /// Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
+    #[serde(default)]
+    pub bitrate: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +116,8 @@ pub struct RoomCreate {
     pub bit_depth: Option<i64>,
     #[serde(default)]
     pub channels: Option<i64>,
+    #[serde(default)]
+    pub bitrate: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +140,8 @@ pub struct RoomUpdate {
     pub bit_depth: Option<i64>,
     #[serde(default)]
     pub channels: Option<i64>,
+    #[serde(default)]
+    pub bitrate: Option<i64>,
 }
 
 // Chat

@@ -12,6 +12,7 @@ pub async fn initialize(conn: &Connection) -> anyhow::Result<()> {
             "ALTER TABLE rooms ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 48000",
             "ALTER TABLE rooms ADD COLUMN bit_depth INTEGER NOT NULL DEFAULT 16",
             "ALTER TABLE rooms ADD COLUMN channels INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE rooms ADD COLUMN bitrate INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(stmt, []);
         }

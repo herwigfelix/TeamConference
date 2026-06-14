@@ -15,6 +15,8 @@ pub struct AudioConfig {
     pub sample_rate: u32,
     pub bit_depth: u8,
     pub channels: u8,
+    /// Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
+    pub bitrate: u32,
 }
 
 impl Default for AudioConfig {
@@ -23,7 +25,19 @@ impl Default for AudioConfig {
             sample_rate: 48000,
             bit_depth: 16,
             channels: 1,
+            bitrate: 0,
         }
+    }
+}
+
+/// Effektive Opus-Bitrate (Bit/s) bestimmen: 0 = automatisch nach Kanalzahl.
+pub fn effective_bitrate(configured: u32, channels: u8) -> i32 {
+    if configured > 0 {
+        configured as i32
+    } else if channels <= 1 {
+        128_000
+    } else {
+        256_000
     }
 }
 
@@ -105,6 +119,17 @@ impl InnerState {
         }
         format!("Nutzer {}", user_id)
     }
+
+    /// Ob der angemeldete Nutzer Administrator ist (Rolle aus der Raumliste).
+    pub fn is_self_admin(&self) -> bool {
+        let Some(uid) = self.user_id else { return false };
+        for room in &self.rooms {
+            if let Some(u) = room.users.iter().find(|u| u.id == uid) {
+                return u.role == "admin";
+            }
+        }
+        false
+    }
 }
 
 /// Thread-safe application state shared across UI and network tasks.
@@ -116,10 +141,14 @@ pub struct AppState {
     pub playback_rx: Mutex<Option<crossbeam_channel::Receiver<Vec<u8>>>>,
     /// Atomic flag: file streaming is active, playback should mix audio
     pub file_streaming: AtomicBool,
-    /// Atomic flag: file streaming is paused (no UDP packets are sent while true)
+    /// Atomic flag: file streaming is paused (no audio is produced while true)
     pub stream_paused: AtomicBool,
     /// Playback volume as f32 bits (0.0 – 1.0), read lock-free in the audio callback
     pub volume_bits: Arc<AtomicU32>,
+    /// Datei-Stream → Empfangs-Mischer: 20-ms-Blöcke (i16, Wiedergabeformat) zum
+    /// lokalen Mithören der gestreamten Datei (der Server schickt sie nicht
+    /// zurück). Wird im UDP-Empfangs-/Mischtakt mit eingehendem Audio gemischt.
+    pub local_audio_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<i16>>>>,
 }
 
 impl AppState {
@@ -134,6 +163,7 @@ impl AppState {
             file_streaming: AtomicBool::new(false),
             stream_paused: AtomicBool::new(false),
             volume_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            local_audio_tx: Mutex::new(None),
         }
     }
 

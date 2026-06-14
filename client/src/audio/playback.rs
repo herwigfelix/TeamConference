@@ -9,6 +9,10 @@ use crate::state::AppState;
 const INITIAL_PRE_BUFFER_MS: usize = 60;
 const MIN_PRE_BUFFER_MS: usize = 60;
 const MAX_PRE_BUFFER_MS: usize = 500;
+/// Während eine Datei gestreamt wird, halten wir einen größeren Mindestpuffer,
+/// damit Decodier-/Pacing-Schwankungen nicht zu Stottern führen. Latenz ist
+/// beim Datei-Streaming (anders als bei Live-Sprache) unkritisch.
+pub(crate) const STREAMING_MIN_PRE_BUFFER_MS: usize = 200;
 const BUFFER_INCREASE_MS: usize = 40;
 const BUFFER_DECREASE_MS: usize = 20;
 /// How many smooth callbacks before we try to decrease the buffer (~5 seconds)
@@ -85,6 +89,8 @@ pub fn start_playback(
 
     // Volume gain shared with the UI (lock-free)
     let volume_bits = state.volume_bits.clone();
+    // State-Klon nur für das lock-freie Lesen des Streaming-Flags im Callback.
+    let cb_state = state.clone();
 
     // The cpal callback owns its own local buffer.
     // No mutexes — crossbeam try_recv is lock-free.
@@ -159,10 +165,16 @@ pub fn start_playback(
                     // Stable playback — track for adaptive decrease
                     let stable = CALLBACKS_SINCE_UNDERRUN.fetch_add(1, Ordering::Relaxed);
                     if stable > 0 && stable % STABLE_CALLBACKS_BEFORE_DECREASE == 0 {
+                        // Während des Datei-Streamings nicht unter den größeren
+                        // Streaming-Mindestpuffer schrumpfen.
+                        let floor = if cb_state.file_streaming.load(Ordering::Relaxed) {
+                            STREAMING_MIN_PRE_BUFFER_MS
+                        } else {
+                            MIN_PRE_BUFFER_MS
+                        };
                         let current = ADAPTIVE_PRE_BUFFER_MS.load(Ordering::Relaxed);
-                        if current > MIN_PRE_BUFFER_MS {
-                            let new_val =
-                                current.saturating_sub(BUFFER_DECREASE_MS).max(MIN_PRE_BUFFER_MS);
+                        if current > floor {
+                            let new_val = current.saturating_sub(BUFFER_DECREASE_MS).max(floor);
                             ADAPTIVE_PRE_BUFFER_MS.store(new_val, Ordering::Relaxed);
                             tracing::info!(
                                 "Playback: stable for ~5s, buffer {}ms → {}ms",
