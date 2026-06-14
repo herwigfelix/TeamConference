@@ -35,6 +35,10 @@ pub struct AuthResponse {
     pub server_name: Option<String>,
     #[serde(default)]
     pub rooms: Option<Vec<RoomInfo>>,
+    /// Eigene Rolle laut Server ("admin"/"moderator"/"user"). Maßgeblich für die
+    /// Admin-Erkennung, da man beim Login noch in keinem Raum ist.
+    #[serde(default)]
+    pub role: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
 }

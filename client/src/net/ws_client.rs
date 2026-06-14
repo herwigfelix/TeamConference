@@ -166,6 +166,7 @@ fn pre_handle_message(msg: &Message, state: &Arc<AppState>) {
                     inner.authenticated = true;
                     inner.user_id = resp.user_id;
                     inner.server_name = resp.server_name.clone();
+                    inner.self_role = resp.role.clone();
                     if let Some(ref rooms) = resp.rooms {
                         inner.rooms = rooms.clone();
                     }
@@ -182,6 +183,10 @@ fn pre_handle_message(msg: &Message, state: &Arc<AppState>) {
                     let mut inner = state.inner.lock();
                     inner.rooms = room_list;
                     inner.rebuild_token_map();
+                    // Eigene Rolle aktuell halten (z. B. nach Admin-Rollenwechsel).
+                    if let Some(role) = inner.role_in_rooms() {
+                        inner.self_role = Some(role);
+                    }
                 }
             }
         }

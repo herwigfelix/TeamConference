@@ -189,6 +189,7 @@ pub fn do_disconnect(ctx: &Ctx) {
         inner.connected = false;
         inner.authenticated = false;
         inner.user_id = None;
+        inner.self_role = None;
         inner.session_token = None;
         inner.rooms.clear();
         inner.current_room_id = None;

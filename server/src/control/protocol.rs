@@ -48,6 +48,11 @@ pub struct AuthResponse {
     pub server_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rooms: Option<Vec<RoomInfo>>,
+    /// Rolle des angemeldeten Kontos ("admin"/"moderator"/"user"), damit der
+    /// Client seine eigene Rolle kennt, ohne sich in der Raumliste suchen zu
+    /// müssen (beim Login ist man noch in keinem Raum).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

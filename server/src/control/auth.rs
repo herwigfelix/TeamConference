@@ -24,6 +24,7 @@ pub async fn handle_login(
             token: None,
             server_name: None,
             rooms: None,
+            role: None,
             error: Some("Server is full".to_string()),
         };
     }
@@ -34,6 +35,7 @@ pub async fn handle_login(
         token: None,
         server_name: None,
         rooms: None,
+        role: None,
         error: Some(msg.to_string()),
     };
 
@@ -86,6 +88,7 @@ pub async fn handle_login(
             token: None,
             server_name: None,
             rooms: None,
+            role: None,
             error: Some(format!("You are banned: {}", ban.reason)),
         };
     }
@@ -96,7 +99,7 @@ pub async fn handle_login(
         user_id: db_user.id,
         username: db_user.username,
         nickname,
-        role: db_user.role,
+        role: db_user.role.clone(),
         session_token: 0,
         room_id: None,
         muted: false,
@@ -122,6 +125,7 @@ pub async fn handle_login(
         token: Some(token.to_string()),
         server_name: Some(config.server.name.clone()),
         rooms: Some(room_list),
+        role: Some(db_user.role),
         error: None,
     }
 }

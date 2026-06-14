@@ -48,7 +48,7 @@ if [ "$OSNAME" = "macos" ]; then
     <key>CFBundleIdentifier</key>      <string>org.accessy.TCClient</string>
     <key>CFBundleExecutable</key>      <string>$BIN_NAME</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>0.3.0</string>
+    <key>CFBundleShortVersionString</key> <string>0.3.1</string>
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSMicrophoneUsageDescription</key> <string>TeamConference benötigt das Mikrofon für die Sprachübertragung.</string>

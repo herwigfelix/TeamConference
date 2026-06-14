@@ -60,6 +60,9 @@ pub struct InnerState {
     pub session_token: Option<u32>,
     pub server_name: Option<String>,
     pub nickname: String,
+    /// Eigene Rolle laut Server (aus auth_response, ggf. aus der Raumliste
+    /// aktualisiert). Maßgeblich für die Admin-Erkennung.
+    pub self_role: Option<String>,
 
     // Rooms
     pub rooms: Vec<RoomInfo>,
@@ -147,8 +150,14 @@ impl InnerState {
         }
     }
 
-    /// Ob der angemeldete Nutzer Administrator ist (Rolle aus der Raumliste).
+    /// Ob der angemeldete Nutzer Administrator ist. Maßgeblich ist die vom
+    /// Server in der auth_response gelieferte Rolle (`self_role`); beim Login
+    /// ist man noch in keinem Raum, daher reicht die Raumliste allein nicht.
+    /// Die Raumliste dient nur als Fallback, falls keine Rolle bekannt ist.
     pub fn is_self_admin(&self) -> bool {
+        if let Some(role) = &self.self_role {
+            return role == "admin";
+        }
         let Some(uid) = self.user_id else { return false };
         for room in &self.rooms {
             if let Some(u) = room.users.iter().find(|u| u.id == uid) {
@@ -156,6 +165,18 @@ impl InnerState {
             }
         }
         false
+    }
+
+    /// Eigene Rolle aus der Raumliste auslesen (falls man in einem Raum ist).
+    /// Wird genutzt, um `self_role` bei Live-Rollenänderungen aktuell zu halten.
+    pub fn role_in_rooms(&self) -> Option<String> {
+        let uid = self.user_id?;
+        for room in &self.rooms {
+            if let Some(u) = room.users.iter().find(|u| u.id == uid) {
+                return Some(u.role.clone());
+            }
+        }
+        None
     }
 }
 
