@@ -169,6 +169,7 @@ fn pre_handle_message(msg: &Message, state: &Arc<AppState>) {
                     if let Some(ref rooms) = resp.rooms {
                         inner.rooms = rooms.clone();
                     }
+                    inner.rebuild_token_map();
                 }
             }
         }
@@ -180,6 +181,7 @@ fn pre_handle_message(msg: &Message, state: &Arc<AppState>) {
                 {
                     let mut inner = state.inner.lock();
                     inner.rooms = room_list;
+                    inner.rebuild_token_map();
                 }
             }
         }

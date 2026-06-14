@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=TeamConference
+Comment=Barrierefreier Sprach-Client (TeamConference)
+Exec=teamconference-client
+Terminal=false
+Categories=Network;AudioVideo;Audio;
+Keywords=voice;chat;conference;accessibility;

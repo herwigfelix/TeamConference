@@ -64,6 +64,26 @@ pub fn notify(ctx: &Ctx, message: &str, caption: &str) {
     dlg.show_modal();
 }
 
+/// Sprachausgabe einer Meldung über den Screenreader/TTS. `interrupt = true`
+/// unterbricht laufende Ansagen (für direkte Aktionsrückmeldung wie Lautstärke);
+/// `false` reiht ein (für aufeinanderfolgende Server-Ereignisse).
+/// Nur auf dem UI-Thread aufrufen (TTS-Instanz ist nicht Send).
+pub fn announce(ctx: &Ctx, text: &str, interrupt: bool) {
+    let mut st = ctx.st.borrow_mut();
+    if let Some(tts) = st.tts.as_mut() {
+        let _ = tts.speak(text, interrupt);
+    }
+}
+
+/// Ein Server-Ereignis ansagen — nur wenn der Toggle „Server-Ereignisse ansagen"
+/// aktiv ist. Reiht die Ansagen ein, damit dichte Ereignisfolgen nicht verschluckt
+/// werden.
+pub fn announce_event(ctx: &Ctx, text: &str) {
+    if ctx.st.borrow().announce_events {
+        announce(ctx, text, false);
+    }
+}
+
 // ── Verbindung ──
 
 pub fn do_connect(ctx: &Ctx) {
@@ -664,6 +684,37 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     }
 }
 
+/// Raum an der aktuellen Cursor-Position im Baum erstellen:
+///   - kein Raum ausgewählt (Lobby) → Raum auf oberster Ebene,
+///   - ein Top-Raum ausgewählt → Unterraum darin,
+///   - ein Unterraum ausgewählt → abgelehnt (nicht tiefer als eine Ebene
+///     unter der Lobby).
+fn create_room_at_cursor(ctx: &Ctx) {
+    match selected_room(ctx) {
+        None => room_dialog(ctx, RoomMode::Create { parent: None }),
+        Some(room_id) => {
+            let parent_is_subroom = ctx
+                .app
+                .inner
+                .lock()
+                .rooms
+                .iter()
+                .find(|r| r.id == room_id)
+                .map(|r| r.parent_id.is_some())
+                .unwrap_or(false);
+            if parent_is_subroom {
+                notify(
+                    ctx,
+                    "Hier nicht möglich: Räume dürfen nur eine Ebene unter der Lobby liegen. Unter einem Unterraum lässt sich kein weiterer Raum erstellen.",
+                    "Raum erstellen",
+                );
+                return;
+            }
+            room_dialog(ctx, RoomMode::Create { parent: Some(room_id) });
+        }
+    }
+}
+
 fn edit_selected_room(ctx: &Ctx) {
     match selected_room(ctx) {
         Some(room_id) => room_dialog(ctx, RoomMode::Edit { room_id }),
@@ -821,6 +872,14 @@ fn audio_settings(ctx: &Ctx) {
     ui::set_a11y_name(&out_choice, "Lautsprecher");
     row("Lautsprecher:", &out_choice);
 
+    // Toggle: Server-Ereignisse per Sprachausgabe ansagen (Standard an).
+    let announce_chk = CheckBox::builder(&dialog)
+        .with_label("Server-Ereignisse ansagen")
+        .build();
+    announce_chk.set_value(ctx.st.borrow().announce_events);
+    ui::set_a11y_name(&announce_chk, "Server-Ereignisse per Sprachausgabe ansagen");
+    v.add(&announce_chk, 0, SizerFlag::All, 6);
+
     let btns = BoxSizer::builder(Orientation::Horizontal).build();
     let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
     let ok = Button::builder(&dialog).with_label("Speichern").build();
@@ -850,14 +909,17 @@ fn audio_settings(ctx: &Ctx) {
         };
         let input = pick(in_choice.get_selection(), &inputs);
         let output = pick(out_choice.get_selection(), &outputs);
+        let announce_events = announce_chk.is_checked();
         {
             let mut inner = ctx.app.inner.lock();
             inner.input_device = input.clone();
             inner.output_device = output.clone();
         }
+        ctx.st.borrow_mut().announce_events = announce_events;
         let mut cfg = config::load_config();
         cfg.input_device = input;
         cfg.output_device = output;
+        cfg.announce_events = announce_events;
         let _ = config::save_config(&cfg);
         dialog.destroy();
         notify(
@@ -905,6 +967,8 @@ fn stream_file(ctx: &Ctx) {
         .stream_paused
         .store(false, std::sync::atomic::Ordering::Relaxed);
     set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
+    // Stream-Lautstärke für den neuen Stream auf normal (100 %) zurücksetzen.
+    ctx.app.set_stream_volume(1.0);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     {
@@ -1372,7 +1436,99 @@ Strg+U  Datei hochladen\n\
 Strg+H  Datei herunterladen\n\
 Strg+Umschalt+P  Privatnachricht an ausgewählten Nutzer\n\
 Strg+Q  Beenden\n\n\
+Audio-Kurztasten:\n\
+Strg+Umschalt+Pfeil hoch/runter  Eigenen Stream lauter/leiser (für alle)\n\
+Strg+Umschalt+Pfeil rechts/links  Stream 10 s vor-/zurückspulen\n\
+Strg+Pfeil hoch/runter  Ausgewählten Nutzer lokal lauter/leiser\n\n\
 Im Baum: Pfeil rechts/links klappt auf/zu, Enter tritt einem Raum bei.";
+
+// ── Audio-Kurztasten (Pfeiltasten) ──
+
+// wxWidgets-Keycodes für die Pfeiltasten (in wxdragon nicht als Konstanten
+// exportiert; die Werte sind seit jeher stabil).
+const WXK_LEFT: i32 = 314;
+const WXK_UP: i32 = 315;
+const WXK_RIGHT: i32 = 316;
+const WXK_DOWN: i32 = 317;
+
+/// Schrittweite der Lautstärke-Kurztasten in Prozentpunkten.
+const VOL_STEP: i32 = 10;
+/// Schrittweite des Spulens in Sekunden.
+const SEEK_STEP: i32 = 10;
+
+/// Lautstärke des eigenen Datei-Streams ändern — gilt für ALLE Hörer
+/// (skaliert das gesendete Datei-Audio) und das lokale Mithören.
+fn stream_volume_step(ctx: &Ctx, delta_percent: i32) {
+    if !ctx.app.inner.lock().streaming_file {
+        announce(ctx, "Es läuft kein Streaming.", true);
+        status(ctx, "Es läuft kein Streaming.");
+        return;
+    }
+    let cur = (ctx.app.stream_volume() * 100.0).round() as i32;
+    let next = (cur + delta_percent).clamp(0, 200);
+    ctx.app.set_stream_volume(next as f32 / 100.0);
+    let msg = format!("Stream-Lautstärke {} Prozent", next);
+    announce(ctx, &msg, true);
+    status(ctx, &msg);
+}
+
+/// Im laufenden Datei-Stream vor- oder zurückspulen (Sekunden).
+fn stream_seek(ctx: &Ctx, secs: i32) {
+    if !ctx.app.inner.lock().streaming_file {
+        announce(ctx, "Es läuft kein Streaming.", true);
+        status(ctx, "Es läuft kein Streaming.");
+        return;
+    }
+    ctx.app.request_stream_seek(secs);
+    let msg = if secs >= 0 {
+        format!("{} Sekunden vor", secs)
+    } else {
+        format!("{} Sekunden zurück", -secs)
+    };
+    announce(ctx, &msg, true);
+    status(ctx, &msg);
+}
+
+/// Lokale (nur für mich geltende) Lautstärke des im Baum fokussierten Nutzers
+/// ändern.
+fn user_volume_step(ctx: &Ctx, delta_percent: i32) {
+    let Some(user_id) = selected_user(ctx) else {
+        announce(ctx, "Kein Nutzer ausgewählt.", true);
+        status(ctx, "Bitte zuerst einen Nutzer im Baum auswählen.");
+        return;
+    };
+    let (nick, pct) = {
+        let mut inner = ctx.app.inner.lock();
+        let cur = (inner.user_volume(user_id) * 100.0).round() as i32;
+        let next = (cur + delta_percent).clamp(0, 200);
+        inner.user_volumes.insert(user_id, next as f32 / 100.0);
+        (inner.nickname_of(user_id), next)
+    };
+    let msg = format!("Lautstärke {}: {} Prozent", nick, pct);
+    announce(ctx, &msg, true);
+    status(ctx, &msg);
+}
+
+/// Dispatcher für die Audio-Kurztasten (Pfeiltasten mit Strg bzw. Cmd auf macOS).
+/// Liefert `true`, wenn die Taste verarbeitet wurde (dann nicht weiterreichen).
+/// `cmd` entspricht Strg unter Windows/Linux und Cmd unter macOS.
+pub fn on_hotkey(ctx: &Ctx, key: i32, cmd: bool, shift: bool) -> bool {
+    if !cmd {
+        return false;
+    }
+    match (shift, key) {
+        // Strg/Cmd+Umschalt+Pfeil: eigenen Stream lauter/leiser bzw. vor/zurück.
+        (true, WXK_UP) => stream_volume_step(ctx, VOL_STEP),
+        (true, WXK_DOWN) => stream_volume_step(ctx, -VOL_STEP),
+        (true, WXK_RIGHT) => stream_seek(ctx, SEEK_STEP),
+        (true, WXK_LEFT) => stream_seek(ctx, -SEEK_STEP),
+        // Strg/Cmd+Pfeil hoch/runter: fokussierten Nutzer lokal lauter/leiser.
+        (false, WXK_UP) => user_volume_step(ctx, VOL_STEP),
+        (false, WXK_DOWN) => user_volume_step(ctx, -VOL_STEP),
+        _ => return false,
+    }
+    true
+}
 
 // ── Menü-Dispatcher ──
 
@@ -1395,14 +1551,7 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         ui::ID_STOP_STREAM => stop_stream(ctx),
         ui::ID_JOIN_ROOM => join_selected(ctx),
         ui::ID_LEAVE_ROOM => leave_room(ctx),
-        ui::ID_CREATE_ROOM => room_dialog(ctx, RoomMode::Create { parent: None }),
-        ui::ID_CREATE_SUBROOM => {
-            if let Some(parent) = selected_room(ctx) {
-                room_dialog(ctx, RoomMode::Create { parent: Some(parent) });
-            } else {
-                notify(ctx, "Bitte zuerst den übergeordneten Raum auswählen.", "Unterraum");
-            }
-        }
+        ui::ID_CREATE_ROOM => create_room_at_cursor(ctx),
         ui::ID_EDIT_ROOM => edit_selected_room(ctx),
         ui::ID_DELETE_ROOM => delete_room(ctx),
         ui::ID_UPLOAD => upload_file(ctx),

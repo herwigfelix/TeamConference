@@ -1,0 +1,28 @@
+# Maintainer: herwigfelix
+# PKGBUILD für Arch-basierte Distributionen. Baut den TeamConference-Client aus
+# dem mitgelieferten Quellbaum. In der CI wird diese Datei ins Repo-Root kopiert
+# und mit `makepkg` (als Nicht-Root-Nutzer) gebaut; lokal genauso nutzbar.
+pkgname=teamconference-client
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="TeamConference – barrierefreier Sprach-Client (native GTK-Oberfläche)"
+arch=('x86_64')
+url="https://github.com/herwigfelix/teamconference"
+license=('MIT')
+depends=('gtk3' 'alsa-lib' 'speech-dispatcher')
+makedepends=('rust' 'cargo' 'cmake' 'ninja' 'clang')
+# Kein Quell-Download: gebaut wird der neben dem PKGBUILD liegende Baum.
+options=('!lto')
+
+build() {
+    cd "$startdir/client"
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
+    cargo build --release --locked || cargo build --release
+}
+
+package() {
+    install -Dm755 "$startdir/client/target/release/teamconference-client" \
+        "$pkgdir/usr/bin/teamconference-client"
+    install -Dm644 "$startdir/packaging/linux/teamconference.desktop" \
+        "$pkgdir/usr/share/applications/teamconference.desktop"
+}

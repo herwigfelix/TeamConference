@@ -66,6 +66,8 @@ pub async fn deliver_offline_messages(
             role: u.role,
             muted: false,
             deafened: false,
+            // Absender einer Offline-Nachricht ist nicht (zwingend) online.
+            udp_token: None,
         });
 
         let chat_msg = Message::new("chat_private", serde_json::to_value(ChatPrivate {

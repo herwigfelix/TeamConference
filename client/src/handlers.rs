@@ -183,14 +183,15 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                         room.users.retain(|u| u.id != user.id);
                         room.users.push(user.clone());
                     }
+                    // Neuer Nutzer bringt sein Token mit → Zuordnung aktualisieren.
+                    inner.rebuild_token_map();
                     (inner.current_room_id == Some(rid), inner.room_name(rid))
                 };
                 rebuild_tree(ctx);
                 if announce {
-                    ui.append_chat(&format!(
-                        "* {} hat den Raum {} betreten.",
-                        user.nickname, room_name
-                    ));
+                    let line = format!("{} hat den Raum {} betreten.", user.nickname, room_name);
+                    ui.append_chat(&format!("* {}", line));
+                    crate::actions::announce_event(ctx, &line);
                 }
             }
         }
@@ -205,13 +206,40 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                     if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == rid) {
                         room.users.retain(|u| u.id != uid);
                     }
+                    inner.rebuild_token_map();
                     (inner.current_room_id == Some(rid), nick, inner.room_name(rid))
                 };
                 rebuild_tree(ctx);
                 if announce {
-                    ui.append_chat(&format!("* {} hat den Raum {} verlassen.", nick, room_name));
+                    let line = format!("{} hat den Raum {} verlassen.", nick, room_name);
+                    ui.append_chat(&format!("* {}", line));
+                    crate::actions::announce_event(ctx, &line);
                 }
             }
+        }
+
+        // Serverweite Presence-Events (jemand meldet sich an bzw. ab). Diese
+        // betreffen nicht zwingend den eigenen Raum, daher eigene Ansage.
+        "user_connected" => {
+            let nick = msg
+                .data
+                .get("nickname")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Jemand");
+            let line = format!("{} hat den Server betreten.", nick);
+            ui.append_chat(&format!("* {}", line));
+            crate::actions::announce_event(ctx, &line);
+        }
+
+        "user_disconnected" => {
+            let nick = msg
+                .data
+                .get("nickname")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Jemand");
+            let line = format!("{} hat den Server verlassen.", nick);
+            ui.append_chat(&format!("* {}", line));
+            crate::actions::announce_event(ctx, &line);
         }
 
         "chat_room" => {
@@ -229,6 +257,9 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .map(|rid| ctx.app.inner.lock().room_name(rid))
                 .unwrap_or_default();
             ui.append_chat(&format!("[{}] {}: {}", room, nick, text));
+            // Raumnachrichten im aktuellen Raum ansagen (der Server stellt
+            // chat_room nur an Mitglieder des Raums zu).
+            crate::actions::announce_event(ctx, &format!("{}: {}", nick, text));
         }
 
         "chat_private" => {

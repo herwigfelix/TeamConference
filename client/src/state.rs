@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -74,6 +74,15 @@ pub struct InnerState {
     pub input_device: Option<String>,
     pub output_device: Option<String>,
 
+    // Lokale (nur für mich geltende) Lautstärke je Nutzer: user_id → Verstärkung
+    // (1.0 = normal). Fehlt ein Eintrag, gilt 1.0. Wird per Tastenkürzel am
+    // fokussierten Nutzer gesetzt und in der UDP-Empfangsmischung angewandt.
+    pub user_volumes: HashMap<i64, f32>,
+    // Zuordnung Audio-Paket-Token → user_id, abgeleitet aus den Räumen
+    // (UserInfo.udp_token). Erlaubt es, eingehendes Audio einem Nutzer
+    // zuzuordnen, um die lokale Pro-Nutzer-Lautstärke anzuwenden.
+    pub token_to_user: HashMap<u32, i64>,
+
     // WS sender (for sending messages to server)
     pub ws_tx: Option<mpsc::UnboundedSender<Message>>,
 
@@ -120,6 +129,24 @@ impl InnerState {
         format!("Nutzer {}", user_id)
     }
 
+    /// Lokale Verstärkung für einen Nutzer (1.0 = normal), fehlt = 1.0.
+    pub fn user_volume(&self, user_id: i64) -> f32 {
+        self.user_volumes.get(&user_id).copied().unwrap_or(1.0)
+    }
+
+    /// Token→Nutzer-Zuordnung aus den aktuellen Räumen neu aufbauen.
+    /// Aufzurufen, sobald sich die Raumliste (und damit die Nutzer-Tokens) ändert.
+    pub fn rebuild_token_map(&mut self) {
+        self.token_to_user.clear();
+        for room in &self.rooms {
+            for u in &room.users {
+                if let Some(token) = u.udp_token {
+                    self.token_to_user.insert(token, u.id);
+                }
+            }
+        }
+    }
+
     /// Ob der angemeldete Nutzer Administrator ist (Rolle aus der Raumliste).
     pub fn is_self_admin(&self) -> bool {
         let Some(uid) = self.user_id else { return false };
@@ -145,6 +172,13 @@ pub struct AppState {
     pub stream_paused: AtomicBool,
     /// Playback volume as f32 bits (0.0 – 1.0), read lock-free in the audio callback
     pub volume_bits: Arc<AtomicU32>,
+    /// Lautstärke des gerade gestreamten Datei-Audios als f32-Bits (1.0 = normal,
+    /// 0.0–2.0). Gilt für ALLE Hörer, weil sie das gesendete Datei-Audio skaliert
+    /// (und das lokale Mithören). Wird lock-frei in der Streaming-Schleife gelesen.
+    pub stream_volume_bits: AtomicU32,
+    /// Ausstehendes relatives Spulen des Datei-Streams in Sekunden (0 = keins);
+    /// die Streaming-Schleife konsumiert den Wert per swap(0).
+    pub stream_seek_secs: AtomicI32,
     /// Datei-Stream → Empfangs-Mischer: 20-ms-Blöcke (i16, Wiedergabeformat) zum
     /// lokalen Mithören der gestreamten Datei (der Server schickt sie nicht
     /// zurück). Wird im UDP-Empfangs-/Mischtakt mit eingehendem Audio gemischt.
@@ -163,6 +197,8 @@ impl AppState {
             file_streaming: AtomicBool::new(false),
             stream_paused: AtomicBool::new(false),
             volume_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            stream_volume_bits: AtomicU32::new(1.0f32.to_bits()),
+            stream_seek_secs: AtomicI32::new(0),
             local_audio_tx: Mutex::new(None),
         }
     }
@@ -175,6 +211,27 @@ impl AppState {
         // bis 2.0 (200 %) — Verstärkung über 1.0 wird in der Wiedergabe geclamped
         self.volume_bits
             .store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Lautstärke des Datei-Streams (1.0 = normal).
+    pub fn stream_volume(&self) -> f32 {
+        f32::from_bits(self.stream_volume_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn set_stream_volume(&self, v: f32) {
+        self.stream_volume_bits
+            .store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Relatives Spulen des Datei-Streams um `delta` Sekunden vormerken
+    /// (negativ = zurück). Mehrfaches Drücken summiert sich.
+    pub fn request_stream_seek(&self, delta: i32) {
+        self.stream_seek_secs.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// Ausstehendes Spulen abholen und zurücksetzen (von der Streaming-Schleife).
+    pub fn take_stream_seek(&self) -> i32 {
+        self.stream_seek_secs.swap(0, Ordering::Relaxed)
     }
 
     /// Send a protocol message to the server via WebSocket.

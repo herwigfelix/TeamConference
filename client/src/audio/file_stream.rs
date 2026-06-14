@@ -31,6 +31,13 @@ impl LinearResampler {
         }
     }
 
+    /// Zustand zurücksetzen (nach einem Sprung/Spulen), damit an der neuen
+    /// Position keine Interpolation über die Lücke hinweg entsteht.
+    fn reset(&mut self) {
+        self.t = 0.0;
+        self.primed = false;
+    }
+
     /// Resampelt `input` (interleaved i16 @ in_rate) nach TARGET_RATE und hängt
     /// das Ergebnis (interleaved i16) an `out` an.
     fn process(&mut self, input: &[i16], out: &mut Vec<i16>) {
@@ -187,6 +194,8 @@ pub async fn stream_audio_file(
     let mut seq: u32 = 0;
     let mut timestamp_ms: u32 = 0;
     let mut paused_offset = tokio::time::Duration::ZERO;
+    // Ungefähre Wiedergabeposition in der Datei (ms) — Grundlage fürs relative Spulen.
+    let mut position_ms: u64 = 0;
 
     let finish = |state: &AppState| {
         state.file_streaming.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -249,12 +258,43 @@ pub async fn stream_audio_file(
                 paused_offset += pause_start.elapsed();
             }
 
+            // Spulen (relativ, in Sekunden) — vor/zurück springen.
+            let seek = state.take_stream_seek();
+            if seek != 0 {
+                use symphonia::core::formats::{SeekMode, SeekTo};
+                use symphonia::core::units::Time;
+                let target_s = (position_ms as i64 / 1000 + seek as i64).max(0) as u64;
+                match format.seek(
+                    SeekMode::Coarse,
+                    SeekTo::Time { time: Time::new(target_s, 0.0), track_id: Some(track.id) },
+                ) {
+                    Ok(_) => {
+                        let _ = decoder.reset();
+                        acc.clear();
+                        resampler.reset();
+                        position_ms = target_s * 1000;
+                        tracing::info!("FileStream: gespult auf {} s", target_s);
+                    }
+                    Err(e) => tracing::warn!("FileStream: Spulen fehlgeschlagen: {}", e),
+                }
+                // Akkumulator ist leer → äußere Schleife füllt ab neuer Position nach.
+                break;
+            }
+
             // Wanduhr-Pacing.
             let target_time =
                 stream_start + tokio::time::Duration::from_millis(blocks_sent * 20) + paused_offset;
             tokio::time::sleep_until(target_time).await;
 
-            let block: Vec<i16> = acc.drain(..block_samples).collect();
+            // Stream-Lautstärke (gilt für alle Hörer und das lokale Mithören).
+            let gain = state.stream_volume();
+            let block: Vec<i16> = if (gain - 1.0).abs() < f32::EPSILON {
+                acc.drain(..block_samples).collect()
+            } else {
+                acc.drain(..block_samples)
+                    .map(|s| (s as f32 * gain).clamp(-32768.0, 32767.0) as i16)
+                    .collect()
+            };
             let block_bytes = samples_to_bytes(&block);
 
             // 1) Als eigenen Opus-Strom (Quelle 1) senden.
@@ -300,6 +340,7 @@ pub async fn stream_audio_file(
             seq = seq.wrapping_add(1);
             timestamp_ms = timestamp_ms.wrapping_add(20);
             blocks_sent += 1;
+            position_ms += 20;
         }
     }
 

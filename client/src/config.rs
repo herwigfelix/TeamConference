@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Optionaler, per Kommandozeile (`--cfg-path`) gesetzter Pfad zur Konfigdatei.
+/// Wird nur einmal beim Start gesetzt; ist er leer, gilt der plattformübliche
+/// Standardpfad (siehe `config_path`).
+static CONFIG_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Den Konfigpfad überschreiben (vom CLI-Flag `--cfg-path`). Nur einmal wirksam.
+/// Übergebene relative Pfade werden so verwendet, wie sie sind.
+pub fn set_config_path<P: Into<PathBuf>>(path: P) {
+    let _ = CONFIG_PATH_OVERRIDE.set(path.into());
+}
 
 /// Ein gespeicherter Server (Lesezeichen) in der Serverliste.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +59,9 @@ pub struct ClientConfig {
     pub output_device: Option<String>,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Server-Ereignisse per Sprachausgabe ansagen (Standard: an).
+    #[serde(default = "default_true")]
+    pub announce_events: bool,
 }
 
 fn default_port() -> u16 {
@@ -78,11 +93,21 @@ impl Default for ClientConfig {
             input_device: None,
             output_device: None,
             volume: default_volume(),
+            announce_events: true,
         }
     }
 }
 
 fn config_path() -> PathBuf {
+    // Per --cfg-path gesetzter Pfad hat Vorrang (sonst Standardpfad unten).
+    if let Some(path) = CONFIG_PATH_OVERRIDE.get() {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
+        return path.clone();
+    }
     // Einstellungen unter accessyApplications/teamconference im plattformüblichen
     // Konfigverzeichnis (Windows: %APPDATA%\accessyApplications\teamconference,
     // macOS: ~/Library/Application Support/…, Linux: ~/.config/…).

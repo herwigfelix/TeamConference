@@ -1,6 +1,6 @@
 [package]
 name = "teamconference-client"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "TeamConference-Client (wxWidgets/wxDragon) mit Barrierefreiheits-Fokus"
 
@@ -25,6 +25,15 @@ parking_lot = "0.12"
 chrono = "0.4"
 # Auto-Updater: HTTPS-Abruf der GitHub-Releases (rustls/ring, keine OpenSSL-/C-Abhängigkeit)
 ureq = "2"
+# Sprachausgabe für Barrierefreiheit: routet über den Screenreader, wo möglich
+# (Windows via Tolk → NVDA/JAWS, sonst SAPI; macOS AVFoundation; Linux Speech
+# Dispatcher). Läuft nur auf dem UI-Thread (Instanz ist nicht Send auf macOS).
+tts = "0.26"
+
+# Auf Windows zusätzlich das Tolk-Backend aktivieren, damit Ansagen über den
+# aktiven Screenreader (NVDA/JAWS) laufen statt nur über SAPI.
+[target.'cfg(windows)'.dependencies]
+tts = { version = "0.26", features = ["tolk"] }
 
 [build-dependencies]
 # Bettet unter Windows das Anwendungs-Manifest ein (Common Controls v6, DPI).

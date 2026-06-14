@@ -135,6 +135,16 @@ pub async fn handle_connection<S>(
                     // Deliver offline messages
                     if let Some(uid) = user_id {
                         let _ = chat_handler::deliver_offline_messages(uid, &state.users, &state.db).await;
+
+                        // Andere über den neuen Nutzer informieren (für Ansagen
+                        // beim Screenreader). Der Auslöser selbst wird ausgenommen.
+                        if let Some(u) = state.users.get_user(uid).await {
+                            let presence = Message::new("user_connected", serde_json::json!({
+                                "user_id": uid,
+                                "nickname": u.nickname,
+                            }));
+                            state.users.broadcast_all_except(presence, uid).await;
+                        }
                     }
                 }
 
@@ -768,6 +778,13 @@ pub async fn handle_connection<S>(
                 }));
                 state.users.broadcast_to_room(room_id, leave_msg, Some(uid)).await;
             }
+
+            // Andere über die Abmeldung informieren (Screenreader-Ansage).
+            let presence = Message::new("user_disconnected", serde_json::json!({
+                "user_id": uid,
+                "nickname": user.nickname.clone(),
+            }));
+            state.users.broadcast_all_except(presence, uid).await;
         }
 
         state.users.remove_user(uid).await;

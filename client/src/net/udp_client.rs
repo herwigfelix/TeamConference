@@ -101,9 +101,16 @@ pub async fn start_udp_audio(
                             if let Some(header) = AudioPacketHeader::parse(&buf[..len]) {
                                 let payload = header.payload(&buf[..len]);
 
-                                let (deafened, own_token) = {
+                                let (deafened, own_token, user_gain) = {
                                     let inner = recv_state.inner.lock();
-                                    (inner.deafened, inner.session_token.unwrap_or(0))
+                                    // Lokale Lautstärke des Nutzers, dem dieses Token gehört
+                                    // (1.0, wenn unbekannt oder nicht gesetzt).
+                                    let gain = inner
+                                        .token_to_user
+                                        .get(&header.token)
+                                        .map(|uid| inner.user_volume(*uid))
+                                        .unwrap_or(1.0);
+                                    (inner.deafened, inner.session_token.unwrap_or(0), gain)
                                 };
 
                                 // Eigenen, vom Server zurückgespiegelten Datei-Strom
@@ -161,7 +168,11 @@ pub async fn start_udp_audio(
                                         if acc_sources.contains(&key) {
                                             flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
                                         }
-                                        acc_add_bytes(&mut acc, &converted);
+                                        if (user_gain - 1.0).abs() < f32::EPSILON {
+                                            acc_add_bytes(&mut acc, &converted);
+                                        } else {
+                                            acc_add_bytes_gain(&mut acc, &converted, user_gain);
+                                        }
                                         acc_sources.push(key);
                                         if acc_started.is_none() { acc_started = Some(tokio::time::Instant::now()); }
                                     }
@@ -197,6 +208,19 @@ fn acc_add_bytes(acc: &mut Vec<i32>, bytes: &[u8]) {
     }
     for i in 0..n {
         acc[i] += i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as i32;
+    }
+}
+
+/// Wie `acc_add_bytes`, aber skaliert jedes Sample vorher mit `gain`
+/// (lokale Pro-Nutzer-Lautstärke). Begrenzung erfolgt erst beim Flush.
+fn acc_add_bytes_gain(acc: &mut Vec<i32>, bytes: &[u8], gain: f32) {
+    let n = bytes.len() / 2;
+    if acc.len() < n {
+        acc.resize(n, 0);
+    }
+    for i in 0..n {
+        let s = i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as f32;
+        acc[i] += (s * gain) as i32;
     }
 }
 

@@ -45,7 +45,6 @@ pub const ID_EDIT_ROOM: i32 = ID_HIGHEST + 32;
 pub const ID_JOIN_ROOM: i32 = ID_HIGHEST + 7;
 pub const ID_LEAVE_ROOM: i32 = ID_HIGHEST + 8;
 pub const ID_CREATE_ROOM: i32 = ID_HIGHEST + 9;
-pub const ID_CREATE_SUBROOM: i32 = ID_HIGHEST + 10;
 pub const ID_DELETE_ROOM: i32 = ID_HIGHEST + 11;
 pub const ID_UPLOAD: i32 = ID_HIGHEST + 12;
 pub const ID_DOWNLOAD: i32 = ID_HIGHEST + 13;
@@ -338,8 +337,7 @@ fn build_menu_bar(frame: &Frame) {
     let room_menu = Menu::builder()
         .append_item(ID_JOIN_ROOM, "Raum &beitreten\tCtrl+J", "Ausgewähltem Raum beitreten")
         .append_item(ID_LEAVE_ROOM, "Raum &verlassen", "Aktuellen Raum verlassen")
-        .append_item(ID_CREATE_ROOM, "Raum &erstellen…", "Neuen Raum erstellen")
-        .append_item(ID_CREATE_SUBROOM, "&Unterraum erstellen…", "Unterraum im ausgewählten Raum erstellen")
+        .append_item(ID_CREATE_ROOM, "Raum &erstellen…", "Raum an der Cursor-Position erstellen (Lobby = oberste Ebene, auf einem Raum = Unterraum)")
         .append_item(ID_EDIT_ROOM, "Raum &bearbeiten…", "Ausgewählten Raum bearbeiten (Name, Passwort, Audio)")
         .append_item(ID_DELETE_ROOM, "Raum &löschen…", "Ausgewählten Raum löschen")
         .build();

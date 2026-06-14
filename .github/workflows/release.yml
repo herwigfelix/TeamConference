@@ -1,6 +1,7 @@
 name: Release Client
 
-# Baut den TeamConference-Client für Windows und macOS.
+# Baut den TeamConference-Client für Windows, macOS und Linux
+# (Debian/Ubuntu als .deb + .tar.gz, Arch als .pkg.tar.zst).
 # - Bei Push eines Tags v* werden die Artefakte an ein GitHub-Release gehängt.
 # - Manuell (workflow_dispatch) entstehen herunterladbare Build-Artefakte
 #   ohne Release (zum Testen).
@@ -45,7 +46,7 @@ jobs:
       - name: CMake-Version
         run: cmake --version
 
-      - name: Client bauen und paketieren (macOS/Linux)
+      - name: Client bauen und paketieren (macOS)
         if: runner.os != 'Windows'
         run: bash compile.sh
 
@@ -74,4 +75,89 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.dmg
+          fail_on_unmatched_files: false
+
+  # ── Debian/Ubuntu: .deb + .tar.gz ──
+  build-debian:
+    name: Linux .deb (Debian/Ubuntu)
+    runs-on: ubuntu-22.04   # breite glibc-Kompatibilität
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust einrichten
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo-Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      # Build-Abhängigkeiten des Clients: GTK, ALSA, libclang (bindgen),
+      # cmake+ninja (wxWidgets/Opus) und speech-dispatcher (Sprachausgabe).
+      - name: Build-Abhängigkeiten
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libclang-dev libgtk-3-dev libasound2-dev libspeechd-dev
+
+      - name: Client bauen (release)
+        run: cargo build --release --manifest-path client/Cargo.toml
+
+      - name: Paketieren (.deb + .tar.gz)
+        run: bash packaging/linux/build-deb.sh
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeamConference-debian
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+          if-no-files-found: error
+
+      - name: An Release anhängen
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.tar.gz
+          fail_on_unmatched_files: false
+
+  # ── Arch-basierte Distros: .pkg.tar.zst via makepkg ──
+  build-arch:
+    name: Linux .pkg (Arch)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: System & Build-Abhängigkeiten
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel rust cmake ninja clang gtk3 alsa-lib speech-dispatcher git
+
+      - uses: actions/checkout@v4
+
+      # makepkg verweigert den Lauf als root → eigenen Build-Nutzer anlegen.
+      - name: Paketieren (makepkg)
+        run: |
+          useradd -m builder
+          cp packaging/arch/PKGBUILD ./PKGBUILD
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          sudo -u builder bash -lc "cd '$GITHUB_WORKSPACE' && CMAKE_POLICY_VERSION_MINIMUM=3.5 makepkg -f --noconfirm --skipinteg --nodeps"
+          mkdir -p dist
+          cp ./*.pkg.tar.zst dist/
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeamConference-arch
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+      - name: An Release anhängen
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.pkg.tar.zst
           fail_on_unmatched_files: false

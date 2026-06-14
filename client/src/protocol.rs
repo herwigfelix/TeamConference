@@ -75,6 +75,11 @@ pub struct UserInfo {
     pub muted: bool,
     #[serde(default)]
     pub deafened: bool,
+    /// UDP-Sitzungstoken dieses Nutzers (vom Server). Erlaubt es dem Client,
+    /// eingehende Audiopakete (die nur das Token tragen) einem Nutzer zuzuordnen,
+    /// um die lokale Pro-Nutzer-Lautstärke anzuwenden.
+    #[serde(default)]
+    pub udp_token: Option<u32>,
 }
 
 // ── Audio ──

@@ -32,6 +32,26 @@ use crate::protocol::Message;
 use crate::state::AppState;
 use crate::ui::Ui;
 
+/// CLI auswerten: `--cfg-path <PFAD>` (oder `--cfg-path=<PFAD>`) überschreibt den
+/// Pfad zur Konfigurationsdatei. Ohne das Flag bleibt der plattformübliche
+/// Standardpfad unverändert.
+fn parse_cfg_path_arg() {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(p) = arg.strip_prefix("--cfg-path=") {
+            if !p.is_empty() {
+                config::set_config_path(p);
+            }
+        } else if arg == "--cfg-path" {
+            if let Some(p) = args.next() {
+                if !p.is_empty() {
+                    config::set_config_path(p);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -39,6 +59,9 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    // Vor dem ersten Laden der Konfiguration den optionalen Pfad-Override setzen.
+    parse_cfg_path_arg();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -82,6 +105,11 @@ fn main() {
                 files: Vec::new(),
                 tree_map: std::collections::HashMap::new(),
                 registration_open: false,
+                // Sprachausgabe auf dem UI-Thread initialisieren (nicht Send).
+                // Schlägt sie fehl (z. B. kein Speech-Dispatcher unter Linux),
+                // bleibt es bei None — die App läuft ohne Ansagen weiter.
+                tts: tts::Tts::default().ok(),
+                announce_events: cfg.announce_events,
                 ..Default::default()
             })),
         };
@@ -100,6 +128,7 @@ fn main() {
         }
 
         wire_events(&ctx);
+        wire_audio_hotkeys(&ctx);
 
         // Beim Start still nach einer neueren Version suchen (fragt nur nach,
         // wenn tatsächlich ein Update vorliegt).
@@ -193,4 +222,34 @@ fn wire_events(ctx: &Ctx) {
         ui.rooms_tree
             .on_item_activated(move |_| actions::join_selected(&ctx));
     }
+}
+
+/// Verdrahtet die Audio-Kurztasten (Pfeiltasten mit Strg/Cmd) auf den
+/// Haupt-Bedienelementen. wxWidgets liefert Tastendrücke an das fokussierte
+/// Element; deshalb binden wir an die navigierbaren Widgets der Hauptansicht
+/// (Baum, Chatverlauf, Dateiliste) — bewusst NICHT an das Chat-Eingabefeld,
+/// damit dort Textbearbeitung/Markieren mit denselben Tasten erhalten bleibt.
+/// `cmd_down()` bildet automatisch Strg (Windows/Linux) bzw. Cmd (macOS) ab.
+fn wire_audio_hotkeys(ctx: &Ctx) {
+    fn bind<W: WindowEvents>(w: &W, ctx: &Ctx) {
+        let ctx = ctx.clone();
+        w.on_key_down(move |ev| {
+            let mut handled = false;
+            if let WindowEventData::Keyboard(k) = &ev {
+                handled = actions::on_hotkey(
+                    &ctx,
+                    k.get_key_code().unwrap_or(0),
+                    k.cmd_down(),
+                    k.shift_down(),
+                );
+            }
+            // Nicht behandelte Tasten normal weiterreichen (Navigation, Tippen).
+            if !handled {
+                ev.skip(true);
+            }
+        });
+    }
+    bind(&ctx.ui.rooms_tree, ctx);
+    bind(&ctx.ui.chat_log, ctx);
+    bind(&ctx.ui.files, ctx);
 }

@@ -87,6 +87,11 @@ pub struct UserInfo {
     pub muted: bool,
     #[serde(default)]
     pub deafened: bool,
+    /// UDP-Sitzungstoken dieses Nutzers. Wird mitgeschickt, damit Clients
+    /// eingehende Audiopakete (die nur das Token tragen) einem Nutzer zuordnen
+    /// und so eine lokale Pro-Nutzer-Lautstärke anwenden können.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_token: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

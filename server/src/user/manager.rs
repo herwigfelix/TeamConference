@@ -32,6 +32,7 @@ impl OnlineUser {
             role: self.role.clone(),
             muted: self.muted || self.admin_muted,
             deafened: self.deafened,
+            udp_token: Some(self.session_token),
         }
     }
 
@@ -194,6 +195,18 @@ impl UserManager {
     pub async fn broadcast_all(&self, msg: Message) {
         let users = self.users.read().await;
         for user in users.values() {
+            let _ = user.tx.send(msg.clone());
+        }
+    }
+
+    /// An alle senden außer an `exclude_user` (z. B. Presence-Ereignisse, die
+    /// der Auslöser nicht über sich selbst erhalten soll).
+    pub async fn broadcast_all_except(&self, msg: Message, exclude_user: i64) {
+        let users = self.users.read().await;
+        for user in users.values() {
+            if user.user_id == exclude_user {
+                continue;
+            }
             let _ = user.tx.send(msg.clone());
         }
     }

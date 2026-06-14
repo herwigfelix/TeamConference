@@ -38,6 +38,13 @@ pub struct UiState {
     pub is_admin: bool,
     /// Offener Benutzerkonten-Dialog (für Live-Aktualisierung der Liste)
     pub account_dialog: Option<AccountDialogRef>,
+    /// Sprachausgabe (Screenreader/TTS). Nur auf dem UI-Thread benutzen — die
+    /// Instanz ist plattformbedingt nicht Send (z. B. AVSpeechSynthesizer auf
+    /// macOS). `None`, falls keine Sprachausgabe initialisiert werden konnte.
+    pub tts: Option<tts::Tts>,
+    /// Ob Server-Ereignisse (Joins/Verlassen/Abmelden/Raumnachrichten) per
+    /// Sprachausgabe angesagt werden. Standardmäßig an (siehe Audio-Einstellungen).
+    pub announce_events: bool,
 }
 
 /// Bündelt alles, was Event-Handler brauchen. Clone ist billig
