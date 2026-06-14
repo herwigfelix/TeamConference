@@ -796,15 +796,21 @@ fn toggle_loopback(ctx: &Ctx) {
         inner.loopback = !inner.loopback;
         inner.loopback
     };
+    // Loopback ist ein rein lokaler Mithör-Monitor: die Aufnahme-Schleife
+    // (capture.rs) speist das eigene Mikrofon direkt in den Empfangs-Mischer,
+    // ohne Umweg über den Server. Der frühere Server-Reflection-Weg
+    // („audio_loopback") wird nicht mehr genutzt — er hatte Latenz und
+    // Rückkopplungsverstärkung. Sicherheitshalber dem Server mitteilen, dass
+    // serverseitiges Loopback aus bleibt (kein doppeltes Echo).
     let _ = ctx.app.send_ws(Message::new(
         "audio_loopback",
-        serde_json::json!({ "enabled": loopback }),
+        serde_json::json!({ "enabled": false }),
     ));
     set_menu_check(ctx, ui::ID_TOGGLE_LOOPBACK, loopback);
     ctx.ui.append_chat(if loopback {
-        "* Loopback eingeschaltet."
+        "* Loopback (Mithören) eingeschaltet."
     } else {
-        "* Loopback ausgeschaltet."
+        "* Loopback (Mithören) ausgeschaltet."
     });
     refresh_status(ctx);
 }

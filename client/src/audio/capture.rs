@@ -118,6 +118,15 @@ pub fn start_capture(
         };
         let mut opus_buf = vec![0u8; 4000]; // max Opus frame
 
+        // Lokaler Mithör-Monitor (Loopback): das eigene Mikrofon wird – wenn
+        // aktiviert – direkt in den Empfangs-Mischer eingespeist, ohne Umweg
+        // über den Server. Das vermeidet Latenz und Rückkopplungsverstärkung
+        // und funktioniert auch ohne Gegenüber. Resampler hält Zustand über
+        // Blöcke hinweg (Mikro-Rate → 48 kHz).
+        let mut mon_resampler =
+            crate::audio::file_stream::LinearResampler::new(sample_rate, channels as usize);
+        let mut mon_48k: Vec<i16> = Vec::new();
+
         loop {
             if *send_shutdown.borrow() {
                 break;
@@ -130,7 +139,7 @@ pub fn start_capture(
                     while accumulator.len() >= frame_bytes {
                         let frame: Vec<u8> = accumulator.drain(..frame_bytes).collect();
 
-                        let (socket, server_addr, token, muted, bitrate_cfg) = {
+                        let (socket, server_addr, token, muted, bitrate_cfg, loopback, playback_ch) = {
                             let inner = send_state.inner.lock();
                             (
                                 inner.udp_socket.clone(),
@@ -138,8 +147,45 @@ pub fn start_capture(
                                 inner.session_token.unwrap_or(0),
                                 inner.muted,
                                 inner.audio_config.bitrate,
+                                inner.loopback,
+                                inner.playback_device_channels,
                             )
                         };
+
+                        // Lokales Mithören: das eigene, unkomprimierte Mikrofon-
+                        // signal (vor Opus) in den Empfangs-Mischer geben. Nur
+                        // wenn nicht stummgeschaltet (man hört, was man sendet).
+                        if loopback && !muted {
+                            let pcm: Vec<i16> = frame
+                                .chunks_exact(2)
+                                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                .collect();
+                            mon_48k.clear();
+                            mon_resampler.process(&pcm, &mut mon_48k);
+                            // Kanäle der Aufnahme → Kanäle des Wiedergabegeräts.
+                            let mon_frame: Vec<i16> = if channels as u16 == playback_ch {
+                                mon_48k.clone()
+                            } else {
+                                let bytes: Vec<u8> = mon_48k
+                                    .iter()
+                                    .flat_map(|s| s.to_le_bytes())
+                                    .collect();
+                                crate::net::udp_client::convert_channels(
+                                    &bytes,
+                                    channels as u16,
+                                    playback_ch,
+                                )
+                                .chunks_exact(2)
+                                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                .collect()
+                            };
+                            if !mon_frame.is_empty() {
+                                let tx = send_state.local_audio_tx.lock();
+                                if let Some(ref tx) = *tx {
+                                    let _ = tx.send(mon_frame);
+                                }
+                            }
+                        }
                         // Soll-Bitrate des Raums anwenden (0 = automatisch).
                         let want_bitrate =
                             crate::state::effective_bitrate(bitrate_cfg, channels as u8);

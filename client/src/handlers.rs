@@ -142,15 +142,51 @@ pub fn handle(ctx: &Ctx, msg: Message) {
 
         "client_update_done" => {
             let path = msg.data.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            crate::actions::notify(
-                ctx,
-                &format!(
-                    "Aktualisierung heruntergeladen:\n{}\n\nDie Datei wird zum Installieren geöffnet.",
-                    path
-                ),
-                "Aktualisierung",
-            );
-            crate::update::open_path(&path);
+
+            // Windows: das ZIP automatisch entpacken, die laufende Installation
+            // ersetzen und neu starten. Klappt das, beendet sich der Client,
+            // damit die gesperrte EXE überschrieben werden kann.
+            #[cfg(target_os = "windows")]
+            {
+                match crate::update::apply_update_windows(&path) {
+                    Ok(()) => {
+                        crate::actions::notify(
+                            ctx,
+                            "Die Aktualisierung wird jetzt eingespielt. TeamConference \
+                             schließt sich kurz und startet danach automatisch neu.",
+                            "Aktualisierung",
+                        );
+                        // Prozess beenden, damit der Updater die Dateien ersetzen kann.
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        // Fallback: Paket nur öffnen, manuell installieren.
+                        crate::actions::notify(
+                            ctx,
+                            &format!(
+                                "Automatisches Einspielen fehlgeschlagen ({}).\n\nDas \
+                                 heruntergeladene Paket wird zum manuellen Installieren geöffnet:\n{}",
+                                e, path
+                            ),
+                            "Aktualisierung",
+                        );
+                        crate::update::open_path(&path);
+                    }
+                }
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                crate::actions::notify(
+                    ctx,
+                    &format!(
+                        "Aktualisierung heruntergeladen:\n{}\n\nDie Datei wird zum Installieren geöffnet.",
+                        path
+                    ),
+                    "Aktualisierung",
+                );
+                crate::update::open_path(&path);
+            }
         }
 
         "client_stream_finished" => {

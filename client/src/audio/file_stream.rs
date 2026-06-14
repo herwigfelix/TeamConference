@@ -12,7 +12,7 @@ const TARGET_RATE: u32 = 48_000;
 
 /// Einfacher linearer Resampler (interleaved i16) mit Kontinuität über Aufrufe
 /// hinweg, damit an Paketgrenzen keine Knackser entstehen.
-struct LinearResampler {
+pub(crate) struct LinearResampler {
     in_rate: u32,
     channels: usize,
     t: f64,
@@ -21,7 +21,7 @@ struct LinearResampler {
 }
 
 impl LinearResampler {
-    fn new(in_rate: u32, channels: usize) -> Self {
+    pub(crate) fn new(in_rate: u32, channels: usize) -> Self {
         Self {
             in_rate,
             channels: channels.max(1),
@@ -40,7 +40,7 @@ impl LinearResampler {
 
     /// Resampelt `input` (interleaved i16 @ in_rate) nach TARGET_RATE und hängt
     /// das Ergebnis (interleaved i16) an `out` an.
-    fn process(&mut self, input: &[i16], out: &mut Vec<i16>) {
+    pub(crate) fn process(&mut self, input: &[i16], out: &mut Vec<i16>) {
         let ch = self.channels;
         if self.in_rate == TARGET_RATE {
             out.extend_from_slice(input);

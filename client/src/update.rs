@@ -177,6 +177,101 @@ fn download(url: &str, filename: &str) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
+/// Windows: das heruntergeladene ZIP entpacken, die laufende Installation
+/// ersetzen und die neue Version starten.
+///
+/// Da die laufende `.exe` (und ihre DLLs) gesperrt sind, solange der Prozess
+/// läuft, übernimmt ein kleines Batch-Skript die eigentliche Arbeit: es wartet,
+/// bis dieser Prozess beendet ist, kopiert die entpackten Dateien über das
+/// Installationsverzeichnis und startet die neue `.exe`. Nach erfolgreichem
+/// Start des Skripts beendet sich der Client (siehe Aufrufer).
+#[cfg(target_os = "windows")]
+pub fn apply_update_windows(zip_path: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_name = exe
+        .file_name()
+        .ok_or("EXE-Name nicht ermittelbar")?
+        .to_string_lossy()
+        .to_string();
+    let target_dir = exe
+        .parent()
+        .ok_or("Installationsverzeichnis nicht ermittelbar")?
+        .to_path_buf();
+
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("tc-update-{}", pid));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+
+    // ZIP per PowerShell entpacken (ab Windows 10 vorhanden, keine Extra-Abhängigkeit).
+    let ps = format!(
+        "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+        zip_path.replace('\'', "''"),
+        tmp.display().to_string().replace('\'', "''")
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps.as_str()])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Entpacken des Updates fehlgeschlagen".into());
+    }
+
+    // Verzeichnis mit der neuen EXE finden (das ZIP enthält einen Unterordner).
+    let src = find_dir_with(&tmp, &exe_name)
+        .ok_or("Neue Programmdatei im Update-Paket nicht gefunden")?;
+
+    // Updater-Batch schreiben: auf Prozessende warten, kopieren, neu starten.
+    let bat = std::env::temp_dir().join(format!("tc-update-{}.bat", pid));
+    let script = format!(
+        "@echo off\r\n\
+         :wait\r\n\
+         tasklist /fi \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul && ( ping -n 2 127.0.0.1 >nul & goto wait )\r\n\
+         xcopy /e /y /i \"{src}\\*\" \"{target}\\\" >nul\r\n\
+         start \"\" \"{target}\\{exe}\"\r\n\
+         rmdir /s /q \"{tmp}\" >nul 2>&1\r\n\
+         del \"%~f0\" >nul 2>&1\r\n",
+        pid = pid,
+        src = src.display(),
+        target = target_dir.display(),
+        exe = exe_name,
+        tmp = tmp.display(),
+    );
+    std::fs::write(&bat, script).map_err(|e| e.to_string())?;
+
+    // Batch losgelöst starten, damit es das Ersetzen nach unserem Exit ausführt.
+    Command::new("cmd")
+        .arg("/c")
+        .arg("start")
+        .arg("")
+        .arg("/min")
+        .arg(&bat)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Rekursiv (flach) das erste Verzeichnis suchen, das eine Datei mit `name`
+/// enthält. Genutzt, um im entpackten ZIP den Ordner mit der neuen EXE zu finden.
+#[cfg(target_os = "windows")]
+fn find_dir_with(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if root.join(name).is_file() {
+        return Some(root.to_path_buf());
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = find_dir_with(&p, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Datei oder URL mit dem Standardprogramm öffnen
 /// (macOS: `open`, Windows: `explorer`/Browser, Linux: `xdg-open`).
 pub fn open_path(path: &str) {

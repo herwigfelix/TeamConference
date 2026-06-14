@@ -3,7 +3,7 @@
 # dem mitgelieferten Quellbaum. In der CI wird diese Datei ins Repo-Root kopiert
 # und mit `makepkg` (als Nicht-Root-Nutzer) gebaut; lokal genauso nutzbar.
 pkgname=teamconference-client
-pkgver=0.3.1
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="TeamConference – barrierefreier Sprach-Client (native GTK-Oberfläche)"
 arch=('x86_64')
