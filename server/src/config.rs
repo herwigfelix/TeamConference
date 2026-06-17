@@ -118,8 +118,10 @@ pub struct StorageConfig {
     pub database_path: String,
     pub upload_dir: String,
     pub max_upload_size_mb: u64,
-    /// Gesamt-Speicherlimit dieses (Unter-)Servers in Byte. Default 2 GiB; im
-    /// Hub pro Unterserver gesetzt und von Hub-Admins erweiterbar.
+    /// Gesamt-Speicherlimit dieses Servers in Byte. **0 = unbegrenzt** (Default
+    /// für selbst gehostete Server, die nur das zentrale Login nutzen). Nur
+    /// Hub-gehostete Unterserver bekommen vom Hub ein Limit gesetzt (z. B. 2 GiB,
+    /// von Hub-Admins erweiterbar) über TC_FILE_LIMIT_BYTES.
     pub file_limit_bytes: i64,
 }
 
@@ -129,7 +131,7 @@ impl Default for StorageConfig {
             database_path: "data/teamconference.db".into(),
             upload_dir: "data/uploads".into(),
             max_upload_size_mb: 100,
-            file_limit_bytes: 2 * 1024 * 1024 * 1024,
+            file_limit_bytes: 0,
         }
     }
 }
