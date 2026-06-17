@@ -602,6 +602,72 @@ pub fn hub_create_server(ctx: &Ctx) {
     });
 }
 
+/// Offene Einladungen laden und einzeln zum Annehmen/Ablehnen anbieten.
+pub fn hub_invites(ctx: &Ctx) {
+    if config::load_config().hub.is_none() {
+        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        return;
+    }
+    // Kurzer blockierender Aufruf; die Ja/Nein-Dialoge laufen ohnehin auf dem
+    // UI-Thread.
+    let invites = match fresh_access_token().and_then(|t| crate::hub::list_invites(&t)) {
+        Ok(v) => v,
+        Err(e) => {
+            notify(ctx, &format!("Einladungen konnten nicht geladen werden: {}", e), "Server-Hub");
+            return;
+        }
+    };
+    if invites.is_empty() {
+        notify(ctx, "Keine offenen Einladungen.", "Server-Hub");
+        return;
+    }
+    for inv in invites {
+        let dlg = MessageDialog::builder(
+            &ctx.ui.frame,
+            &format!("Einladung zu „{}\" annehmen?", inv.server_name),
+            "Einladungen",
+        )
+        .with_style(MessageDialogStyle::YesNo)
+        .build();
+        let accept = dlg.show_modal() == ID_YES;
+        match fresh_access_token().and_then(|t| crate::hub::respond_invite(&t, &inv.id, accept)) {
+            Ok(()) => ctx.ui.append_hub_log(&format!(
+                "Einladung zu „{}\" {}.",
+                inv.server_name,
+                if accept { "angenommen" } else { "abgelehnt" }
+            )),
+            Err(e) => ctx.ui.append_hub_log(&format!("Fehler bei Einladung: {}", e)),
+        }
+    }
+    // Verzeichnis aktualisieren (neue Mitgliedschaften sichtbar machen).
+    hub_load_directory(ctx);
+}
+
+/// Anzeigename und Bio bearbeiten.
+pub fn hub_edit_profile(ctx: &Ctx) {
+    if config::load_config().hub.is_none() {
+        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        return;
+    }
+    let Some(display) = ask_text(ctx, "Anzeigename:", "Profil bearbeiten", "") else { return };
+    let bio = ask_text(ctx, "Über mich (Bio):", "Profil bearbeiten", "").unwrap_or_default();
+    ctx.ui.append_hub_log("Speichere Profil…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || {
+            let access = fresh_access_token()?;
+            crate::hub::update_profile(&access, &display, &bio)
+        })
+        .await;
+        let m = match r {
+            Ok(Ok(())) => "Profil gespeichert.".to_string(),
+            Ok(Err(e)) => format!("Profil konnte nicht gespeichert werden: {}", e),
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
+}
+
 pub fn hub_reset_confirm(ctx: &Ctx) {
     let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
     let code = ctx.ui.hub_code_in.get_value().trim().to_string();

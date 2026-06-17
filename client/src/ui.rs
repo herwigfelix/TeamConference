@@ -109,6 +109,8 @@ pub struct Ui {
     pub hub_refresh_btn: Button,
     pub hub_join_btn: Button,
     pub hub_create_btn: Button,
+    pub hub_invites_btn: Button,
+    pub hub_profile_btn: Button,
     pub hub_log: TextCtrl,
 
     // Hauptansicht — Räume/Nutzer als nativer Baum (plattformspezifisch:
@@ -261,6 +263,10 @@ impl Ui {
         dir_row.add(&hub_refresh_btn, 0, SizerFlag::All, 4);
         dir_row.add(&hub_join_btn, 0, SizerFlag::All, 4);
         dir_row.add(&hub_create_btn, 0, SizerFlag::All, 4);
+        let hub_invites_btn = Button::builder(&hub_panel).with_label("Einladungen…").build();
+        let hub_profile_btn = Button::builder(&hub_panel).with_label("Profil bearbeiten…").build();
+        dir_row.add(&hub_invites_btn, 0, SizerFlag::All, 4);
+        dir_row.add(&hub_profile_btn, 0, SizerFlag::All, 4);
         hv.add_sizer(&dir_row, 0, SizerFlag::All, 2);
 
         let hub_log = TextCtrl::builder(&hub_panel)
@@ -426,6 +432,8 @@ impl Ui {
             hub_refresh_btn,
             hub_join_btn,
             hub_create_btn,
+            hub_invites_btn,
+            hub_profile_btn,
             hub_log,
             main_panel,
             rooms_tree,

@@ -150,6 +150,61 @@ pub fn create_server(
     Ok(v.get("server_id").and_then(|s| s.as_str()).unwrap_or("").to_string())
 }
 
+fn put_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", base_url(), path);
+    match ureq::put(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(resp) => resp
+            .into_json::<serde_json::Value>()
+            .map_err(|e| format!("Antwort unlesbar: {}", e)),
+        Err(ureq::Error::Status(_c, resp)) => Err(resp
+            .into_json::<serde_json::Value>()
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "Serverfehler".into())),
+        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+    }
+}
+
+/// Offene Einladung.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InviteInfo {
+    pub id: String,
+    #[serde(default)]
+    pub server_name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub server_id: String,
+}
+
+pub fn list_invites(access_token: &str) -> Result<Vec<InviteInfo>, String> {
+    let v = get_auth("/invites/mine", access_token)?;
+    let arr = v.get("invites").cloned().unwrap_or_default();
+    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+pub fn respond_invite(access_token: &str, invite_id: &str, accept: bool) -> Result<(), String> {
+    post_auth(
+        "/invites/respond",
+        access_token,
+        json!({ "invite_id": invite_id, "accept": accept }),
+    )
+    .map(|_| ())
+}
+
+/// Eigenes Profil (Anzeigename/Bio) setzen.
+pub fn update_profile(access_token: &str, display_name: &str, bio: &str) -> Result<(), String> {
+    put_auth(
+        "/profile",
+        access_token,
+        json!({ "display_name": display_name, "bio": bio }),
+    )
+    .map(|_| ())
+}
+
 fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {

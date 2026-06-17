@@ -234,6 +234,14 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.hub_create_btn.on_click(move |_| actions::hub_create_server(&ctx));
     }
+    {
+        let ctx = ctx.clone();
+        ui.hub_invites_btn.on_click(move |_| actions::hub_invites(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_profile_btn.on_click(move |_| actions::hub_edit_profile(&ctx));
+    }
 
     // Hauptansicht
     {
