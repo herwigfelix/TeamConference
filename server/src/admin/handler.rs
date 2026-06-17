@@ -122,11 +122,11 @@ pub async fn handle_move(
         users.broadcast_to_room(old_id, leave_msg, Some(mv.user_id)).await;
     }
 
-    // Move user
-    rooms.join_room(mv.user_id, mv.room_id, None).await?;
+    // Move user (innerhalb seines Unterservers)
+    rooms.join_room(mv.user_id, mv.room_id, None, &target.tenant).await?;
 
     // Get room list for room name
-    let room_list = rooms.get_room_list().await?;
+    let room_list = rooms.get_room_list(&target.tenant).await?;
     let room_name = room_list.iter()
         .find(|r| r.id == mv.room_id)
         .map(|r| r.name.clone())

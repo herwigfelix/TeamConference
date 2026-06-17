@@ -41,6 +41,9 @@ pub struct AuthLogin {
     /// `central_login` an, wird damit angemeldet (statt mit Passwort).
     #[serde(default)]
     pub central_token: Option<String>,
+    /// Im Multi-Tenant-/Hub-Modus: welcher Unterserver beigetreten werden soll.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

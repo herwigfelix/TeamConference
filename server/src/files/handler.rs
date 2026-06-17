@@ -22,8 +22,10 @@ pub struct FileHandler {
     db: Arc<Connection>,
     upload_dir: PathBuf,
     max_upload_size: i64,
-    /// Gesamt-Speicherlimit des Servers in Byte (0 = unbegrenzt).
+    /// Gesamt-Speicherlimit des Servers in Byte (0 = unbegrenzt). Im Multi-Tenant-
+    /// Modus gilt es pro Unterserver (Default 2 GiB, falls 0).
     file_limit_bytes: i64,
+    multi_tenant: bool,
     pending_uploads: RwLock<HashMap<String, PendingUpload>>,
 }
 
@@ -37,6 +39,7 @@ impl FileHandler {
             upload_dir,
             max_upload_size: config.storage.max_upload_size_mb as i64 * 1024 * 1024,
             file_limit_bytes: config.storage.file_limit_bytes,
+            multi_tenant: config.server.multi_tenant,
             pending_uploads: RwLock::new(HashMap::new()),
         })
     }
@@ -50,8 +53,25 @@ impl FileHandler {
             anyhow::bail!("File too large (max {} MB)", self.max_upload_size / 1024 / 1024);
         }
 
-        // Gesamt-Speicherlimit des Servers prüfen (Bestand + laufende Uploads + neu).
-        if self.file_limit_bytes > 0 {
+        // Speicherlimit prüfen. Im Multi-Tenant-Modus pro Unterserver, sonst
+        // serverweit. 0 = unbegrenzt (selbst gehostet); im Hub-Modus dann 2 GiB.
+        const TENANT_DEFAULT: i64 = 2 * 1024 * 1024 * 1024;
+        if self.multi_tenant {
+            let tenant = queries::get_room_tenant(&self.db, req.room_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let limit = if self.file_limit_bytes > 0 { self.file_limit_bytes } else { TENANT_DEFAULT };
+            let used = queries::total_storage_bytes_for_tenant(&self.db, tenant).await.unwrap_or(0);
+            if used + req.size > limit {
+                let gib = limit as f64 / (1024.0 * 1024.0 * 1024.0);
+                anyhow::bail!(
+                    "Speicherlimit dieses Servers erreicht (max {:.1} GB) — bitte Dateien löschen oder Limit erhöhen lassen",
+                    gib
+                );
+            }
+        } else if self.file_limit_bytes > 0 {
             let stored = queries::total_storage_bytes(&self.db).await.unwrap_or(0);
             let pending: i64 = self
                 .pending_uploads

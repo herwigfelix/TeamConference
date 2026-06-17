@@ -101,6 +101,8 @@ pub fn do_connect(ctx: &Ctx) {
     };
     let ssl = ctx.ui.ssl_chk.is_checked();
     let use_central = ctx.ui.use_central_chk.is_checked();
+    // Unterserver-ID (Hub-Modus); vom Verzeichnis-Beitritt oder Lesezeichen gesetzt.
+    let server_id = ctx.st.borrow().pending_server_id.clone().unwrap_or_default();
     let username = ctx.ui.user_in.get_value().trim().to_string();
     let password = ctx.ui.pass_in.get_value();
     let mut nickname = ctx.ui.nick_in.get_value().trim().to_string();
@@ -217,7 +219,7 @@ pub fn do_connect(ctx: &Ctx) {
                             status: bundle.status.clone(),
                         });
                         let _ = crate::config::save_config(&cfg);
-                        serde_json::json!({ "central_token": bundle.access_token, "nickname": nickname })
+                        serde_json::json!({ "central_token": bundle.access_token, "nickname": nickname, "server_id": server_id })
                     }
                     Ok(Err(e)) => {
                         fail(format!("Zentrales Login fehlgeschlagen: {}", e));
@@ -303,6 +305,8 @@ pub fn fill_form_from_server(ctx: &Ctx) {
         ctx.ui.nick_in.set_value(&s.nickname);
         ctx.ui.pass_in.set_value(&s.password);
         ctx.ui.use_central_chk.set_value(s.use_central);
+        ctx.st.borrow_mut().pending_server_id =
+            if s.server_id.is_empty() { None } else { Some(s.server_id.clone()) };
     }
 }
 
@@ -322,6 +326,7 @@ pub fn save_bookmark(ctx: &Ctx) {
         nickname: ctx.ui.nick_in.get_value().trim().to_string(),
         password: ctx.ui.pass_in.get_value(),
         use_central: ctx.ui.use_central_chk.is_checked(),
+        server_id: ctx.st.borrow().pending_server_id.clone().unwrap_or_default(),
     };
     ctx.st.borrow_mut().servers.push(entry);
     persist_servers(ctx);
@@ -563,6 +568,8 @@ pub fn hub_join_selected(ctx: &Ctx) {
     ctx.ui.port_in.set_value(&s.control_port.to_string());
     ctx.ui.ssl_chk.set_value(true);
     ctx.ui.use_central_chk.set_value(true);
+    // Unterserver-ID merken, damit auth_login den richtigen Bereich wählt.
+    ctx.st.borrow_mut().pending_server_id = Some(s.id.clone());
     ctx.ui.notebook.set_selection(0);
     do_connect(ctx);
 }

@@ -34,6 +34,10 @@ pub struct ServerConfig {
     pub central_login_url: String,
     /// Optionaler Public Key (Hex) — überspringt die /v2/keys-Abfrage beim Start.
     pub central_login_pubkey: String,
+    /// Multi-Tenant-Modus (Hub): EIN Prozess beherbergt viele „Unterserver" als
+    /// abgeschottete Bereiche (server_id). Aus = klassischer Einzelserver
+    /// (selbst hostbar, unverändertes Verhalten). Erfordert zentrales Login.
+    pub multi_tenant: bool,
 }
 
 impl Default for ServerConfig {
@@ -46,6 +50,7 @@ impl Default for ServerConfig {
             central_login: false,
             central_login_url: "https://srvhub.accessy.org".into(),
             central_login_pubkey: String::new(),
+            multi_tenant: false,
         }
     }
 }
@@ -189,6 +194,7 @@ impl Config {
         env_override(&mut self.server.central_login, "TC_CENTRAL_LOGIN");
         env_override(&mut self.server.central_login_url, "TC_CENTRAL_LOGIN_URL");
         env_override(&mut self.server.central_login_pubkey, "TC_CENTRAL_LOGIN_PUBKEY");
+        env_override(&mut self.server.multi_tenant, "TC_MULTI_TENANT");
 
         env_override(&mut self.network.control_host, "TC_CONTROL_HOST");
         env_override(&mut self.network.control_port, "TC_CONTROL_PORT");

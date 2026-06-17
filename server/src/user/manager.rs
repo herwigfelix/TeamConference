@@ -10,6 +10,8 @@ pub struct OnlineUser {
     pub username: String,
     pub nickname: String,
     pub role: String,
+    /// Unterserver-Zugehörigkeit ('' = Einzelserver-Modus).
+    pub tenant: String,
     pub session_token: u32,
     pub room_id: Option<i64>,
     pub muted: bool,
@@ -208,6 +210,37 @@ impl UserManager {
                 continue;
             }
             let _ = user.tx.send(msg.clone());
+        }
+    }
+
+    /// Tenant des Nutzers ('' wenn unbekannt / Einzelserver).
+    pub async fn user_tenant(&self, user_id: i64) -> String {
+        self.users
+            .read()
+            .await
+            .get(&user_id)
+            .map(|u| u.tenant.clone())
+            .unwrap_or_default()
+    }
+
+    /// An alle Nutzer DESSELBEN Unterservers senden. Im Einzelserver-Modus
+    /// (tenant == "") sind das alle Nutzer.
+    pub async fn broadcast_tenant(&self, tenant: &str, msg: Message) {
+        let users = self.users.read().await;
+        for user in users.values() {
+            if user.tenant == tenant {
+                let _ = user.tx.send(msg.clone());
+            }
+        }
+    }
+
+    /// Wie `broadcast_tenant`, aber ohne `exclude_user`.
+    pub async fn broadcast_tenant_except(&self, tenant: &str, msg: Message, exclude_user: i64) {
+        let users = self.users.read().await;
+        for user in users.values() {
+            if user.tenant == tenant && user.user_id != exclude_user {
+                let _ = user.tx.send(msg.clone());
+            }
         }
     }
 }

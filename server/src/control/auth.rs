@@ -41,7 +41,8 @@ pub async fn handle_login(
     };
 
     // ── Anmeldung: zentrales Token ODER lokaler Benutzer/Passwort ──
-    let db_user = if let Some(token) = login.central_token.as_deref() {
+    // Ergebnis: (Account, Tenant/Unterserver, Rolle für diese Sitzung).
+    let (db_user, tenant, session_role) = if let Some(token) = login.central_token.as_deref() {
         // Client will zentrales Login.
         if !config.server.central_login {
             return reject("Dieser Server unterstützt kein zentrales Login");
@@ -60,7 +61,7 @@ pub async fn handle_login(
             return reject("Konto noch nicht freigegeben — bitte auf die Freigabe warten");
         }
         // Lokalen Account zur zentralen Identität finden oder anlegen.
-        match queries::find_user_by_central_uid(db, claims.sub.clone()).await {
+        let db_user = match queries::find_user_by_central_uid(db, claims.sub.clone()).await {
             Ok(Some(u)) => u,
             Ok(None) => {
                 let uname = unique_username(db, &claims.un).await;
@@ -79,14 +80,40 @@ pub async fn handle_login(
                 tracing::error!("central_uid-Lookup fehlgeschlagen: {}", e);
                 return reject("Internal server error");
             }
+        };
+
+        // Tenant (Unterserver) bestimmen.
+        if config.server.multi_tenant {
+            let Some(server_id) = login.server_id.as_deref().filter(|s| !s.is_empty()) else {
+                return reject("Bitte einen Server wählen (server_id fehlt)");
+            };
+            // Zugriff über das Hub-Verzeichnis prüfen (öffentlich oder Mitglied).
+            match crate::control::hubdir::lookup(&config.server.central_login_url, token, server_id).await {
+                Ok(dir) => {
+                    // Tenant + Standard-Raum bei Erstkontakt anlegen.
+                    if queries::get_tenant(db, server_id.to_string()).await.ok().flatten().is_none() {
+                        let _ = queries::create_tenant(db, server_id.to_string(), dir.owner_uid.clone(), dir.name.clone()).await;
+                        let _ = queries::create_default_room(db, server_id.to_string()).await;
+                        tracing::info!("Unterserver provisioniert: {} ({})", dir.name, server_id);
+                    }
+                    // Eigentümer des Unterservers ist dort Admin.
+                    let role = if dir.owner_uid == claims.sub { "admin".to_string() } else { db_user.role.clone() };
+                    (db_user, server_id.to_string(), role)
+                }
+                Err(e) => return reject(&format!("Kein Zugriff auf diesen Server: {}", e)),
+            }
+        } else {
+            let role = db_user.role.clone();
+            (db_user, String::new(), role)
         }
     } else {
-        // Klassischer Pfad (Benutzername/Passwort). Bei aktivem central_login
-        // existiert lokal i. d. R. nur der Admin-Account — der kann sich so
-        // weiterhin anmelden.
+        // Klassischer Pfad (Benutzername/Passwort).
+        if config.server.multi_tenant {
+            return reject("Dieser Hub erfordert zentrales Login");
+        }
         let username = login.username.clone();
         let password = login.password.clone();
-        match queries::authenticate_user(db, username.clone(), password.clone()).await {
+        let db_user = match queries::authenticate_user(db, username.clone(), password.clone()).await {
             Ok(Some(user)) => user,
             Ok(None) => {
                 let exists = queries::find_user_by_username(db, username.clone())
@@ -120,7 +147,9 @@ pub async fn handle_login(
                 tracing::error!("Auth error: {}", e);
                 return reject("Internal server error");
             }
-        }
+        };
+        let role = db_user.role.clone();
+        (db_user, String::new(), role)
     };
 
     // Check ban
@@ -142,7 +171,8 @@ pub async fn handle_login(
         user_id: db_user.id,
         username: db_user.username,
         nickname,
-        role: db_user.role.clone(),
+        role: session_role.clone(),
+        tenant: tenant.clone(),
         session_token: 0,
         room_id: None,
         muted: false,
@@ -159,8 +189,8 @@ pub async fn handle_login(
 
     let token = users.add_user(online_user).await;
 
-    // Get room list
-    let room_list = rooms.get_room_list().await.unwrap_or_default();
+    // Raumliste des eigenen Unterservers (im Einzelserver-Modus: tenant = "").
+    let room_list = rooms.get_room_list(&tenant).await.unwrap_or_default();
 
     AuthResponse {
         success: true,
@@ -168,7 +198,7 @@ pub async fn handle_login(
         token: Some(token.to_string()),
         server_name: Some(config.server.name.clone()),
         rooms: Some(room_list),
-        role: Some(db_user.role),
+        role: Some(session_role),
         error: None,
     }
 }

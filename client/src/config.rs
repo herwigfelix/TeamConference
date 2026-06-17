@@ -33,6 +33,10 @@ pub struct ServerEntry {
     /// verwenden. Erfordert eine Anmeldung im Tab „Server-Hub".
     #[serde(default)]
     pub use_central: bool,
+    /// Im Hub-Modus (Multi-Tenant): ID des Unterservers, dem beigetreten wird.
+    /// Leer = normaler Einzelserver.
+    #[serde(default)]
+    pub server_id: String,
 }
 
 impl ServerEntry {

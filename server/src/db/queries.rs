@@ -24,6 +24,8 @@ pub struct DbRoom {
     pub channels: i64,
     /// Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
     pub bitrate: i64,
+    /// Unterserver-Zugehörigkeit ('' = Einzelserver-Modus).
+    pub tenant: String,
 }
 
 #[derive(Debug, Clone)]
@@ -208,13 +210,15 @@ pub async fn create_ban(
     .map_err(|e| anyhow::anyhow!("Failed to create ban: {}", e))
 }
 
-pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
-    conn.call(|conn| {
+/// Räume eines Unterservers (Tenant). '' = Einzelserver-Modus (alle Räume ohne
+/// Tenant-Zuordnung).
+pub async fn get_all_rooms(conn: &Connection, tenant: String) -> anyhow::Result<Vec<DbRoom>> {
+    conn.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels, bitrate
-             FROM rooms ORDER BY sort_order, name"
+            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels, bitrate, tenant
+             FROM rooms WHERE tenant = ?1 ORDER BY sort_order, name"
         )?;
-        let rooms = stmt.query_map([], |row| {
+        let rooms = stmt.query_map([tenant], |row| {
             Ok(DbRoom {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -228,6 +232,7 @@ pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
                 bit_depth: row.get(9)?,
                 channels: row.get(10)?,
                 bitrate: row.get(11)?,
+                tenant: row.get(12)?,
             })
         })?.filter_map(|r| r.ok()).collect();
         Ok(rooms)
@@ -236,6 +241,7 @@ pub async fn get_all_rooms(conn: &Connection) -> anyhow::Result<Vec<DbRoom>> {
     .map_err(|e| anyhow::anyhow!("Failed to get rooms: {}", e))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_room(
     conn: &Connection,
     name: String,
@@ -246,18 +252,88 @@ pub async fn create_room(
     bit_depth: i64,
     channels: i64,
     bitrate: i64,
+    tenant: String,
 ) -> anyhow::Result<i64> {
     let password_hash = password.map(|p| hash_password(&p)).transpose()?;
     conn.call(move |conn| {
         conn.execute(
-            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate],
+            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate, tenant)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate, tenant],
         )?;
         Ok(conn.last_insert_rowid())
     })
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create room: {}", e))
+}
+
+/// Standard-Raum („Lobby") für einen Unterserver anlegen.
+pub async fn create_default_room(conn: &Connection, tenant: String) -> anyhow::Result<i64> {
+    conn.call(move |conn| {
+        conn.execute(
+            "INSERT INTO rooms (name, parent_id, is_default, sort_order, tenant)
+             VALUES ('Lobby', NULL, 1, 0, ?1)",
+            rusqlite::params![tenant],
+        )?;
+        Ok(conn.last_insert_rowid())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create default room: {}", e))
+}
+
+// ── Tenants (Unterserver im Multi-Tenant-Modus) ──
+
+pub struct DbTenant {
+    pub id: String,
+    pub owner_uid: String,
+    pub name: String,
+}
+
+pub async fn get_tenant(conn: &Connection, id: String) -> anyhow::Result<Option<DbTenant>> {
+    conn.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT id, owner_uid, name FROM tenants WHERE id = ?1")?;
+        let r = stmt.query_row(rusqlite::params![id], |row| {
+            Ok(DbTenant { id: row.get(0)?, owner_uid: row.get(1)?, name: row.get(2)? })
+        });
+        match r {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Get tenant failed: {}", e))
+}
+
+pub async fn create_tenant(
+    conn: &Connection,
+    id: String,
+    owner_uid: String,
+    name: String,
+) -> anyhow::Result<()> {
+    conn.call(move |conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO tenants (id, owner_uid, name) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, owner_uid, name],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Create tenant failed: {}", e))
+}
+
+/// Speicherverbrauch eines Unterservers (Summe der Dateien in seinen Räumen).
+pub async fn total_storage_bytes_for_tenant(conn: &Connection, tenant: String) -> anyhow::Result<i64> {
+    conn.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(SUM(rf.size_bytes), 0) FROM room_files rf
+             JOIN rooms r ON r.id = rf.room_id WHERE r.tenant = ?1",
+        )?;
+        let total: i64 = stmt.query_row(rusqlite::params![tenant], |row| row.get(0))?;
+        Ok(total)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Tenant storage sum failed: {}", e))
 }
 
 pub async fn delete_room(conn: &Connection, room_id: i64) -> anyhow::Result<()> {
@@ -573,6 +649,21 @@ pub async fn update_role(conn: &Connection, user_id: i64, role: String) -> anyho
     })
     .await
     .map_err(|e| anyhow::anyhow!("Updating role failed: {}", e))
+}
+
+/// Tenant (Unterserver) eines Raums.
+pub async fn get_room_tenant(conn: &Connection, room_id: i64) -> anyhow::Result<Option<String>> {
+    conn.call(move |conn| {
+        let mut stmt = conn.prepare("SELECT tenant FROM rooms WHERE id = ?1")?;
+        let r = stmt.query_row(rusqlite::params![room_id], |row| row.get::<_, String>(0));
+        match r {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Room tenant lookup failed: {}", e))
 }
 
 /// Summe aller gespeicherten Datei-Größen (für das Server-Speicherlimit).

@@ -147,7 +147,7 @@ pub async fn handle_connection<S>(
                                 "user_id": uid,
                                 "nickname": u.nickname,
                             }));
-                            state.users.broadcast_all_except(presence, uid).await;
+                            state.users.broadcast_tenant_except(&u.tenant, presence, uid).await;
                         }
                     }
                 }
@@ -175,7 +175,8 @@ pub async fn handle_connection<S>(
                     }
                 }
 
-                match state.rooms.join_room(uid, req.room_id, req.password.as_deref()).await {
+                let tenant = state.users.user_tenant(uid).await;
+                match state.rooms.join_room(uid, req.room_id, req.password.as_deref(), &tenant).await {
                     Ok(()) => {
                         // Notify new room
                         let user = state.users.get_user(uid).await.unwrap();
@@ -186,7 +187,7 @@ pub async fn handle_connection<S>(
                         state.users.broadcast_to_room(req.room_id, join_msg, Some(uid)).await;
 
                         // Send updated room list
-                        let room_list = state.rooms.get_room_list().await.unwrap_or_default();
+                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
                         let list_msg = Message::new("room_list", serde_json::json!({
                             "rooms": room_list
                         }));
@@ -233,6 +234,7 @@ pub async fn handle_connection<S>(
                     }
                 };
 
+                let tenant = state.users.user_tenant(uid).await;
                 match state.rooms.create_room(
                     req.name,
                     req.parent_id,
@@ -242,14 +244,15 @@ pub async fn handle_connection<S>(
                     req.bit_depth.unwrap_or(16),
                     req.channels.unwrap_or(1),
                     req.bitrate.unwrap_or(0),
+                    &tenant,
                 ).await {
                     Ok(_) => {
-                        // Broadcast updated room list to all
-                        let room_list = state.rooms.get_room_list().await.unwrap_or_default();
+                        // Aktualisierte Raumliste an den eigenen Unterserver senden.
+                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
                         let list_msg = Message::new("room_list", serde_json::json!({
                             "rooms": room_list
                         }));
-                        state.users.broadcast_all(list_msg).await;
+                        state.users.broadcast_tenant(&tenant, list_msg).await;
                     }
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
@@ -276,13 +279,14 @@ pub async fn handle_connection<S>(
                     }
                 };
 
-                match state.rooms.delete_room(req.room_id).await {
+                let tenant = state.users.user_tenant(uid).await;
+                match state.rooms.delete_room(req.room_id, &tenant).await {
                     Ok(()) => {
-                        let room_list = state.rooms.get_room_list().await.unwrap_or_default();
+                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
                         let list_msg = Message::new("room_list", serde_json::json!({
                             "rooms": room_list
                         }));
-                        state.users.broadcast_all(list_msg).await;
+                        state.users.broadcast_tenant(&tenant, list_msg).await;
                     }
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
@@ -309,13 +313,14 @@ pub async fn handle_connection<S>(
                     }
                 };
 
+                let tenant = state.users.user_tenant(uid).await;
                 match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users, req.sample_rate, req.bit_depth, req.channels, req.bitrate).await {
                     Ok(()) => {
-                        let room_list = state.rooms.get_room_list().await.unwrap_or_default();
+                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
                         let list_msg = Message::new("room_list", serde_json::json!({
                             "rooms": room_list
                         }));
-                        state.users.broadcast_all(list_msg).await;
+                        state.users.broadcast_tenant(&tenant, list_msg).await;
                     }
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
@@ -788,7 +793,7 @@ pub async fn handle_connection<S>(
                 "user_id": uid,
                 "nickname": user.nickname.clone(),
             }));
-            state.users.broadcast_all_except(presence, uid).await;
+            state.users.broadcast_tenant_except(&user.tenant, presence, uid).await;
         }
 
         state.users.remove_user(uid).await;

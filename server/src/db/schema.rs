@@ -15,12 +15,26 @@ pub async fn initialize(conn: &Connection) -> anyhow::Result<()> {
             "ALTER TABLE rooms ADD COLUMN bitrate INTEGER NOT NULL DEFAULT 0",
             // Zentrale Identität (Identity Provider). NULL für lokale Accounts.
             "ALTER TABLE users ADD COLUMN central_uid TEXT",
+            // Multi-Tenant: Zugehörigkeit eines Raums zu einem Unterserver.
+            // '' = Einzelserver-Modus (Default, unverändertes Verhalten).
+            "ALTER TABLE rooms ADD COLUMN tenant TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(stmt, []);
         }
         // Eindeutigkeit der zentralen Identität (mehrere NULLs erlaubt SQLite).
         let _ = conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_central_uid ON users(central_uid)",
+            [],
+        );
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_tenant ON rooms(tenant)", []);
+        // Unterserver (Tenants) im Multi-Tenant-Modus.
+        let _ = conn.execute(
+            "CREATE TABLE IF NOT EXISTS tenants (
+                id          TEXT PRIMARY KEY,
+                owner_uid   TEXT NOT NULL DEFAULT '',
+                name        TEXT NOT NULL DEFAULT '',
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+             )",
             [],
         );
         Ok(())

@@ -14,8 +14,8 @@ impl RoomManager {
         Arc::new(Self { db, users })
     }
 
-    pub async fn get_room_list(&self) -> anyhow::Result<Vec<RoomInfo>> {
-        let db_rooms = queries::get_all_rooms(&self.db).await?;
+    pub async fn get_room_list(&self, tenant: &str) -> anyhow::Result<Vec<RoomInfo>> {
+        let db_rooms = queries::get_all_rooms(&self.db, tenant.to_string()).await?;
         let mut rooms = Vec::new();
 
         for r in db_rooms {
@@ -38,8 +38,8 @@ impl RoomManager {
         Ok(rooms)
     }
 
-    pub async fn get_default_room_id(&self) -> anyhow::Result<i64> {
-        let rooms = queries::get_all_rooms(&self.db).await?;
+    pub async fn get_default_room_id(&self, tenant: &str) -> anyhow::Result<i64> {
+        let rooms = queries::get_all_rooms(&self.db, tenant.to_string()).await?;
         rooms
             .iter()
             .find(|r| r.is_default)
@@ -52,8 +52,10 @@ impl RoomManager {
         user_id: i64,
         room_id: i64,
         password: Option<&str>,
+        tenant: &str,
     ) -> anyhow::Result<()> {
-        let rooms = queries::get_all_rooms(&self.db).await?;
+        // Nur Räume des eigenen Unterservers (Tenant) sind sichtbar/beitretbar.
+        let rooms = queries::get_all_rooms(&self.db, tenant.to_string()).await?;
         let room = rooms
             .iter()
             .find(|r| r.id == room_id)
@@ -98,13 +100,14 @@ impl RoomManager {
         bit_depth: i64,
         channels: i64,
         bitrate: i64,
+        tenant: &str,
     ) -> anyhow::Result<i64> {
-        queries::create_room(&self.db, name, parent_id, password, max_users, sample_rate, bit_depth, channels, bitrate).await
+        queries::create_room(&self.db, name, parent_id, password, max_users, sample_rate, bit_depth, channels, bitrate, tenant.to_string()).await
     }
 
-    pub async fn delete_room(&self, room_id: i64) -> anyhow::Result<()> {
-        // Move all users in this room to default
-        let default_room = self.get_default_room_id().await?;
+    pub async fn delete_room(&self, room_id: i64, tenant: &str) -> anyhow::Result<()> {
+        // Nutzer dieses Raums in den Standard-Raum DESSELBEN Unterservers schieben.
+        let default_room = self.get_default_room_id(tenant).await?;
         let users = self.users.get_users_in_room(room_id).await;
         for user in &users {
             self.users.set_room(user.user_id, Some(default_room)).await;
@@ -127,8 +130,8 @@ impl RoomManager {
         queries::update_room(&self.db, room_id, name, password, max_users, sample_rate, bit_depth, channels, bitrate).await
     }
 
-    pub async fn room_exists(&self, room_id: i64) -> anyhow::Result<bool> {
-        let rooms = queries::get_all_rooms(&self.db).await?;
+    pub async fn room_exists(&self, room_id: i64, tenant: &str) -> anyhow::Result<bool> {
+        let rooms = queries::get_all_rooms(&self.db, tenant.to_string()).await?;
         Ok(rooms.iter().any(|r| r.id == room_id))
     }
 }

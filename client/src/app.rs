@@ -30,6 +30,8 @@ pub struct UiState {
     pub servers: Vec<ServerEntry>,
     /// Hub-Verzeichnis (entspricht den Einträgen der hub_servers-ListBox)
     pub hub_servers: Vec<crate::hub::ServerInfo>,
+    /// Im Hub-Modus zu verwendende Unterserver-ID beim nächsten Verbinden.
+    pub pending_server_id: Option<String>,
     /// Dateien der Dateiliste (entspricht den Einträgen der files-ListBox)
     pub files: Vec<FileInfo>,
     /// DataViewItem-Pointer → Baumknoten (nur macOS/Linux genutzt)
