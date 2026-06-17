@@ -581,11 +581,6 @@ pub fn hub_create_server(ctx: &Ctx) {
     }
     let Some(name) = ask_text(ctx, "Name des Servers:", "Server anlegen", "") else { return };
     let description = ask_text(ctx, "Beschreibung (optional):", "Server anlegen", "").unwrap_or_default();
-    let host = ask_text(ctx, "Adresse/Host des TeamConference-Servers:", "Server anlegen", "").unwrap_or_default();
-    let control_port: i64 = ask_text(ctx, "Steuer-Port:", "Server anlegen", "10001")
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(10001);
-    let audio_port = control_port + 1;
     let is_public = {
         let dlg = MessageDialog::builder(&ctx.ui.frame, "Soll der Server öffentlich im Verzeichnis erscheinen?", "Server anlegen")
             .with_style(MessageDialogStyle::YesNo)
@@ -597,7 +592,9 @@ pub fn hub_create_server(ctx: &Ctx) {
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || {
             let access = fresh_access_token()?;
-            crate::hub::create_server(&access, &name, &description, is_public, &host, control_port, audio_port)
+            // Host/Ports leer → der Hub hostet den Server selbst und trägt seine
+            // eigene TC-Adresse ein. Beitreten erfolgt dann per server_id.
+            crate::hub::create_server(&access, &name, &description, is_public, "", 0, 0)
         })
         .await;
         let m = match r {
