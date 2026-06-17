@@ -128,8 +128,12 @@ fn main() {
             ui.pass_in.set_value(&first.password);
             ui.use_central_chk.set_value(first.use_central);
         }
-        // Hub-Seite passend zum Anmeldestatus zeigen (eingeloggt → Konto).
+        // Hub-Seite passend zum Anmeldestatus zeigen (eingeloggt → Konto) und
+        // bei bestehender Sitzung das Verzeichnis sofort laden.
         actions::update_hub_view(&ctx);
+        if config::load_config().hub.is_some() {
+            actions::hub_load_directory(&ctx);
+        }
 
         wire_events(&ctx);
         wire_audio_hotkeys(&ctx);
@@ -252,11 +256,27 @@ fn wire_events(ctx: &Ctx) {
     }
     {
         let ctx = ctx.clone();
+        ui.hub_edit_btn.on_click(move |_| actions::hub_edit_server(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_delete_btn.on_click(move |_| actions::hub_delete_server(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
         ui.hub_invites_btn.on_click(move |_| actions::hub_invites(&ctx));
     }
     {
         let ctx = ctx.clone();
         ui.hub_profile_btn.on_click(move |_| actions::hub_edit_profile(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_admin_pending_btn.on_click(move |_| actions::hub_admin_pending(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_admin_user_btn.on_click(move |_| actions::hub_admin_user(&ctx));
     }
 
     // Hauptansicht

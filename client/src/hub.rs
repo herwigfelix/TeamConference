@@ -110,11 +110,100 @@ pub struct ServerInfo {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
     pub host: String,
     #[serde(default)]
     pub control_port: i64,
     #[serde(default)]
     pub audio_port: i64,
+}
+
+/// Server bearbeiten (Name/Beschreibung/öffentlich). Host/Ports unverändert
+/// übernehmen, damit der Hub-gehostete Eintrag erreichbar bleibt.
+#[allow(clippy::too_many_arguments)]
+pub fn update_server(
+    access_token: &str,
+    server_id: &str,
+    name: &str,
+    description: &str,
+    is_public: bool,
+    host: &str,
+    control_port: i64,
+    audio_port: i64,
+) -> Result<(), String> {
+    post_auth(
+        "/servers/update",
+        access_token,
+        json!({
+            "server_id": server_id, "name": name, "description": description,
+            "is_public": is_public, "host": host, "control_port": control_port, "audio_port": audio_port,
+        }),
+    )
+    .map(|_| ())
+}
+
+pub fn delete_server(access_token: &str, server_id: &str) -> Result<(), String> {
+    post_auth("/servers/delete", access_token, json!({ "server_id": server_id })).map(|_| ())
+}
+
+/// Eigenes Profil (Anzeigename + Bio) lesen — für vorausgefüllte Bearbeitung.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Profile {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub bio: String,
+}
+
+pub fn get_my_profile(access_token: &str) -> Result<Profile, String> {
+    let v = get_auth("/profile", access_token)?;
+    serde_json::from_value(v.get("profile").cloned().unwrap_or_default())
+        .map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+/// Knapper Nutzereintrag (Admin-Listen / Suche).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UserSummary {
+    pub central_uid: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub status: String,
+}
+
+pub fn admin_pending(access_token: &str) -> Result<Vec<UserSummary>, String> {
+    let v = get_auth("/admin/pending", access_token)?;
+    serde_json::from_value(v.get("pending").cloned().unwrap_or_default())
+        .map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+pub fn search_users(access_token: &str, q: &str) -> Result<Vec<UserSummary>, String> {
+    let v = get_auth(&format!("/users/search?q={}", urlencode(q)), access_token)?;
+    serde_json::from_value(v.get("results").cloned().unwrap_or_default())
+        .map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+pub fn admin_approve(access_token: &str, uid: &str) -> Result<(), String> {
+    post_auth("/admin/approve", access_token, json!({ "central_uid": uid })).map(|_| ())
+}
+pub fn admin_ban(access_token: &str, uid: &str, reason: &str) -> Result<(), String> {
+    post_auth("/admin/ban", access_token, json!({ "central_uid": uid, "reason": reason })).map(|_| ())
+}
+pub fn admin_unban(access_token: &str, uid: &str) -> Result<(), String> {
+    post_auth("/admin/unban", access_token, json!({ "central_uid": uid })).map(|_| ())
+}
+pub fn admin_reset_password(access_token: &str, uid: &str, new_password: &str) -> Result<(), String> {
+    post_auth("/admin/reset-password", access_token, json!({ "central_uid": uid, "new_password": new_password })).map(|_| ())
+}
+pub fn admin_promote(access_token: &str, uid: &str) -> Result<(), String> {
+    post_auth("/admin/promote", access_token, json!({ "central_uid": uid })).map(|_| ())
 }
 
 /// Öffentliches Verzeichnis laden/durchsuchen.

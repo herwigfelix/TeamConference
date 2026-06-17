@@ -126,7 +126,13 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             crate::actions::notify(ctx, &text, "Server-Hub");
         }
 
-        // Server-Hub: aktualisiertes Verzeichnis → Liste füllen.
+        // Server-Hub: Verzeichnis neu laden (nach Login/Anlegen/Bearbeiten/Löschen).
+        "hub_dir_reload" => {
+            crate::actions::hub_load_directory(ctx);
+        }
+
+        // Server-Hub: aktualisiertes Verzeichnis → Liste füllen. Host/Port werden
+        // NICHT angezeigt (immer derselbe Hub); nur Name (+ Beschreibung).
         "hub_servers" => {
             let servers: Vec<crate::hub::ServerInfo> = serde_json::from_value(
                 msg.data.get("servers").cloned().unwrap_or_default(),
@@ -134,15 +140,14 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             .unwrap_or_default();
             ui.hub_servers.clear();
             for s in &servers {
-                let label = if s.host.is_empty() {
+                let label = if s.description.trim().is_empty() {
                     s.name.clone()
                 } else {
-                    format!("{} — {}:{}", s.name, s.host, s.control_port)
+                    format!("{} — {}", s.name, s.description)
                 };
                 ui.hub_servers.append(&label);
             }
             ctx.st.borrow_mut().hub_servers = servers;
-            ui.append_hub_log("Verzeichnis aktualisiert.");
         }
 
         // Auto-Updater: neue Version verfügbar → nachfragen und ggf. laden.

@@ -407,6 +407,78 @@ pub fn hub_show_login(ctx: &Ctx) {
     set_hub_view(ctx, crate::app::HubView::Login);
 }
 
+/// Modaler Formular-Dialog: mehrere Textfelder + optionales Häkchen, alles auf
+/// einmal. `fields` = (Label, Vorbelegung, Passwortfeld?). Gibt bei OK die
+/// Textwerte und den Häkchen-Zustand zurück.
+fn form_dialog(
+    ctx: &Ctx,
+    title: &str,
+    fields: &[(&str, String, bool)],
+    checkbox: Option<(&str, bool)>,
+) -> Option<(Vec<String>, bool)> {
+    let dlg = Dialog::builder(&ctx.ui.frame, title).with_size(480, 360).build();
+    let v = BoxSizer::builder(Orientation::Vertical).build();
+    let mut inputs: Vec<TextCtrl> = Vec::new();
+    for (label, default, pw) in fields {
+        let row = BoxSizer::builder(Orientation::Horizontal).build();
+        let lbl = StaticText::builder(&dlg).with_label(label).build();
+        let field = if *pw {
+            TextCtrl::builder(&dlg).with_style(TextCtrlStyle::Password).build()
+        } else {
+            TextCtrl::builder(&dlg).build()
+        };
+        field.set_value(default);
+        crate::ui::set_a11y_name(&field, label);
+        row.add(&lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 6);
+        row.add(&field, 1, SizerFlag::Expand | SizerFlag::All, 6);
+        v.add_sizer(&row, 0, SizerFlag::Expand, 0);
+        inputs.push(field);
+    }
+    let chk = checkbox.map(|(label, val)| {
+        let c = CheckBox::builder(&dlg).with_label(label).build();
+        c.set_value(val);
+        crate::ui::set_a11y_name(&c, label);
+        v.add(&c, 0, SizerFlag::All, 6);
+        c
+    });
+    let brow = BoxSizer::builder(Orientation::Horizontal).build();
+    let ok = Button::builder(&dlg).with_label("OK").build();
+    let cancel = Button::builder(&dlg).with_label("Abbrechen").build();
+    brow.add(&ok, 0, SizerFlag::All, 6);
+    brow.add(&cancel, 0, SizerFlag::All, 6);
+    v.add_sizer(&brow, 0, SizerFlag::All, 6);
+    {
+        let d = dlg;
+        ok.on_click(move |_| d.end_modal(ID_OK));
+    }
+    {
+        let d = dlg;
+        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
+    }
+    dlg.set_sizer(v, true);
+    let result = dlg.show_modal();
+    let out = if result == ID_OK {
+        Some((
+            inputs.iter().map(|f| f.get_value()).collect(),
+            chk.map(|c| c.is_checked()).unwrap_or(false),
+        ))
+    } else {
+        None
+    };
+    dlg.destroy();
+    out
+}
+
+/// Verzeichnis nach einer Änderung neu laden (Event an den UI-Thread).
+fn request_dir_reload(ev_tx: &tokio::sync::mpsc::UnboundedSender<Message>) {
+    let _ = ev_tx.send(Message::new("hub_dir_reload", serde_json::json!({})));
+}
+
+/// Rolle aus der gespeicherten Hub-Sitzung („hub_admin" = Admin).
+fn hub_is_admin() -> bool {
+    matches!(config::load_config().hub, Some(h) if h.role == "hub_admin")
+}
+
 /// Token-Bündel als lokale Hub-Sitzung speichern (vom Hintergrund-Thread aus).
 fn store_session(b: &crate::hub::TokenBundle) {
     let mut cfg = config::load_config();
@@ -462,6 +534,7 @@ pub fn hub_verify(ctx: &Ctx) {
             Ok(Ok(b)) => {
                 store_session(&b);
                 if b.approved {
+                    request_dir_reload(&ev_tx);
                     format!("Angemeldet als {}.", b.username)
                 } else {
                     format!(
@@ -492,6 +565,7 @@ pub fn hub_login(ctx: &Ctx) {
             Ok(Ok(b)) => {
                 store_session(&b);
                 if b.approved {
+                    request_dir_reload(&ev_tx);
                     format!("Angemeldet als {}.", b.username)
                 } else {
                     format!("Angemeldet als {}. Konto wartet noch auf Freigabe.", b.username)
@@ -521,6 +595,9 @@ pub fn hub_logout(ctx: &Ctx) {
     cfg.hub = None;
     let _ = config::save_config(&cfg);
     ctx.st.borrow_mut().hub_view = crate::app::HubView::Login;
+    // Verzeichnis-Liste leeren, damit die nächste Anmeldung frisch lädt.
+    ctx.st.borrow_mut().hub_servers.clear();
+    ctx.ui.hub_servers.clear();
     update_hub_view(ctx);
     let ev_tx = ctx.ev_tx.clone();
     let refresh = h.refresh_token.clone();
@@ -614,14 +691,18 @@ pub fn hub_create_server(ctx: &Ctx) {
         notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
         return;
     }
-    let Some(name) = ask_text(ctx, "Name des Servers:", "Server anlegen", "") else { return };
-    let description = ask_text(ctx, "Beschreibung (optional):", "Server anlegen", "").unwrap_or_default();
-    let is_public = {
-        let dlg = MessageDialog::builder(&ctx.ui.frame, "Soll der Server öffentlich im Verzeichnis erscheinen?", "Server anlegen")
-            .with_style(MessageDialogStyle::YesNo)
-            .build();
-        dlg.show_modal() == ID_YES
-    };
+    let Some((vals, is_public)) = form_dialog(
+        ctx,
+        "Server anlegen",
+        &[("Name:", String::new(), false), ("Beschreibung:", String::new(), false)],
+        Some(("Öffentlich im Verzeichnis", true)),
+    ) else { return };
+    let name = vals[0].trim().to_string();
+    if name.is_empty() {
+        notify(ctx, "Name ist erforderlich.", "Server anlegen");
+        return;
+    }
+    let description = vals[1].clone();
     ctx.ui.append_hub_log("Lege Server an…");
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
@@ -632,13 +713,180 @@ pub fn hub_create_server(ctx: &Ctx) {
             crate::hub::create_server(&access, &name, &description, is_public, "", 0, 0)
         })
         .await;
-        let m = match r {
-            Ok(Ok(_id)) => "Server angelegt. „Verzeichnis laden\" aktualisiert die Liste.".to_string(),
-            Ok(Err(e)) => format!("Server konnte nicht angelegt werden: {}", e),
-            Err(e) => format!("Fehler: {}", e),
-        };
-        hub_msg(&ev_tx, m);
+        match r {
+            Ok(Ok(_id)) => { hub_msg(&ev_tx, "Server angelegt.".to_string()); request_dir_reload(&ev_tx); }
+            Ok(Err(e)) => hub_msg(&ev_tx, format!("Server konnte nicht angelegt werden: {}", e)),
+            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+        }
     });
+}
+
+fn selected_hub_server(ctx: &Ctx) -> Option<crate::hub::ServerInfo> {
+    let idx = ctx.ui.hub_servers.get_selection()? as usize;
+    ctx.st.borrow().hub_servers.get(idx).cloned()
+}
+
+pub fn hub_edit_server(ctx: &Ctx) {
+    let Some(s) = selected_hub_server(ctx) else {
+        notify(ctx, "Bitte zuerst einen Server in der Liste auswählen.", "Server-Hub");
+        return;
+    };
+    let Some((vals, is_public)) = form_dialog(
+        ctx,
+        "Server bearbeiten",
+        &[("Name:", s.name.clone(), false), ("Beschreibung:", s.description.clone(), false)],
+        Some(("Öffentlich im Verzeichnis", s.is_public)),
+    ) else { return };
+    let name = vals[0].trim().to_string();
+    if name.is_empty() {
+        notify(ctx, "Name ist erforderlich.", "Server bearbeiten");
+        return;
+    }
+    let description = vals[1].clone();
+    ctx.ui.append_hub_log("Speichere Server…");
+    let ev_tx = ctx.ev_tx.clone();
+    let (sid, host, cp, ap) = (s.id.clone(), s.host.clone(), s.control_port, s.audio_port);
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || {
+            let access = fresh_access_token()?;
+            crate::hub::update_server(&access, &sid, &name, &description, is_public, &host, cp, ap)
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => { hub_msg(&ev_tx, "Server gespeichert.".to_string()); request_dir_reload(&ev_tx); }
+            Ok(Err(e)) => hub_msg(&ev_tx, format!("Speichern fehlgeschlagen: {}", e)),
+            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+        }
+    });
+}
+
+pub fn hub_delete_server(ctx: &Ctx) {
+    let Some(s) = selected_hub_server(ctx) else {
+        notify(ctx, "Bitte zuerst einen Server in der Liste auswählen.", "Server-Hub");
+        return;
+    };
+    let confirm = {
+        let dlg = MessageDialog::builder(
+            &ctx.ui.frame,
+            &format!("Server „{}\" wirklich löschen?", s.name),
+            "Server löschen",
+        )
+        .with_style(MessageDialogStyle::YesNo)
+        .build();
+        dlg.show_modal() == ID_YES
+    };
+    if !confirm {
+        return;
+    }
+    ctx.ui.append_hub_log("Lösche Server…");
+    let ev_tx = ctx.ev_tx.clone();
+    let sid = s.id.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || {
+            let access = fresh_access_token()?;
+            crate::hub::delete_server(&access, &sid)
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => { hub_msg(&ev_tx, "Server gelöscht.".to_string()); request_dir_reload(&ev_tx); }
+            Ok(Err(e)) => hub_msg(&ev_tx, format!("Löschen fehlgeschlagen: {}", e)),
+            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+        }
+    });
+}
+
+/// Admin: wartende Konten freigeben.
+pub fn hub_admin_pending(ctx: &Ctx) {
+    if !hub_is_admin() {
+        notify(ctx, "Nur für Hub-Admins.", "Admin");
+        return;
+    }
+    let pending = match fresh_access_token().and_then(|t| crate::hub::admin_pending(&t)) {
+        Ok(v) => v,
+        Err(e) => {
+            notify(ctx, &format!("Konnte Freigaben nicht laden: {}", e), "Admin");
+            return;
+        }
+    };
+    if pending.is_empty() {
+        notify(ctx, "Keine wartenden Freigaben.", "Admin");
+        return;
+    }
+    for u in pending {
+        let dlg = MessageDialog::builder(
+            &ctx.ui.frame,
+            &format!("Konto „{}\" ({}) freigeben?", u.display_name, u.username),
+            "Freigaben",
+        )
+        .with_style(MessageDialogStyle::YesNo)
+        .build();
+        if dlg.show_modal() == ID_YES {
+            match fresh_access_token().and_then(|t| crate::hub::admin_approve(&t, &u.central_uid)) {
+                Ok(()) => ctx.ui.append_hub_log(&format!("Konto {} freigegeben.", u.username)),
+                Err(e) => ctx.ui.append_hub_log(&format!("Freigabe fehlgeschlagen: {}", e)),
+            }
+        }
+    }
+}
+
+/// Admin: Nutzer suchen und verwalten (bannen/entsperren/Passwort/Admin).
+pub fn hub_admin_user(ctx: &Ctx) {
+    if !hub_is_admin() {
+        notify(ctx, "Nur für Hub-Admins.", "Admin");
+        return;
+    }
+    let Some(q) = ask_text(ctx, "Benutzer suchen (Name, mind. 3 Zeichen):", "Admin — Nutzer", "") else { return };
+    let results = match fresh_access_token().and_then(|t| crate::hub::search_users(&t, q.trim())) {
+        Ok(v) => v,
+        Err(e) => {
+            notify(ctx, &format!("Suche fehlgeschlagen: {}", e), "Admin");
+            return;
+        }
+    };
+    if results.is_empty() {
+        notify(ctx, "Kein Nutzer gefunden.", "Admin");
+        return;
+    }
+    // Treffer auswählen.
+    let labels: Vec<String> = results.iter().map(|u| format!("{} ({})", u.display_name, u.username)).collect();
+    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let pick = SingleChoiceDialog::builder(&ctx.ui.frame, "Nutzer wählen:", "Admin — Nutzer", &label_refs).build();
+    if pick.show_modal() != ID_OK {
+        return;
+    }
+    let sel = pick.get_selection();
+    if sel < 0 {
+        return;
+    }
+    let u = results[sel as usize].clone();
+    // Aktion wählen.
+    let action_refs: Vec<&str> = vec!["Bannen", "Entsperren", "Passwort zurücksetzen", "Zum Admin machen"];
+    let adlg = SingleChoiceDialog::builder(&ctx.ui.frame, &format!("Aktion für {}:", u.username), "Admin — Aktion", &action_refs).build();
+    if adlg.show_modal() != ID_OK {
+        return;
+    }
+    let ai = adlg.get_selection();
+    if ai < 0 {
+        return;
+    }
+    let uid = u.central_uid.clone();
+    let res = match ai {
+        0 => {
+            let reason = ask_text(ctx, "Grund (optional):", "Bannen", "").unwrap_or_default();
+            fresh_access_token().and_then(|t| crate::hub::admin_ban(&t, &uid, &reason))
+        }
+        1 => fresh_access_token().and_then(|t| crate::hub::admin_unban(&t, &uid)),
+        2 => {
+            let Some(pw) = ask_text(ctx, "Neues Passwort (mind. 8 Zeichen):", "Passwort zurücksetzen", "") else { return };
+            fresh_access_token().and_then(|t| crate::hub::admin_reset_password(&t, &uid, &pw))
+        }
+        3 => fresh_access_token().and_then(|t| crate::hub::admin_promote(&t, &uid)),
+        _ => return,
+    };
+    match res {
+        Ok(()) => notify(ctx, &format!("Aktion für {} ausgeführt.", u.username), "Admin"),
+        Err(e) => notify(ctx, &format!("Aktion fehlgeschlagen: {}", e), "Admin"),
+    }
 }
 
 /// Offene Einladungen laden und einzeln zum Annehmen/Ablehnen anbieten.
@@ -688,8 +936,22 @@ pub fn hub_edit_profile(ctx: &Ctx) {
         notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
         return;
     }
-    let Some(display) = ask_text(ctx, "Anzeigename:", "Profil bearbeiten", "") else { return };
-    let bio = ask_text(ctx, "Über mich (Bio):", "Profil bearbeiten", "").unwrap_or_default();
+    // Aktuelles Profil laden (kurzer blockierender Aufruf) und vorausfüllen.
+    let prof = match fresh_access_token().and_then(|t| crate::hub::get_my_profile(&t)) {
+        Ok(p) => p,
+        Err(e) => {
+            notify(ctx, &format!("Profil konnte nicht geladen werden: {}", e), "Server-Hub");
+            return;
+        }
+    };
+    let Some((vals, _)) = form_dialog(
+        ctx,
+        "Profil bearbeiten",
+        &[("Anzeigename:", prof.display_name, false), ("Über mich (Bio):", prof.bio, false)],
+        None,
+    ) else { return };
+    let display = vals[0].clone();
+    let bio = vals[1].clone();
     ctx.ui.append_hub_log("Speichere Profil…");
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {

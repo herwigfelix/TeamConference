@@ -122,8 +122,12 @@ pub struct Ui {
     pub hub_refresh_btn: Button,
     pub hub_join_btn: Button,
     pub hub_create_btn: Button,
+    pub hub_edit_btn: Button,
+    pub hub_delete_btn: Button,
     pub hub_invites_btn: Button,
     pub hub_profile_btn: Button,
+    pub hub_admin_pending_btn: Button,
+    pub hub_admin_user_btn: Button,
     pub hub_log: TextCtrl,
 
     // Hauptansicht — Räume/Nutzer als nativer Baum (plattformspezifisch:
@@ -301,18 +305,30 @@ impl Ui {
         add_form_row(&hub_account_panel, &av, "Suche:", &hub_search_in);
         let hub_servers = ListBox::builder(&hub_account_panel).build();
         av.add(&hub_servers, 1, SizerFlag::Expand | SizerFlag::All, 4);
+        // Zeile 1: Server-Aktionen
         let drow = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_refresh_btn = Button::builder(&hub_account_panel).with_label("Verzeichnis laden").build();
-        let hub_join_btn = Button::builder(&hub_account_panel).with_label("Mit ausgewähltem verbinden").build();
+        let hub_refresh_btn = Button::builder(&hub_account_panel).with_label("Aktualisieren").build();
+        let hub_join_btn = Button::builder(&hub_account_panel).with_label("Verbinden").build();
         let hub_create_btn = Button::builder(&hub_account_panel).with_label("Server anlegen…").build();
-        let hub_invites_btn = Button::builder(&hub_account_panel).with_label("Einladungen…").build();
-        let hub_profile_btn = Button::builder(&hub_account_panel).with_label("Profil bearbeiten…").build();
+        let hub_edit_btn = Button::builder(&hub_account_panel).with_label("Bearbeiten…").build();
+        let hub_delete_btn = Button::builder(&hub_account_panel).with_label("Löschen").build();
         drow.add(&hub_refresh_btn, 0, SizerFlag::All, 4);
         drow.add(&hub_join_btn, 0, SizerFlag::All, 4);
         drow.add(&hub_create_btn, 0, SizerFlag::All, 4);
-        drow.add(&hub_invites_btn, 0, SizerFlag::All, 4);
-        drow.add(&hub_profile_btn, 0, SizerFlag::All, 4);
+        drow.add(&hub_edit_btn, 0, SizerFlag::All, 4);
+        drow.add(&hub_delete_btn, 0, SizerFlag::All, 4);
         av.add_sizer(&drow, 0, SizerFlag::All, 2);
+        // Zeile 2: Konto + Admin
+        let drow2 = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_invites_btn = Button::builder(&hub_account_panel).with_label("Einladungen…").build();
+        let hub_profile_btn = Button::builder(&hub_account_panel).with_label("Profil bearbeiten…").build();
+        let hub_admin_pending_btn = Button::builder(&hub_account_panel).with_label("Admin: Freigaben…").build();
+        let hub_admin_user_btn = Button::builder(&hub_account_panel).with_label("Admin: Nutzer…").build();
+        drow2.add(&hub_invites_btn, 0, SizerFlag::All, 4);
+        drow2.add(&hub_profile_btn, 0, SizerFlag::All, 4);
+        drow2.add(&hub_admin_pending_btn, 0, SizerFlag::All, 4);
+        drow2.add(&hub_admin_user_btn, 0, SizerFlag::All, 4);
+        av.add_sizer(&drow2, 0, SizerFlag::All, 2);
         hub_account_panel.set_sizer(av, true);
 
         hub_book.add_page(&hub_login_panel, "Anmelden", true, None);
@@ -496,8 +512,12 @@ impl Ui {
             hub_refresh_btn,
             hub_join_btn,
             hub_create_btn,
+            hub_edit_btn,
+            hub_delete_btn,
             hub_invites_btn,
             hub_profile_btn,
+            hub_admin_pending_btn,
+            hub_admin_user_btn,
             hub_log,
             main_panel,
             rooms_tree,
