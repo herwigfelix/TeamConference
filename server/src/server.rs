@@ -60,6 +60,34 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
     // Start UDP audio server
     let udp_server = UdpAudioServer::start(&config, users.clone()).await?;
 
+    // Zentrales Login: Public Key des Identity Providers laden (Override oder
+    // /v2/keys). Schlägt es fehl, läuft der Server ohne zentrales Login weiter.
+    let central = if config.server.central_login {
+        match crate::control::central::CentralVerifier::load(
+            &config.server.central_login_url,
+            &config.server.central_login_pubkey,
+        )
+        .await
+        {
+            Ok(v) => {
+                tracing::info!(
+                    "Zentrales Login aktiv (Identity Provider: {})",
+                    config.server.central_login_url
+                );
+                Some(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Zentrales Login konnte nicht initialisiert werden ({}). Läuft ohne.",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Setup TLS if enabled
     let tls_acceptor = if config.tls.enabled {
         match tls::setup_tls(&config.tls) {
@@ -83,6 +111,7 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
         rooms,
         files,
         udp_server: Some(udp_server),
+        central,
     });
 
     // Start WebSocket server

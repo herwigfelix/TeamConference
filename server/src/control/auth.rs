@@ -14,6 +14,7 @@ pub async fn handle_login(
     db: &Arc<Connection>,
     users: &Arc<UserManager>,
     rooms: &Arc<RoomManager>,
+    central: Option<&crate::control::central::CentralVerifier>,
     tx: mpsc::UnboundedSender<Message>,
 ) -> AuthResponse {
     // Check max users
@@ -39,44 +40,86 @@ pub async fn handle_login(
         error: Some(msg.to_string()),
     };
 
-    // Authenticate. Bei unbekanntem Benutzer und aktivierter Registrierung wird
-    // der Account mit dem angegebenen Passwort angelegt und der Login fortgesetzt.
-    let username = login.username.clone();
-    let password = login.password.clone();
-    let db_user = match queries::authenticate_user(db, username.clone(), password.clone()).await {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            let exists = queries::find_user_by_username(db, username.clone())
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            if exists {
-                // Benutzer existiert → falsches Passwort
-                return reject("Invalid username or password");
+    // ── Anmeldung: zentrales Token ODER lokaler Benutzer/Passwort ──
+    let db_user = if let Some(token) = login.central_token.as_deref() {
+        // Client will zentrales Login.
+        if !config.server.central_login {
+            return reject("Dieser Server unterstützt kein zentrales Login");
+        }
+        let Some(verifier) = central else {
+            return reject("Zentrales Login auf diesem Server nicht verfügbar");
+        };
+        let claims = match verifier.verify(token) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::info!("Zentrales Token abgelehnt: {}", e);
+                return reject("Zentrales Token ungültig — bitte neu anmelden");
             }
-            if !queries::is_registration_open(db).await {
-                return reject("Invalid username or password");
-            }
-            // Registrierung: neuen Account anlegen und einloggen
-            match queries::create_user(db, username.clone(), password, "user".to_string()).await {
-                Ok(id) => {
-                    tracing::info!("Neuer Account per Registrierung angelegt: {}", username);
-                    crate::db::queries::DbUser {
-                        id,
-                        username: username.clone(),
-                        role: "user".to_string(),
+        };
+        if !claims.apr {
+            return reject("Konto noch nicht freigegeben — bitte auf die Freigabe warten");
+        }
+        // Lokalen Account zur zentralen Identität finden oder anlegen.
+        match queries::find_user_by_central_uid(db, claims.sub.clone()).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                let uname = unique_username(db, &claims.un).await;
+                match queries::create_central_user(db, uname.clone(), claims.sub.clone(), "user".to_string()).await {
+                    Ok(id) => {
+                        tracing::info!("Zentraler Account lokal angelegt: {} ({})", uname, claims.sub);
+                        crate::db::queries::DbUser { id, username: uname, role: "user".to_string() }
+                    }
+                    Err(e) => {
+                        tracing::error!("Anlegen des zentralen Accounts fehlgeschlagen: {}", e);
+                        return reject("Konto konnte nicht angelegt werden");
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Registrierung fehlgeschlagen: {}", e);
-                    return reject("Konto konnte nicht angelegt werden");
-                }
+            }
+            Err(e) => {
+                tracing::error!("central_uid-Lookup fehlgeschlagen: {}", e);
+                return reject("Internal server error");
             }
         }
-        Err(e) => {
-            tracing::error!("Auth error: {}", e);
-            return reject("Internal server error");
+    } else {
+        // Klassischer Pfad (Benutzername/Passwort). Bei aktivem central_login
+        // existiert lokal i. d. R. nur der Admin-Account — der kann sich so
+        // weiterhin anmelden.
+        let username = login.username.clone();
+        let password = login.password.clone();
+        match queries::authenticate_user(db, username.clone(), password.clone()).await {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                let exists = queries::find_user_by_username(db, username.clone())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if exists {
+                    return reject("Invalid username or password");
+                }
+                // Selbstregistrierung ist bei zentralem Login deaktiviert.
+                if config.server.central_login || !queries::is_registration_open(db).await {
+                    return reject("Invalid username or password");
+                }
+                match queries::create_user(db, username.clone(), password, "user".to_string()).await {
+                    Ok(id) => {
+                        tracing::info!("Neuer Account per Registrierung angelegt: {}", username);
+                        crate::db::queries::DbUser {
+                            id,
+                            username: username.clone(),
+                            role: "user".to_string(),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Registrierung fehlgeschlagen: {}", e);
+                        return reject("Konto konnte nicht angelegt werden");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Auth error: {}", e);
+                return reject("Internal server error");
+            }
         }
     };
 
@@ -128,4 +171,24 @@ pub async fn handle_login(
         role: Some(db_user.role),
         error: None,
     }
+}
+
+/// Aus dem zentralen Anzeigenamen einen lokal eindeutigen Benutzernamen ableiten
+/// (Sonderzeichen entfernen, bei Kollision Zahl anhängen).
+async fn unique_username(db: &Arc<Connection>, base: &str) -> String {
+    let clean: String = base
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let clean = if clean.is_empty() { "user".to_string() } else { clean };
+    if queries::find_user_by_username(db, clean.clone()).await.ok().flatten().is_none() {
+        return clean;
+    }
+    for i in 2..1000 {
+        let cand = format!("{}{}", clean, i);
+        if queries::find_user_by_username(db, cand.clone()).await.ok().flatten().is_none() {
+            return cand;
+        }
+    }
+    format!("{}-{}", clean, uuid::Uuid::new_v4())
 }

@@ -26,6 +26,14 @@ pub struct ServerConfig {
     /// Anfangswert für die Selbstregistrierung beim ersten Start. Zur Laufzeit
     /// kann ein Admin sie umschalten (in der DB-Tabelle `settings` gespeichert).
     pub allow_registration: bool,
+    /// Zentrales Login (Identity Provider srvhub.accessy.org) nutzen. Ist es an,
+    /// melden sich normale Nutzer mit einem zentralen Access-Token an (statt
+    /// Passwort); nur der lokale Admin-Account bleibt passwortbasiert.
+    pub central_login: bool,
+    /// Basis-URL des zentralen Logins (für die Public-Key-Abfrage /v2/keys).
+    pub central_login_url: String,
+    /// Optionaler Public Key (Hex) — überspringt die /v2/keys-Abfrage beim Start.
+    pub central_login_pubkey: String,
 }
 
 impl Default for ServerConfig {
@@ -35,6 +43,9 @@ impl Default for ServerConfig {
             welcome_message: "Willkommen auf dem TeamConference Server!".into(),
             max_users: 100,
             allow_registration: false,
+            central_login: false,
+            central_login_url: "https://srvhub.accessy.org".into(),
+            central_login_pubkey: String::new(),
         }
     }
 }
@@ -169,6 +180,9 @@ impl Config {
         env_override(&mut self.server.welcome_message, "TC_WELCOME_MESSAGE");
         env_override(&mut self.server.max_users, "TC_MAX_USERS");
         env_override(&mut self.server.allow_registration, "TC_ALLOW_REGISTRATION");
+        env_override(&mut self.server.central_login, "TC_CENTRAL_LOGIN");
+        env_override(&mut self.server.central_login_url, "TC_CENTRAL_LOGIN_URL");
+        env_override(&mut self.server.central_login_pubkey, "TC_CENTRAL_LOGIN_PUBKEY");
 
         env_override(&mut self.network.control_host, "TC_CONTROL_HOST");
         env_override(&mut self.network.control_port, "TC_CONTROL_PORT");

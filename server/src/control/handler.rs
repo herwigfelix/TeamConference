@@ -56,6 +56,9 @@ pub struct SharedState {
     pub rooms: Arc<RoomManager>,
     pub files: Arc<FileHandler>,
     pub udp_server: Option<Arc<UdpAudioServer>>,
+    /// Prüfer für zentrale Access-Tokens; `Some`, wenn `central_login` aktiv ist
+    /// und der Public Key des Identity Providers geladen werden konnte.
+    pub central: Option<crate::control::central::CentralVerifier>,
 }
 
 pub async fn handle_connection<S>(
@@ -120,6 +123,7 @@ pub async fn handle_connection<S>(
                     &state.db,
                     &state.users,
                     &state.rooms,
+                    state.central.as_ref(),
                     tx.clone(),
                 ).await;
 

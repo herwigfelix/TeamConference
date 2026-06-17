@@ -31,6 +31,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Seit reqwest (aws-lc-rs) neben tokio-tungstenite (ring) im Build ist, kann
+    // rustls den Krypto-Provider nicht mehr automatisch wählen. Wir legen ring
+    // explizit als Prozess-Default fest (gilt für TLS-Server UND reqwest).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args = Args::parse();
 
     let cfg = config::Config::load(&args.config)?;

@@ -31,10 +31,16 @@ impl Message {
 // Auth
 #[derive(Debug, Deserialize)]
 pub struct AuthLogin {
+    #[serde(default)]
     pub username: String,
+    #[serde(default)]
     pub password: String,
     #[serde(default)]
     pub nickname: Option<String>,
+    /// Zentrales Access-Token (EdDSA-JWT). Ist es gesetzt und der Server hat
+    /// `central_login` an, wird damit angemeldet (statt mit Passwort).
+    #[serde(default)]
+    pub central_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

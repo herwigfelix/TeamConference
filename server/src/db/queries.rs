@@ -451,6 +451,51 @@ pub async fn delete_room_file(conn: &Connection, file_id: i64) -> anyhow::Result
 
 // ── Account-Verwaltung ──
 
+/// Lokalen Account zu einer zentralen Identität (central_uid) finden.
+pub async fn find_user_by_central_uid(
+    conn: &Connection,
+    central_uid: String,
+) -> anyhow::Result<Option<DbUser>> {
+    conn.call(move |conn| {
+        let mut stmt =
+            conn.prepare("SELECT id, username, role FROM users WHERE central_uid = ?1")?;
+        let result = stmt.query_row(rusqlite::params![central_uid], |row| {
+            Ok(DbUser {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                role: row.get(2)?,
+            })
+        });
+        match result {
+            Ok(u) => Ok(Some(u)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Lookup by central_uid failed: {}", e))
+}
+
+/// Lokalen Account für eine zentrale Identität anlegen. Kein Passwort
+/// (zentrale Nutzer melden sich per Token an); `username` muss eindeutig sein —
+/// bei Kollision hängt der Aufrufer einen Suffix an.
+pub async fn create_central_user(
+    conn: &Connection,
+    username: String,
+    central_uid: String,
+    role: String,
+) -> anyhow::Result<i64> {
+    conn.call(move |conn| {
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role, central_uid) VALUES (?1, '', ?2, ?3)",
+            rusqlite::params![username, role, central_uid],
+        )?;
+        Ok(conn.last_insert_rowid())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create central user: {}", e))
+}
+
 /// Find a user by name without verifying a password (existence check).
 pub async fn find_user_by_username(
     conn: &Connection,
