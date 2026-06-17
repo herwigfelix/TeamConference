@@ -58,41 +58,119 @@ pub async fn start_udp_audio(
         let mut decoders: HashMap<(u32, u8, u8), opus::Decoder> = HashMap::new();
         let mut pcm_out = vec![0i16; 960 * 2];
 
-        // Misch-Akkumulator: überlappende Quellen werden je Sample summiert.
-        // Geflusht wird, sobald dieselbe Quelle erneut sendet (= ein neues
-        // 20-ms-Fenster beginnt). Bei nur einer Quelle also Frame für Frame wie
-        // der direkte Pfad (kein Wanduhr-Takt → kein Schweben/Stottern); bei
-        // mehreren Quellen werden gleichzeitige Frames gemischt. Eine kurze
-        // Inaktivitäts-Frist gibt ein letztes hängendes Frame aus, wenn Quellen
-        // verstummen.
-        let mut acc: Vec<i32> = Vec::new();
-        let mut acc_sources: Vec<(u32, u8)> = Vec::new();
-        let mut acc_started: Option<tokio::time::Instant> = None;
-        let mut safety = tokio::time::interval(tokio::time::Duration::from_millis(8));
+        // Sample-getakteter Mischer: jede Quelle hat eine eigene Frame-Schlange
+        // (bereits im Wiedergabeformat, 20-ms-Frames). Eine selbstkorrigierende
+        // 20-ms-Uhr (wie das Datei-Pacing) gibt pro 20 ms GENAU EIN gemischtes
+        // Frame aus. Damit hängt die Ausgaberate nicht mehr an der Ankunfts-
+        // reihenfolge der Quellen: Zwei gleichzeitige Quellen (z. B. lokales
+        // Mithören per Loopback + ein entfernter Nutzer) liefern weiterhin
+        // Echtzeit-Tempo, statt den Wiedergabepuffer doppelt schnell zu füllen
+        // (das verursachte das Stottern). Jede Schlange puffert ein paar Frames
+        // (PRIME) als Mini-Jitterpuffer; der nachgelagerte adaptive Puffer in
+        // playback.rs glättet die Geräte-Drift zusätzlich.
+        const PRIME_FRAMES: usize = 2; // ~40 ms anpuffern, bevor eine Quelle läuft
+        const MAX_QUEUE: usize = 25; // ~500 ms Deckel gegen Drift/Bursts
+        const IDLE_RESET_TICKS: u64 = 10; // ~200 ms Stille → Uhr anhalten
+        const LOCAL_KEY: (u32, u8) = (u32::MAX, crate::protocol::SOURCE_FILE);
+        let mut sources: HashMap<(u32, u8), Source> = HashMap::new();
+        let mut clock: Option<tokio::time::Instant> = None;
+        let mut emitted: u64 = 0;
+        let mut idle_ticks: u64 = 0;
 
         loop {
+            // Nächster Misch-Tick: wenn die Uhr läuft, exakt bei
+            // start + emitted*20 ms (selbstkorrigierend); sonst nie.
+            let tick = async {
+                match clock {
+                    Some(start) => {
+                        tokio::time::sleep_until(
+                            start + tokio::time::Duration::from_millis(emitted * 20),
+                        )
+                        .await
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             tokio::select! {
                 _ = recv_shutdown_rx.changed() => { break; }
 
-                // Sicherheits-Flush: hängendes Frame ausgeben, wenn ~24 ms lang
-                // keine weitere (wiederholende) Quelle kam.
-                _ = safety.tick() => {
-                    if let Some(t0) = acc_started {
-                        if t0.elapsed() >= tokio::time::Duration::from_millis(24) {
-                            flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
+                // Misch-Tick: ein 20-ms-Frame aus allen aktiven Quellen mischen.
+                _ = tick => {
+                    let gains: HashMap<u32, f32> = {
+                        let inner = recv_state.inner.lock();
+                        sources
+                            .keys()
+                            .map(|(token, _)| {
+                                let g = inner
+                                    .token_to_user
+                                    .get(token)
+                                    .map(|uid| inner.user_volume(*uid))
+                                    .unwrap_or(1.0);
+                                (*token, g)
+                            })
+                            .collect()
+                    };
+
+                    let mut mix: Vec<i32> = Vec::new();
+                    let mut any = false;
+                    for (key, src) in sources.iter_mut() {
+                        // Quelle erst starten, wenn sie genug angepuffert hat.
+                        if !src.started {
+                            if src.queue.len() >= PRIME_FRAMES {
+                                src.started = true;
+                            } else {
+                                continue;
+                            }
                         }
+                        // Ein Frame entnehmen; ist die Schlange (Jitter) leer,
+                        // trägt die Quelle für diesen Tick nichts bei (Stille).
+                        if let Some(frame) = src.queue.pop_front() {
+                            let gain = if key.0 == u32::MAX {
+                                1.0
+                            } else {
+                                gains.get(&key.0).copied().unwrap_or(1.0)
+                            };
+                            mix_add(&mut mix, &frame, gain);
+                            any = true;
+                        }
+                    }
+
+                    if any {
+                        let out = mix_to_bytes(&mix);
+                        let tx = recv_state.playback_tx.lock();
+                        if let Some(ref tx) = *tx {
+                            let _ = tx.try_send(out);
+                        }
+                        idle_ticks = 0;
+                    } else {
+                        idle_ticks += 1;
+                    }
+                    emitted += 1;
+
+                    // Anhaltend keine Daten → Uhr stoppen, Quellen neu anpuffern.
+                    if idle_ticks >= IDLE_RESET_TICKS
+                        && sources.values().all(|s| s.queue.is_empty())
+                    {
+                        clock = None;
+                        emitted = 0;
+                        idle_ticks = 0;
+                        sources.retain(|_, s| {
+                            s.started = false;
+                            !s.queue.is_empty()
+                        });
                     }
                 }
 
-                // Lokal eingespeistes Audio (gestreamte Datei, Wiedergabeformat).
+                // Lokal eingespeistes Audio (Loopback-Mithören oder gestreamte
+                // Datei, bereits im Wiedergabeformat).
                 Some(frame) = local_rx.recv() => {
-                    let key = (u32::MAX, crate::protocol::SOURCE_FILE);
-                    if acc_sources.contains(&key) {
-                        flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
+                    enqueue_frame(&mut sources, LOCAL_KEY, frame, MAX_QUEUE);
+                    if clock.is_none() {
+                        clock = Some(tokio::time::Instant::now());
+                        emitted = 0;
+                        idle_ticks = 0;
                     }
-                    acc_add_i16(&mut acc, &frame);
-                    acc_sources.push(key);
-                    if acc_started.is_none() { acc_started = Some(tokio::time::Instant::now()); }
                 }
 
                 result = recv_socket.recv_from(&mut buf) => {
@@ -101,16 +179,9 @@ pub async fn start_udp_audio(
                             if let Some(header) = AudioPacketHeader::parse(&buf[..len]) {
                                 let payload = header.payload(&buf[..len]);
 
-                                let (deafened, own_token, user_gain) = {
+                                let (deafened, own_token) = {
                                     let inner = recv_state.inner.lock();
-                                    // Lokale Lautstärke des Nutzers, dem dieses Token gehört
-                                    // (1.0, wenn unbekannt oder nicht gesetzt).
-                                    let gain = inner
-                                        .token_to_user
-                                        .get(&header.token)
-                                        .map(|uid| inner.user_volume(*uid))
-                                        .unwrap_or(1.0);
-                                    (inner.deafened, inner.session_token.unwrap_or(0), gain)
+                                    (inner.deafened, inner.session_token.unwrap_or(0))
                                 };
 
                                 // Eigenen, vom Server zurückgespiegelten Datei-Strom
@@ -162,19 +233,17 @@ pub async fn start_udp_audio(
                                     if let Some(pcm_data) = pcm {
                                         let dev_ch = recv_state.inner.lock().playback_device_channels;
                                         let converted = convert_channels(&pcm_data, ch as u16, dev_ch);
+                                        let frame: Vec<i16> = converted
+                                            .chunks_exact(2)
+                                            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                            .collect();
                                         let key = (header.token, header.source_id);
-                                        // Wiederholt sich die Quelle, beginnt ein neues
-                                        // Fenster → vorheriges Gemisch ausgeben.
-                                        if acc_sources.contains(&key) {
-                                            flush_acc(&mut acc, &mut acc_sources, &mut acc_started, &recv_state);
+                                        enqueue_frame(&mut sources, key, frame, MAX_QUEUE);
+                                        if clock.is_none() {
+                                            clock = Some(tokio::time::Instant::now());
+                                            emitted = 0;
+                                            idle_ticks = 0;
                                         }
-                                        if (user_gain - 1.0).abs() < f32::EPSILON {
-                                            acc_add_bytes(&mut acc, &converted);
-                                        } else {
-                                            acc_add_bytes_gain(&mut acc, &converted, user_gain);
-                                        }
-                                        acc_sources.push(key);
-                                        if acc_started.is_none() { acc_started = Some(tokio::time::Instant::now()); }
                                     }
                                 }
 
@@ -200,66 +269,56 @@ pub async fn start_udp_audio(
     Ok((send_shutdown_tx, recv_shutdown_tx))
 }
 
-/// i16-LE-Bytes in den Misch-Akkumulator addieren (resize bei Bedarf).
-fn acc_add_bytes(acc: &mut Vec<i32>, bytes: &[u8]) {
-    let n = bytes.len() / 2;
-    if acc.len() < n {
-        acc.resize(n, 0);
-    }
-    for i in 0..n {
-        acc[i] += i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as i32;
-    }
+/// Eine Quelle (Nutzer-Token + Quellen-ID) im sample-getakteten Mischer: eine
+/// Schlange fertiger 20-ms-Frames (Wiedergabeformat) plus ein „läuft schon"-
+/// Flag, das erst nach dem Anpuffern (PRIME_FRAMES) gesetzt wird.
+struct Source {
+    queue: std::collections::VecDeque<Vec<i16>>,
+    started: bool,
 }
 
-/// Wie `acc_add_bytes`, aber skaliert jedes Sample vorher mit `gain`
-/// (lokale Pro-Nutzer-Lautstärke). Begrenzung erfolgt erst beim Flush.
-fn acc_add_bytes_gain(acc: &mut Vec<i32>, bytes: &[u8], gain: f32) {
-    let n = bytes.len() / 2;
-    if acc.len() < n {
-        acc.resize(n, 0);
-    }
-    for i in 0..n {
-        let s = i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as f32;
-        acc[i] += (s * gain) as i32;
-    }
-}
-
-/// i16-Samples in den Misch-Akkumulator addieren (resize bei Bedarf).
-fn acc_add_i16(acc: &mut Vec<i32>, samples: &[i16]) {
-    if acc.len() < samples.len() {
-        acc.resize(samples.len(), 0);
-    }
-    for (i, &v) in samples.iter().enumerate() {
-        acc[i] += v as i32;
-    }
-}
-
-/// Aktuelles Gemisch an die Wiedergabe geben und den Akkumulator zurücksetzen.
-fn flush_acc(
-    acc: &mut Vec<i32>,
-    acc_sources: &mut Vec<(u32, u8)>,
-    acc_started: &mut Option<tokio::time::Instant>,
-    state: &Arc<AppState>,
+/// Ein 20-ms-Frame in die Schlange der Quelle legen (Schlange bei Bedarf neu
+/// anlegen). Über `max_queue` hinaus wird das älteste Frame verworfen — so kann
+/// eine schneller als die Mischuhr liefernde Quelle den Speicher nicht fluten.
+fn enqueue_frame(
+    sources: &mut HashMap<(u32, u8), Source>,
+    key: (u32, u8),
+    frame: Vec<i16>,
+    max_queue: usize,
 ) {
-    acc_sources.clear();
-    *acc_started = None;
-    if acc.is_empty() {
-        return;
-    }
-    let out = acc_flush(acc); // leert acc
-    let tx = state.playback_tx.lock();
-    if let Some(ref tx) = *tx {
-        let _ = tx.try_send(out);
+    let src = sources.entry(key).or_insert_with(|| Source {
+        queue: std::collections::VecDeque::new(),
+        started: false,
+    });
+    src.queue.push_back(frame);
+    while src.queue.len() > max_queue {
+        src.queue.pop_front();
     }
 }
 
-/// Akkumulator zu i16-LE-Bytes (mit Begrenzung) leeren.
-fn acc_flush(acc: &mut Vec<i32>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(acc.len() * 2);
-    for &v in acc.iter() {
+/// Ein Frame (skaliert mit `gain`) in den Misch-Akkumulator addieren
+/// (resize bei Bedarf). Begrenzung erfolgt erst in `mix_to_bytes`.
+fn mix_add(mix: &mut Vec<i32>, frame: &[i16], gain: f32) {
+    if mix.len() < frame.len() {
+        mix.resize(frame.len(), 0);
+    }
+    if (gain - 1.0).abs() < f32::EPSILON {
+        for (i, &s) in frame.iter().enumerate() {
+            mix[i] += s as i32;
+        }
+    } else {
+        for (i, &s) in frame.iter().enumerate() {
+            mix[i] += (s as f32 * gain) as i32;
+        }
+    }
+}
+
+/// Misch-Akkumulator zu i16-LE-Bytes (mit Begrenzung) wandeln.
+fn mix_to_bytes(mix: &[i32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(mix.len() * 2);
+    for &v in mix {
         out.extend_from_slice(&(v.clamp(-32768, 32767) as i16).to_le_bytes());
     }
-    acc.clear();
     out
 }
 
