@@ -510,6 +510,98 @@ pub fn hub_reset_start(ctx: &Ctx) {
     });
 }
 
+/// Frisches Access-Token aus der gespeicherten Sitzung holen (Refresh-Rotation,
+/// neue Token werden gespeichert). Nur vom Hintergrund-Thread aus aufrufen.
+fn fresh_access_token() -> Result<String, String> {
+    let session = config::load_config().hub.ok_or_else(|| "Nicht im Hub angemeldet".to_string())?;
+    let bundle = crate::hub::refresh(&session.refresh_token)?;
+    store_session(&bundle);
+    Ok(bundle.access_token)
+}
+
+pub fn hub_load_directory(ctx: &Ctx) {
+    if config::load_config().hub.is_none() {
+        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        return;
+    }
+    let q = ctx.ui.hub_search_in.get_value().trim().to_string();
+    ctx.ui.append_hub_log("Lade Verzeichnis…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || {
+            let access = fresh_access_token()?;
+            crate::hub::list_servers(&access, &q)
+        })
+        .await;
+        match r {
+            Ok(Ok(servers)) => {
+                let _ = ev_tx.send(Message::new(
+                    "hub_servers",
+                    serde_json::json!({ "servers": servers }),
+                ));
+            }
+            Ok(Err(e)) => hub_msg(&ev_tx, format!("Verzeichnis konnte nicht geladen werden: {}", e)),
+            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+        }
+    });
+}
+
+pub fn hub_join_selected(ctx: &Ctx) {
+    let Some(idx) = ctx.ui.hub_servers.get_selection() else {
+        notify(ctx, "Bitte zuerst einen Server im Verzeichnis auswählen.", "Server-Hub");
+        return;
+    };
+    let server = ctx.st.borrow().hub_servers.get(idx as usize).cloned();
+    let Some(s) = server else { return };
+    if s.host.trim().is_empty() {
+        notify(ctx, "Für diesen Server ist keine Adresse hinterlegt.", "Server-Hub");
+        return;
+    }
+    // Verbindungsformular füllen, zentrales Login wählen, zur Serverliste
+    // wechseln und verbinden.
+    ctx.ui.host_in.set_value(&s.host);
+    ctx.ui.port_in.set_value(&s.control_port.to_string());
+    ctx.ui.ssl_chk.set_value(true);
+    ctx.ui.use_central_chk.set_value(true);
+    ctx.ui.notebook.set_selection(0);
+    do_connect(ctx);
+}
+
+pub fn hub_create_server(ctx: &Ctx) {
+    if config::load_config().hub.is_none() {
+        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        return;
+    }
+    let Some(name) = ask_text(ctx, "Name des Servers:", "Server anlegen", "") else { return };
+    let description = ask_text(ctx, "Beschreibung (optional):", "Server anlegen", "").unwrap_or_default();
+    let host = ask_text(ctx, "Adresse/Host des TeamConference-Servers:", "Server anlegen", "").unwrap_or_default();
+    let control_port: i64 = ask_text(ctx, "Steuer-Port:", "Server anlegen", "10001")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(10001);
+    let audio_port = control_port + 1;
+    let is_public = {
+        let dlg = MessageDialog::builder(&ctx.ui.frame, "Soll der Server öffentlich im Verzeichnis erscheinen?", "Server anlegen")
+            .with_style(MessageDialogStyle::YesNo)
+            .build();
+        dlg.show_modal() == ID_YES
+    };
+    ctx.ui.append_hub_log("Lege Server an…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || {
+            let access = fresh_access_token()?;
+            crate::hub::create_server(&access, &name, &description, is_public, &host, control_port, audio_port)
+        })
+        .await;
+        let m = match r {
+            Ok(Ok(_id)) => "Server angelegt. „Verzeichnis laden\" aktualisiert die Liste.".to_string(),
+            Ok(Err(e)) => format!("Server konnte nicht angelegt werden: {}", e),
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
+}
+
 pub fn hub_reset_confirm(ctx: &Ctx) {
     let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
     let code = ctx.ui.hub_code_in.get_value().trim().to_string();

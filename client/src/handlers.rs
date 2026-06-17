@@ -126,6 +126,25 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             crate::actions::notify(ctx, &text, "Server-Hub");
         }
 
+        // Server-Hub: aktualisiertes Verzeichnis → Liste füllen.
+        "hub_servers" => {
+            let servers: Vec<crate::hub::ServerInfo> = serde_json::from_value(
+                msg.data.get("servers").cloned().unwrap_or_default(),
+            )
+            .unwrap_or_default();
+            ui.hub_servers.clear();
+            for s in &servers {
+                let label = if s.host.is_empty() {
+                    s.name.clone()
+                } else {
+                    format!("{} — {}:{}", s.name, s.host, s.control_port)
+                };
+                ui.hub_servers.append(&label);
+            }
+            ctx.st.borrow_mut().hub_servers = servers;
+            ui.append_hub_log("Verzeichnis aktualisiert.");
+        }
+
         // Auto-Updater: neue Version verfügbar → nachfragen und ggf. laden.
         "client_update" => {
             let version = msg.data.get("version").and_then(|v| v.as_str()).unwrap_or("?").to_string();

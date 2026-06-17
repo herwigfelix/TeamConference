@@ -65,6 +65,102 @@ fn bundle(v: serde_json::Value) -> Result<TokenBundle, String> {
     serde_json::from_value(v).map_err(|e| format!("Antwort unlesbar: {}", e))
 }
 
+fn get_auth(path: &str, token: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", base_url(), path);
+    match ureq::get(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .call()
+    {
+        Ok(resp) => resp
+            .into_json::<serde_json::Value>()
+            .map_err(|e| format!("Antwort unlesbar: {}", e)),
+        Err(ureq::Error::Status(_c, resp)) => Err(resp
+            .into_json::<serde_json::Value>()
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "Serverfehler".into())),
+        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+    }
+}
+
+fn post_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", base_url(), path);
+    match ureq::post(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(resp) => resp
+            .into_json::<serde_json::Value>()
+            .map_err(|e| format!("Antwort unlesbar: {}", e)),
+        Err(ureq::Error::Status(_c, resp)) => Err(resp
+            .into_json::<serde_json::Value>()
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "Serverfehler".into())),
+        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+    }
+}
+
+/// Eintrag aus dem Server-Verzeichnis.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, Default)]
+pub struct ServerInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub control_port: i64,
+    #[serde(default)]
+    pub audio_port: i64,
+}
+
+/// Öffentliches Verzeichnis laden/durchsuchen.
+pub fn list_servers(access_token: &str, q: &str) -> Result<Vec<ServerInfo>, String> {
+    let path = if q.is_empty() {
+        "/servers".to_string()
+    } else {
+        format!("/servers?q={}", urlencode(q))
+    };
+    let v = get_auth(&path, access_token)?;
+    let arr = v.get("servers").cloned().unwrap_or_default();
+    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+/// Neuen Server im Hub anlegen → server_id.
+pub fn create_server(
+    access_token: &str,
+    name: &str,
+    description: &str,
+    is_public: bool,
+    host: &str,
+    control_port: i64,
+    audio_port: i64,
+) -> Result<String, String> {
+    let v = post_auth(
+        "/servers",
+        access_token,
+        json!({
+            "name": name, "description": description, "is_public": is_public,
+            "host": host, "control_port": control_port, "audio_port": audio_port,
+        }),
+    )?;
+    Ok(v.get("server_id").and_then(|s| s.as_str()).unwrap_or("").to_string())
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
 /// Registrierung anstoßen → der Hub schickt einen SMS-/WhatsApp-Code.
 pub fn register(
     phone: &str,

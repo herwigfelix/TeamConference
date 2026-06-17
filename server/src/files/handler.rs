@@ -22,6 +22,8 @@ pub struct FileHandler {
     db: Arc<Connection>,
     upload_dir: PathBuf,
     max_upload_size: i64,
+    /// Gesamt-Speicherlimit des Servers in Byte (0 = unbegrenzt).
+    file_limit_bytes: i64,
     pending_uploads: RwLock<HashMap<String, PendingUpload>>,
 }
 
@@ -34,6 +36,7 @@ impl FileHandler {
             db,
             upload_dir,
             max_upload_size: config.storage.max_upload_size_mb as i64 * 1024 * 1024,
+            file_limit_bytes: config.storage.file_limit_bytes,
             pending_uploads: RwLock::new(HashMap::new()),
         })
     }
@@ -45,6 +48,25 @@ impl FileHandler {
     ) -> anyhow::Result<FileUploadAck> {
         if req.size > self.max_upload_size {
             anyhow::bail!("File too large (max {} MB)", self.max_upload_size / 1024 / 1024);
+        }
+
+        // Gesamt-Speicherlimit des Servers prüfen (Bestand + laufende Uploads + neu).
+        if self.file_limit_bytes > 0 {
+            let stored = queries::total_storage_bytes(&self.db).await.unwrap_or(0);
+            let pending: i64 = self
+                .pending_uploads
+                .read()
+                .await
+                .values()
+                .map(|u| u.size)
+                .sum();
+            if stored + pending + req.size > self.file_limit_bytes {
+                let gib = self.file_limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                anyhow::bail!(
+                    "Speicherlimit des Servers erreicht (max {:.1} GB) — bitte Dateien löschen oder Limit erhöhen lassen",
+                    gib
+                );
+            }
         }
 
         let upload_id = uuid::Uuid::new_v4().to_string();

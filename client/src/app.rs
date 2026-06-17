@@ -28,6 +28,8 @@ pub struct AccountDialogRef {
 pub struct UiState {
     /// Serverliste (entspricht den Einträgen der server_list-ListBox)
     pub servers: Vec<ServerEntry>,
+    /// Hub-Verzeichnis (entspricht den Einträgen der hub_servers-ListBox)
+    pub hub_servers: Vec<crate::hub::ServerInfo>,
     /// Dateien der Dateiliste (entspricht den Einträgen der files-ListBox)
     pub files: Vec<FileInfo>,
     /// DataViewItem-Pointer → Baumknoten (nur macOS/Linux genutzt)

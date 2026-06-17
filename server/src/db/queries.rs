@@ -575,6 +575,17 @@ pub async fn update_role(conn: &Connection, user_id: i64, role: String) -> anyho
     .map_err(|e| anyhow::anyhow!("Updating role failed: {}", e))
 }
 
+/// Summe aller gespeicherten Datei-Größen (für das Server-Speicherlimit).
+pub async fn total_storage_bytes(conn: &Connection) -> anyhow::Result<i64> {
+    conn.call(|conn| {
+        let mut stmt = conn.prepare("SELECT COALESCE(SUM(size_bytes), 0) FROM room_files")?;
+        let total: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(total)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Storage sum failed: {}", e))
+}
+
 // ── Server-Einstellungen (Key-Value) ──
 
 pub async fn get_setting(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {

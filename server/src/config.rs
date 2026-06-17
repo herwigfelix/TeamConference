@@ -118,6 +118,9 @@ pub struct StorageConfig {
     pub database_path: String,
     pub upload_dir: String,
     pub max_upload_size_mb: u64,
+    /// Gesamt-Speicherlimit dieses (Unter-)Servers in Byte. Default 2 GiB; im
+    /// Hub pro Unterserver gesetzt und von Hub-Admins erweiterbar.
+    pub file_limit_bytes: i64,
 }
 
 impl Default for StorageConfig {
@@ -126,6 +129,7 @@ impl Default for StorageConfig {
             database_path: "data/teamconference.db".into(),
             upload_dir: "data/uploads".into(),
             max_upload_size_mb: 100,
+            file_limit_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -203,6 +207,7 @@ impl Config {
         env_override(&mut self.storage.database_path, "TC_DATABASE_PATH");
         env_override(&mut self.storage.upload_dir, "TC_UPLOAD_DIR");
         env_override(&mut self.storage.max_upload_size_mb, "TC_MAX_UPLOAD_SIZE_MB");
+        env_override(&mut self.storage.file_limit_bytes, "TC_FILE_LIMIT_BYTES");
 
         env_override(&mut self.logging.level, "TC_LOG_LEVEL");
     }

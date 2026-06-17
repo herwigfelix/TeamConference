@@ -103,6 +103,12 @@ pub struct Ui {
     pub hub_verify_btn: Button,
     pub hub_reset_btn: Button,
     pub hub_reset_confirm_btn: Button,
+    // Server-Verzeichnis im Hub-Tab
+    pub hub_search_in: TextCtrl,
+    pub hub_servers: ListBox,
+    pub hub_refresh_btn: Button,
+    pub hub_join_btn: Button,
+    pub hub_create_btn: Button,
     pub hub_log: TextCtrl,
 
     // Hauptansicht — Räume/Nutzer als nativer Baum (plattformspezifisch:
@@ -242,6 +248,21 @@ impl Ui {
         code_row.add(&hub_reset_confirm_btn, 0, SizerFlag::All, 4);
         hv.add_sizer(&code_row, 0, SizerFlag::All, 2);
 
+        // Server-Verzeichnis
+        hv.add(&StaticText::builder(&hub_panel).with_label("Server-Verzeichnis").build(), 0, SizerFlag::All, 4);
+        let hub_search_in = TextCtrl::builder(&hub_panel).build();
+        add_form_row(&hub_panel, &hv, "Suche:", &hub_search_in);
+        let hub_servers = ListBox::builder(&hub_panel).build();
+        hv.add(&hub_servers, 1, SizerFlag::Expand | SizerFlag::All, 4);
+        let dir_row = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_refresh_btn = Button::builder(&hub_panel).with_label("Verzeichnis laden").build();
+        let hub_join_btn = Button::builder(&hub_panel).with_label("Mit ausgewähltem verbinden").build();
+        let hub_create_btn = Button::builder(&hub_panel).with_label("Server anlegen…").build();
+        dir_row.add(&hub_refresh_btn, 0, SizerFlag::All, 4);
+        dir_row.add(&hub_join_btn, 0, SizerFlag::All, 4);
+        dir_row.add(&hub_create_btn, 0, SizerFlag::All, 4);
+        hv.add_sizer(&dir_row, 0, SizerFlag::All, 2);
+
         let hub_log = TextCtrl::builder(&hub_panel)
             .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
             .build();
@@ -361,6 +382,8 @@ impl Ui {
         set_a11y_name(&hub_reg_display_in, "Anzeigename");
         set_a11y_name(&hub_reg_pass_in, "Passwort oder neues Passwort");
         set_a11y_name(&hub_code_in, "Bestätigungscode");
+        set_a11y_name(&hub_search_in, "Verzeichnis durchsuchen");
+        set_a11y_name(&hub_servers, "Server im Verzeichnis");
         set_a11y_name(&hub_log, "Server-Hub Meldungen");
         set_a11y_name(&rooms_tree, "Räume und Nutzer");
         set_a11y_name(&chat_log, "Chatverlauf");
@@ -398,6 +421,11 @@ impl Ui {
             hub_verify_btn,
             hub_reset_btn,
             hub_reset_confirm_btn,
+            hub_search_in,
+            hub_servers,
+            hub_refresh_btn,
+            hub_join_btn,
+            hub_create_btn,
             hub_log,
             main_panel,
             rooms_tree,

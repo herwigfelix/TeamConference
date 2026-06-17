@@ -222,6 +222,18 @@ fn wire_events(ctx: &Ctx) {
         ui.hub_reset_confirm_btn
             .on_click(move |_| actions::hub_reset_confirm(&ctx));
     }
+    {
+        let ctx = ctx.clone();
+        ui.hub_refresh_btn.on_click(move |_| actions::hub_load_directory(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_join_btn.on_click(move |_| actions::hub_join_selected(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_create_btn.on_click(move |_| actions::hub_create_server(&ctx));
+    }
 
     // Hauptansicht
     {
