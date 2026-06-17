@@ -14,6 +14,7 @@ mod app;
 mod audio;
 mod config;
 mod handlers;
+mod hub;
 mod net;
 mod protocol;
 mod roomtree;
@@ -125,7 +126,10 @@ fn main() {
             ui.user_in.set_value(&first.username);
             ui.nick_in.set_value(&first.nickname);
             ui.pass_in.set_value(&first.password);
+            ui.use_central_chk.set_value(first.use_central);
         }
+        // Hub-Status aus gespeicherter Sitzung anzeigen.
+        actions::update_hub_status(&ctx);
 
         wire_events(&ctx);
         wire_audio_hotkeys(&ctx);
@@ -190,6 +194,33 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.server_list
             .on_selection_changed(move |_| actions::fill_form_from_server(&ctx));
+    }
+
+    // Reiter „Server-Hub"
+    {
+        let ctx = ctx.clone();
+        ui.hub_login_btn.on_click(move |_| actions::hub_login(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_logout_btn.on_click(move |_| actions::hub_logout(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_register_btn.on_click(move |_| actions::hub_register(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_verify_btn.on_click(move |_| actions::hub_verify(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_reset_btn.on_click(move |_| actions::hub_reset_start(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_reset_confirm_btn
+            .on_click(move |_| actions::hub_reset_confirm(&ctx));
     }
 
     // Hauptansicht

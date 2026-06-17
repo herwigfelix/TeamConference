@@ -67,8 +67,11 @@ pub const ID_CHECK_UPDATE: i32 = ID_HIGHEST + 33;
 #[derive(Clone, Copy)]
 pub struct Ui {
     pub frame: Frame,
+    /// Reiter vor dem Verbinden: „Serverliste" + „Server-Hub".
+    pub notebook: Notebook,
 
-    // Verbindungsansicht
+    // Verbindungsansicht (Reiter „Serverliste")
+    #[allow(dead_code)]
     pub connect_panel: Panel,
     pub server_list: ListBox,
     pub host_in: TextCtrl,
@@ -77,9 +80,30 @@ pub struct Ui {
     pub user_in: TextCtrl,
     pub pass_in: TextCtrl,
     pub nick_in: TextCtrl,
+    /// „Zentrales Login verwenden" für diesen Server (statt Passwort).
+    pub use_central_chk: CheckBox,
     pub connect_btn: Button,
     pub bookmark_btn: Button,
     pub remove_btn: Button,
+
+    // Reiter „Server-Hub" (zentrales Login)
+    #[allow(dead_code)]
+    pub hub_panel: Panel,
+    pub hub_status: StaticText,
+    pub hub_ident_in: TextCtrl,
+    pub hub_login_pass_in: TextCtrl,
+    pub hub_login_btn: Button,
+    pub hub_logout_btn: Button,
+    pub hub_phone_in: TextCtrl,
+    pub hub_reg_user_in: TextCtrl,
+    pub hub_reg_display_in: TextCtrl,
+    pub hub_reg_pass_in: TextCtrl,
+    pub hub_register_btn: Button,
+    pub hub_code_in: TextCtrl,
+    pub hub_verify_btn: Button,
+    pub hub_reset_btn: Button,
+    pub hub_reset_confirm_btn: Button,
+    pub hub_log: TextCtrl,
 
     // Hauptansicht — Räume/Nutzer als nativer Baum (plattformspezifisch:
     // wxTreeCtrl auf Windows, DataViewTreeCtrl auf macOS/Linux).
@@ -106,8 +130,11 @@ impl Ui {
             .add_initial_text(0, "Nicht verbunden")
             .build();
 
-        // ── Verbindungsansicht ──
-        let connect_panel = Panel::builder(&frame).build();
+        // Reiter (Notebook) für die Vor-Verbindungs-Ansicht.
+        let notebook = Notebook::builder(&frame).build();
+
+        // ── Reiter „Serverliste" ──
+        let connect_panel = Panel::builder(&notebook).build();
         let cv = BoxSizer::builder(Orientation::Vertical).build();
 
         cv.add(
@@ -147,14 +174,82 @@ impl Ui {
             .build();
         let nick_in = TextCtrl::builder(&connect_panel).build();
 
+        let use_central_chk = CheckBox::builder(&connect_panel)
+            .with_label("Zentrales Login verwenden (statt Passwort)")
+            .build();
+
         add_form_row(&connect_panel, &cv, "Host:", &host_in);
         add_form_row(&connect_panel, &cv, "Port:", &port_in);
         cv.add(&ssl_chk, 0, SizerFlag::All, 6);
         add_form_row(&connect_panel, &cv, "Benutzername:", &user_in);
         add_form_row(&connect_panel, &cv, "Passwort:", &pass_in);
         add_form_row(&connect_panel, &cv, "Spitzname:", &nick_in);
+        cv.add(&use_central_chk, 0, SizerFlag::All, 6);
 
         connect_panel.set_sizer(cv, true);
+
+        // ── Reiter „Server-Hub" (zentrales Login) ──
+        let hub_panel = Panel::builder(&notebook).build();
+        let hv = BoxSizer::builder(Orientation::Vertical).build();
+        hv.add(
+            &StaticText::builder(&hub_panel)
+                .with_label("Server-Hub — zentrales Konto (Anmeldung per Telefonnummer)")
+                .build(),
+            0,
+            SizerFlag::All,
+            6,
+        );
+        let hub_status = StaticText::builder(&hub_panel)
+            .with_label("Status: nicht angemeldet.")
+            .build();
+        hv.add(&hub_status, 0, SizerFlag::All, 6);
+
+        // Anmelden
+        hv.add(&StaticText::builder(&hub_panel).with_label("Anmelden").build(), 0, SizerFlag::All, 4);
+        let hub_ident_in = TextCtrl::builder(&hub_panel).build();
+        let hub_login_pass_in = TextCtrl::builder(&hub_panel).with_style(TextCtrlStyle::Password).build();
+        add_form_row(&hub_panel, &hv, "Benutzername/Telefon:", &hub_ident_in);
+        add_form_row(&hub_panel, &hv, "Passwort:", &hub_login_pass_in);
+        let login_row = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_login_btn = Button::builder(&hub_panel).with_label("Anmelden").build();
+        let hub_logout_btn = Button::builder(&hub_panel).with_label("Abmelden").build();
+        login_row.add(&hub_login_btn, 0, SizerFlag::All, 4);
+        login_row.add(&hub_logout_btn, 0, SizerFlag::All, 4);
+        hv.add_sizer(&login_row, 0, SizerFlag::All, 2);
+
+        // Registrieren
+        hv.add(&StaticText::builder(&hub_panel).with_label("Neu registrieren").build(), 0, SizerFlag::All, 4);
+        let hub_phone_in = TextCtrl::builder(&hub_panel).build();
+        let hub_reg_user_in = TextCtrl::builder(&hub_panel).build();
+        let hub_reg_display_in = TextCtrl::builder(&hub_panel).build();
+        let hub_reg_pass_in = TextCtrl::builder(&hub_panel).with_style(TextCtrlStyle::Password).build();
+        add_form_row(&hub_panel, &hv, "Telefon (z. B. +49…):", &hub_phone_in);
+        add_form_row(&hub_panel, &hv, "Benutzername:", &hub_reg_user_in);
+        add_form_row(&hub_panel, &hv, "Anzeigename:", &hub_reg_display_in);
+        add_form_row(&hub_panel, &hv, "Passwort / neues Passwort:", &hub_reg_pass_in);
+        let hub_register_btn = Button::builder(&hub_panel).with_label("Code anfordern (SMS/WhatsApp)").build();
+        hv.add(&hub_register_btn, 0, SizerFlag::All, 4);
+
+        // Code bestätigen / Passwort-Reset (nutzen Telefon-, Code- und Passwortfeld)
+        let hub_code_in = TextCtrl::builder(&hub_panel).build();
+        add_form_row(&hub_panel, &hv, "Bestätigungscode:", &hub_code_in);
+        let code_row = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_verify_btn = Button::builder(&hub_panel).with_label("Code bestätigen & anmelden").build();
+        let hub_reset_btn = Button::builder(&hub_panel).with_label("Passwort vergessen (Code)").build();
+        let hub_reset_confirm_btn = Button::builder(&hub_panel).with_label("Neues Passwort setzen").build();
+        code_row.add(&hub_verify_btn, 0, SizerFlag::All, 4);
+        code_row.add(&hub_reset_btn, 0, SizerFlag::All, 4);
+        code_row.add(&hub_reset_confirm_btn, 0, SizerFlag::All, 4);
+        hv.add_sizer(&code_row, 0, SizerFlag::All, 2);
+
+        let hub_log = TextCtrl::builder(&hub_panel)
+            .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
+            .build();
+        hv.add(&hub_log, 1, SizerFlag::Expand | SizerFlag::All, 6);
+        hub_panel.set_sizer(hv, true);
+
+        notebook.add_page(&connect_panel, "Serverliste", true, None);
+        notebook.add_page(&hub_panel, "Server-Hub", false, None);
 
         // ── Hauptansicht ──
         let main_panel = Panel::builder(&frame).build();
@@ -240,9 +335,10 @@ impl Ui {
 
         main_panel.set_sizer(mh, true);
 
-        // Frame-Sizer hält beide Panels; anfangs nur die Verbindungsansicht.
+        // Frame-Sizer hält das Notebook (Vor-Verbindung) und die Hauptansicht;
+        // anfangs nur das Notebook.
         let frame_sizer = BoxSizer::builder(Orientation::Vertical).build();
-        frame_sizer.add(&connect_panel, 1, SizerFlag::Expand, 0);
+        frame_sizer.add(&notebook, 1, SizerFlag::Expand, 0);
         frame_sizer.add(&main_panel, 1, SizerFlag::Expand, 0);
         frame.set_sizer(frame_sizer, true);
         main_panel.show(false);
@@ -256,6 +352,16 @@ impl Ui {
         set_a11y_name(&user_in, "Benutzername");
         set_a11y_name(&pass_in, "Passwort");
         set_a11y_name(&nick_in, "Spitzname");
+        set_a11y_name(&use_central_chk, "Zentrales Login verwenden");
+        set_a11y_name(&hub_status, "Hub-Status");
+        set_a11y_name(&hub_ident_in, "Hub-Benutzername oder Telefon");
+        set_a11y_name(&hub_login_pass_in, "Hub-Passwort");
+        set_a11y_name(&hub_phone_in, "Telefonnummer");
+        set_a11y_name(&hub_reg_user_in, "Hub-Benutzername");
+        set_a11y_name(&hub_reg_display_in, "Anzeigename");
+        set_a11y_name(&hub_reg_pass_in, "Passwort oder neues Passwort");
+        set_a11y_name(&hub_code_in, "Bestätigungscode");
+        set_a11y_name(&hub_log, "Server-Hub Meldungen");
         set_a11y_name(&rooms_tree, "Räume und Nutzer");
         set_a11y_name(&chat_log, "Chatverlauf");
         set_a11y_name(&chat_in, "Chatnachricht eingeben");
@@ -264,6 +370,7 @@ impl Ui {
 
         Ui {
             frame,
+            notebook,
             connect_panel,
             server_list,
             host_in,
@@ -272,9 +379,26 @@ impl Ui {
             user_in,
             pass_in,
             nick_in,
+            use_central_chk,
             connect_btn,
             bookmark_btn,
             remove_btn,
+            hub_panel,
+            hub_status,
+            hub_ident_in,
+            hub_login_pass_in,
+            hub_login_btn,
+            hub_logout_btn,
+            hub_phone_in,
+            hub_reg_user_in,
+            hub_reg_display_in,
+            hub_reg_pass_in,
+            hub_register_btn,
+            hub_code_in,
+            hub_verify_btn,
+            hub_reset_btn,
+            hub_reset_confirm_btn,
+            hub_log,
             main_panel,
             rooms_tree,
             #[cfg(not(target_os = "windows"))]
@@ -288,11 +412,17 @@ impl Ui {
         }
     }
 
-    /// Zwischen Verbindungs- und Hauptansicht umschalten.
+    /// Zwischen Verbindungs- (Notebook) und Hauptansicht umschalten.
     pub fn show_main(&self, main: bool) {
         self.main_panel.show(main);
-        self.connect_panel.show(!main);
+        self.notebook.show(!main);
         self.frame.layout();
+    }
+
+    /// Eine Zeile an das Server-Hub-Meldungsfeld anhängen.
+    pub fn append_hub_log(&self, line: &str) {
+        let ts = chrono::Local::now().format("%H:%M").to_string();
+        self.hub_log.append_text(&format!("[{}] {}\n", ts, line));
     }
 
     pub fn set_status(&self, text: &str) {

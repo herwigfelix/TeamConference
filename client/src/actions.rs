@@ -100,20 +100,56 @@ pub fn do_connect(ctx: &Ctx) {
         }
     };
     let ssl = ctx.ui.ssl_chk.is_checked();
+    let use_central = ctx.ui.use_central_chk.is_checked();
     let username = ctx.ui.user_in.get_value().trim().to_string();
     let password = ctx.ui.pass_in.get_value();
     let mut nickname = ctx.ui.nick_in.get_value().trim().to_string();
-    if nickname.is_empty() {
-        nickname = username.clone();
-    }
-    if host.is_empty() || username.is_empty() || password.is_empty() {
-        notify(
-            ctx,
-            "Host, Benutzername und Passwort sind erforderlich.",
-            "Verbinden",
-        );
+
+    if host.is_empty() {
+        notify(ctx, "Host ist erforderlich.", "Verbinden");
         return;
     }
+
+    // Anmeldemodus: Passwort (klassisch) oder zentrales Token.
+    enum Auth {
+        Password { username: String, password: String },
+        Central { refresh_token: String },
+    }
+    let auth = if use_central {
+        match config::load_config().hub {
+            Some(h) if !h.refresh_token.is_empty() => {
+                if nickname.is_empty() {
+                    nickname = if !h.display_name.is_empty() {
+                        h.display_name.clone()
+                    } else {
+                        h.username.clone()
+                    };
+                }
+                Auth::Central { refresh_token: h.refresh_token }
+            }
+            _ => {
+                notify(
+                    ctx,
+                    "Für zentrales Login bitte zuerst im Reiter „Server-Hub\" anmelden.",
+                    "Verbinden",
+                );
+                return;
+            }
+        }
+    } else {
+        if username.is_empty() || password.is_empty() {
+            notify(
+                ctx,
+                "Host, Benutzername und Passwort sind erforderlich.",
+                "Verbinden",
+            );
+            return;
+        }
+        if nickname.is_empty() {
+            nickname = username.clone();
+        }
+        Auth::Password { username, password }
+    };
 
     let (input_device, output_device) = {
         let cfg = config::load_config();
@@ -160,10 +196,41 @@ pub fn do_connect(ctx: &Ctx) {
             }
         });
 
-        let login = Message::new(
-            "auth_login",
-            serde_json::json!({ "username": username, "password": password, "nickname": nickname }),
-        );
+        // Login-Daten je nach Modus zusammenbauen. Beim zentralen Login holen
+        // wir ein frisches Access-Token (Refresh-Rotation) und senden es als
+        // `central_token`; das neue Refresh-Token wird lokal gespeichert.
+        let login_data = match auth {
+            Auth::Password { username, password } => {
+                serde_json::json!({ "username": username, "password": password, "nickname": nickname })
+            }
+            Auth::Central { refresh_token } => {
+                let res = tokio::task::spawn_blocking(move || crate::hub::refresh(&refresh_token)).await;
+                match res {
+                    Ok(Ok(bundle)) => {
+                        let mut cfg = crate::config::load_config();
+                        cfg.hub = Some(crate::config::HubSession {
+                            central_uid: bundle.central_uid.clone(),
+                            username: bundle.username.clone(),
+                            display_name: bundle.display_name.clone(),
+                            role: bundle.role.clone(),
+                            refresh_token: bundle.refresh_token.clone(),
+                            status: bundle.status.clone(),
+                        });
+                        let _ = crate::config::save_config(&cfg);
+                        serde_json::json!({ "central_token": bundle.access_token, "nickname": nickname })
+                    }
+                    Ok(Err(e)) => {
+                        fail(format!("Zentrales Login fehlgeschlagen: {}", e));
+                        return;
+                    }
+                    Err(e) => {
+                        fail(format!("Zentrales Login fehlgeschlagen: {}", e));
+                        return;
+                    }
+                }
+            }
+        };
+        let login = Message::new("auth_login", login_data);
         if let Err(e) = app.send_ws(login) {
             fail(format!("Anmeldung fehlgeschlagen: {}", e));
         }
@@ -235,6 +302,7 @@ pub fn fill_form_from_server(ctx: &Ctx) {
         ctx.ui.user_in.set_value(&s.username);
         ctx.ui.nick_in.set_value(&s.nickname);
         ctx.ui.pass_in.set_value(&s.password);
+        ctx.ui.use_central_chk.set_value(s.use_central);
     }
 }
 
@@ -253,6 +321,7 @@ pub fn save_bookmark(ctx: &Ctx) {
         username: ctx.ui.user_in.get_value().trim().to_string(),
         nickname: ctx.ui.nick_in.get_value().trim().to_string(),
         password: ctx.ui.pass_in.get_value(),
+        use_central: ctx.ui.use_central_chk.is_checked(),
     };
     ctx.st.borrow_mut().servers.push(entry);
     persist_servers(ctx);
@@ -280,6 +349,186 @@ fn persist_servers(ctx: &Ctx) {
     let mut cfg = config::load_config();
     cfg.servers = ctx.st.borrow().servers.clone();
     let _ = config::save_config(&cfg);
+}
+
+// ── Server-Hub (zentrales Login) ──
+
+/// Hub-Statuszeile aus der gespeicherten Sitzung aktualisieren.
+pub fn update_hub_status(ctx: &Ctx) {
+    let label = match config::load_config().hub {
+        Some(h) => {
+            let name = if h.display_name.is_empty() { h.username.clone() } else { h.display_name.clone() };
+            if h.status == "active" {
+                let role = if h.role == "hub_admin" { " — Hub-Admin" } else { "" };
+                format!("Status: angemeldet als {}{}.", name, role)
+            } else {
+                format!("Status: {} — Konto wartet auf Freigabe.", name)
+            }
+        }
+        None => "Status: nicht angemeldet.".to_string(),
+    };
+    ctx.ui.hub_status.set_label(&label);
+}
+
+/// Token-Bündel als lokale Hub-Sitzung speichern (vom Hintergrund-Thread aus).
+fn store_session(b: &crate::hub::TokenBundle) {
+    let mut cfg = config::load_config();
+    cfg.hub = Some(config::HubSession {
+        central_uid: b.central_uid.clone(),
+        username: b.username.clone(),
+        display_name: b.display_name.clone(),
+        role: b.role.clone(),
+        refresh_token: b.refresh_token.clone(),
+        status: b.status.clone(),
+    });
+    let _ = config::save_config(&cfg);
+}
+
+fn hub_msg(ev_tx: &tokio::sync::mpsc::UnboundedSender<Message>, message: String) {
+    let _ = ev_tx.send(Message::new("hub_msg", serde_json::json!({ "message": message })));
+}
+
+pub fn hub_register(ctx: &Ctx) {
+    let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
+    let user = ctx.ui.hub_reg_user_in.get_value().trim().to_string();
+    let display = ctx.ui.hub_reg_display_in.get_value().trim().to_string();
+    let pass = ctx.ui.hub_reg_pass_in.get_value();
+    if phone.is_empty() || user.is_empty() || pass.is_empty() {
+        notify(ctx, "Telefon, Benutzername und Passwort sind erforderlich.", "Server-Hub");
+        return;
+    }
+    ctx.ui.append_hub_log("Fordere Bestätigungscode an…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || crate::hub::register(&phone, &user, &pass, &display)).await;
+        let m = match r {
+            Ok(Ok(())) => "Code gesendet. Bitte Code eingeben und „Code bestätigen & anmelden\" wählen.".to_string(),
+            Ok(Err(e)) => format!("Registrierung fehlgeschlagen: {}", e),
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
+}
+
+pub fn hub_verify(ctx: &Ctx) {
+    let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
+    let code = ctx.ui.hub_code_in.get_value().trim().to_string();
+    if phone.is_empty() || code.is_empty() {
+        notify(ctx, "Telefon und Bestätigungscode sind erforderlich.", "Server-Hub");
+        return;
+    }
+    ctx.ui.append_hub_log("Bestätige Code…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || crate::hub::verify(&phone, &code)).await;
+        let m = match r {
+            Ok(Ok(b)) => {
+                store_session(&b);
+                if b.approved {
+                    format!("Angemeldet als {}.", b.username)
+                } else {
+                    format!(
+                        "Registriert als {}. Das Konto muss noch freigegeben werden. Bei Fragen: {} (Telefon/WhatsApp).",
+                        b.username, b.team_contact
+                    )
+                }
+            }
+            Ok(Err(e)) => format!("Bestätigung fehlgeschlagen: {}", e),
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
+}
+
+pub fn hub_login(ctx: &Ctx) {
+    let ident = ctx.ui.hub_ident_in.get_value().trim().to_string();
+    let pass = ctx.ui.hub_login_pass_in.get_value();
+    if ident.is_empty() || pass.is_empty() {
+        notify(ctx, "Benutzername/Telefon und Passwort sind erforderlich.", "Server-Hub");
+        return;
+    }
+    ctx.ui.append_hub_log("Melde am Hub an…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || crate::hub::login(&ident, &pass)).await;
+        let m = match r {
+            Ok(Ok(b)) => {
+                store_session(&b);
+                if b.approved {
+                    format!("Angemeldet als {}.", b.username)
+                } else {
+                    format!("Angemeldet als {}. Konto wartet noch auf Freigabe.", b.username)
+                }
+            }
+            Ok(Err(e)) => {
+                if e.contains("phone_not_verified") {
+                    "Telefonnummer noch nicht bestätigt — bitte zuerst registrieren/bestätigen.".to_string()
+                } else {
+                    format!("Anmeldung fehlgeschlagen: {}", e)
+                }
+            }
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
+}
+
+pub fn hub_logout(ctx: &Ctx) {
+    let session = config::load_config().hub;
+    let Some(h) = session else {
+        notify(ctx, "Nicht angemeldet.", "Server-Hub");
+        return;
+    };
+    // Sitzung lokal entfernen.
+    let mut cfg = config::load_config();
+    cfg.hub = None;
+    let _ = config::save_config(&cfg);
+    let ev_tx = ctx.ev_tx.clone();
+    let refresh = h.refresh_token.clone();
+    ctx.rt.spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || crate::hub::logout(&refresh)).await;
+        hub_msg(&ev_tx, "Abgemeldet.".to_string());
+    });
+}
+
+pub fn hub_reset_start(ctx: &Ctx) {
+    let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
+    if phone.is_empty() {
+        notify(ctx, "Bitte Telefonnummer eingeben.", "Server-Hub");
+        return;
+    }
+    ctx.ui.append_hub_log("Fordere Code für Passwort-Reset an…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || crate::hub::reset_start(&phone)).await;
+        let m = match r {
+            Ok(Ok(())) => "Falls die Nummer registriert ist, wurde ein Code gesendet. Neues Passwort eintragen und „Neues Passwort setzen\" wählen.".to_string(),
+            Ok(Err(e)) => format!("Anfrage fehlgeschlagen: {}", e),
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
+}
+
+pub fn hub_reset_confirm(ctx: &Ctx) {
+    let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
+    let code = ctx.ui.hub_code_in.get_value().trim().to_string();
+    let new_pass = ctx.ui.hub_reg_pass_in.get_value();
+    if phone.is_empty() || code.is_empty() || new_pass.is_empty() {
+        notify(ctx, "Telefon, Code und neues Passwort sind erforderlich.", "Server-Hub");
+        return;
+    }
+    ctx.ui.append_hub_log("Setze neues Passwort…");
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        let r = tokio::task::spawn_blocking(move || crate::hub::reset_confirm(&phone, &code, &new_pass)).await;
+        let m = match r {
+            Ok(Ok(())) => "Passwort geändert. Bitte neu anmelden.".to_string(),
+            Ok(Err(e)) => format!("Passwort-Reset fehlgeschlagen: {}", e),
+            Err(e) => format!("Fehler: {}", e),
+        };
+        hub_msg(&ev_tx, m);
+    });
 }
 
 // ── Chat ──

@@ -113,6 +113,19 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             crate::actions::notify(ctx, &text, "TeamConference");
         }
 
+        // Server-Hub: Ergebnis einer Hub-Aktion (Login/Registrierung/Reset).
+        "hub_msg" => {
+            let text = msg
+                .data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            ui.append_hub_log(&text);
+            crate::actions::update_hub_status(ctx);
+            crate::actions::notify(ctx, &text, "Server-Hub");
+        }
+
         // Auto-Updater: neue Version verfügbar → nachfragen und ggf. laden.
         "client_update" => {
             let version = msg.data.get("version").and_then(|v| v.as_str()).unwrap_or("?").to_string();

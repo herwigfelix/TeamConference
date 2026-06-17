@@ -23,8 +23,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6"
 parking_lot = "0.12"
 chrono = "0.4"
-# Auto-Updater: HTTPS-Abruf der GitHub-Releases (rustls/ring, keine OpenSSL-/C-Abhängigkeit)
-ureq = "2"
+# Auto-Updater + Hub-API: HTTPS (rustls/ring, keine OpenSSL-/C-Abhängigkeit).
+# `json` für send_json/into_json (Hub-Login).
+ureq = { version = "2", features = ["json"] }
 # Sprachausgabe für Barrierefreiheit: routet über den Screenreader, wo möglich
 # (Windows via Tolk → NVDA/JAWS, sonst SAPI; macOS AVFoundation; Linux Speech
 # Dispatcher). Läuft nur auf dem UI-Thread (Instanz ist nicht Send auf macOS).

@@ -29,6 +29,10 @@ pub struct ServerEntry {
     /// Passwort im Klartext in der lokalen client.json (Lesezeichen-Komfort).
     #[serde(default)]
     pub password: String,
+    /// Für diesen Server das zentrale Login (Identity Provider) statt Passwort
+    /// verwenden. Erfordert eine Anmeldung im Tab „Server-Hub".
+    #[serde(default)]
+    pub use_central: bool,
 }
 
 impl ServerEntry {
@@ -42,11 +46,27 @@ impl ServerEntry {
     }
 }
 
+/// Im Hub angemeldete Sitzung. Das Refresh-Token wird hier (lokal) gehalten;
+/// das kurzlebige Access-Token wird bei Bedarf frisch geholt (Rotation).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HubSession {
+    pub central_uid: String,
+    pub username: String,
+    pub display_name: String,
+    pub role: String,
+    pub refresh_token: String,
+    /// "active" (freigegeben) | "pending" (wartet auf Freigabe)
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     /// Gespeicherte Server (Serverliste)
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+    /// Aktuelle Hub-Anmeldung (zentrales Login), falls vorhanden.
+    #[serde(default)]
+    pub hub: Option<HubSession>,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
     #[serde(default = "default_bit_depth")]
@@ -87,6 +107,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             servers: Vec::new(),
+            hub: None,
             sample_rate: default_sample_rate(),
             bit_depth: default_bit_depth(),
             channels: default_channels(),
