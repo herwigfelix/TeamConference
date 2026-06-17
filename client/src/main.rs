@@ -128,8 +128,8 @@ fn main() {
             ui.pass_in.set_value(&first.password);
             ui.use_central_chk.set_value(first.use_central);
         }
-        // Hub-Status aus gespeicherter Sitzung anzeigen.
-        actions::update_hub_status(&ctx);
+        // Hub-Seite passend zum Anmeldestatus zeigen (eingeloggt → Konto).
+        actions::update_hub_view(&ctx);
 
         wire_events(&ctx);
         wire_audio_hotkeys(&ctx);
@@ -204,6 +204,22 @@ fn wire_events(ctx: &Ctx) {
     {
         let ctx = ctx.clone();
         ui.hub_logout_btn.on_click(move |_| actions::hub_logout(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_show_register_btn.on_click(move |_| actions::hub_show_register(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_show_reset_btn.on_click(move |_| actions::hub_show_reset(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_back_register_btn.on_click(move |_| actions::hub_show_login(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_back_reset_btn.on_click(move |_| actions::hub_show_login(&ctx));
     }
     {
         let ctx = ctx.clone();

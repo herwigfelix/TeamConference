@@ -375,6 +375,38 @@ pub fn update_hub_status(ctx: &Ctx) {
     ctx.ui.hub_status.set_label(&label);
 }
 
+/// Die passende Hub-Seite zeigen: eingeloggt → Konto, sonst je nach Modus
+/// Anmelden/Registrieren/Reset.
+pub fn update_hub_view(ctx: &Ctx) {
+    let logged_in = config::load_config().hub.is_some();
+    let idx: usize = if logged_in {
+        3
+    } else {
+        match ctx.st.borrow().hub_view {
+            crate::app::HubView::Login => 0,
+            crate::app::HubView::Register => 1,
+            crate::app::HubView::Reset => 2,
+        }
+    };
+    ctx.ui.hub_book.set_selection(idx);
+    update_hub_status(ctx);
+}
+
+fn set_hub_view(ctx: &Ctx, view: crate::app::HubView) {
+    ctx.st.borrow_mut().hub_view = view;
+    update_hub_view(ctx);
+}
+
+pub fn hub_show_register(ctx: &Ctx) {
+    set_hub_view(ctx, crate::app::HubView::Register);
+}
+pub fn hub_show_reset(ctx: &Ctx) {
+    set_hub_view(ctx, crate::app::HubView::Reset);
+}
+pub fn hub_show_login(ctx: &Ctx) {
+    set_hub_view(ctx, crate::app::HubView::Login);
+}
+
 /// Token-Bündel als lokale Hub-Sitzung speichern (vom Hintergrund-Thread aus).
 fn store_session(b: &crate::hub::TokenBundle) {
     let mut cfg = config::load_config();
@@ -484,10 +516,12 @@ pub fn hub_logout(ctx: &Ctx) {
         notify(ctx, "Nicht angemeldet.", "Server-Hub");
         return;
     };
-    // Sitzung lokal entfernen.
+    // Sitzung lokal entfernen und sofort zur Anmelden-Seite wechseln.
     let mut cfg = config::load_config();
     cfg.hub = None;
     let _ = config::save_config(&cfg);
+    ctx.st.borrow_mut().hub_view = crate::app::HubView::Login;
+    update_hub_view(ctx);
     let ev_tx = ctx.ev_tx.clone();
     let refresh = h.refresh_token.clone();
     ctx.rt.spawn(async move {
@@ -497,7 +531,7 @@ pub fn hub_logout(ctx: &Ctx) {
 }
 
 pub fn hub_reset_start(ctx: &Ctx) {
-    let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
+    let phone = ctx.ui.hub_reset_phone_in.get_value().trim().to_string();
     if phone.is_empty() {
         notify(ctx, "Bitte Telefonnummer eingeben.", "Server-Hub");
         return;
@@ -570,7 +604,8 @@ pub fn hub_join_selected(ctx: &Ctx) {
     ctx.ui.use_central_chk.set_value(true);
     // Unterserver-ID merken, damit auth_login den richtigen Bereich wählt.
     ctx.st.borrow_mut().pending_server_id = Some(s.id.clone());
-    ctx.ui.notebook.set_selection(0);
+    // Zur „Serverliste" wechseln (Reiter 1; Server-Hub ist jetzt Reiter 0).
+    ctx.ui.notebook.set_selection(1);
     do_connect(ctx);
 }
 
@@ -673,9 +708,9 @@ pub fn hub_edit_profile(ctx: &Ctx) {
 }
 
 pub fn hub_reset_confirm(ctx: &Ctx) {
-    let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
-    let code = ctx.ui.hub_code_in.get_value().trim().to_string();
-    let new_pass = ctx.ui.hub_reg_pass_in.get_value();
+    let phone = ctx.ui.hub_reset_phone_in.get_value().trim().to_string();
+    let code = ctx.ui.hub_reset_code_in.get_value().trim().to_string();
+    let new_pass = ctx.ui.hub_reset_pass_in.get_value();
     if phone.is_empty() || code.is_empty() || new_pass.is_empty() {
         notify(ctx, "Telefon, Code und neues Passwort sind erforderlich.", "Server-Hub");
         return;

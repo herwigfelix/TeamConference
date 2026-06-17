@@ -122,7 +122,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .unwrap_or("")
                 .to_string();
             ui.append_hub_log(&text);
-            crate::actions::update_hub_status(ctx);
+            crate::actions::update_hub_view(ctx);
             crate::actions::notify(ctx, &text, "Server-Hub");
         }
 

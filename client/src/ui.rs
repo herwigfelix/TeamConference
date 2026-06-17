@@ -4,6 +4,7 @@
 
 use wxdragon::accessible::{AccStatus, AccessibleImpl};
 use wxdragon::prelude::*;
+use wxdragon::widgets::simplebook::SimpleBook;
 
 /// Liefert einem ansonsten namenlosen Bedienelement (Eingabefeld, Checkbox)
 /// einen stabilen Accessible-Namen. wxWidgets' Standard-`GetName` nutzt das
@@ -89,11 +90,16 @@ pub struct Ui {
     // Reiter „Server-Hub" (zentrales Login)
     #[allow(dead_code)]
     pub hub_panel: Panel,
+    /// Tabloser Umschalter: Anmelden(0)/Registrieren(1)/Reset(2)/Konto(3).
+    pub hub_book: SimpleBook,
     pub hub_status: StaticText,
+    // Seite Anmelden
     pub hub_ident_in: TextCtrl,
     pub hub_login_pass_in: TextCtrl,
     pub hub_login_btn: Button,
-    pub hub_logout_btn: Button,
+    pub hub_show_register_btn: Button,
+    pub hub_show_reset_btn: Button,
+    // Seite Registrieren
     pub hub_phone_in: TextCtrl,
     pub hub_reg_user_in: TextCtrl,
     pub hub_reg_display_in: TextCtrl,
@@ -101,9 +107,16 @@ pub struct Ui {
     pub hub_register_btn: Button,
     pub hub_code_in: TextCtrl,
     pub hub_verify_btn: Button,
+    pub hub_back_register_btn: Button,
+    // Seite Passwort-Reset
+    pub hub_reset_phone_in: TextCtrl,
+    pub hub_reset_code_in: TextCtrl,
+    pub hub_reset_pass_in: TextCtrl,
     pub hub_reset_btn: Button,
     pub hub_reset_confirm_btn: Button,
-    // Server-Verzeichnis im Hub-Tab
+    pub hub_back_reset_btn: Button,
+    // Seite Konto: Verzeichnis + Profil/Einladungen + Abmelden
+    pub hub_logout_btn: Button,
     pub hub_search_in: TextCtrl,
     pub hub_servers: ListBox,
     pub hub_refresh_btn: Button,
@@ -197,6 +210,8 @@ impl Ui {
         connect_panel.set_sizer(cv, true);
 
         // ── Reiter „Server-Hub" (zentrales Login) ──
+        // Ein SimpleBook (tabloser Umschalter) zeigt je nach Zustand genau EINE
+        // Seite: Anmelden / Registrieren / Passwort-Reset / Eingeloggt.
         let hub_panel = Panel::builder(&notebook).build();
         let hv = BoxSizer::builder(Orientation::Vertical).build();
         hv.add(
@@ -212,62 +227,99 @@ impl Ui {
             .build();
         hv.add(&hub_status, 0, SizerFlag::All, 6);
 
-        // Anmelden
-        hv.add(&StaticText::builder(&hub_panel).with_label("Anmelden").build(), 0, SizerFlag::All, 4);
-        let hub_ident_in = TextCtrl::builder(&hub_panel).build();
-        let hub_login_pass_in = TextCtrl::builder(&hub_panel).with_style(TextCtrlStyle::Password).build();
-        add_form_row(&hub_panel, &hv, "Benutzername/Telefon:", &hub_ident_in);
-        add_form_row(&hub_panel, &hv, "Passwort:", &hub_login_pass_in);
-        let login_row = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_login_btn = Button::builder(&hub_panel).with_label("Anmelden").build();
-        let hub_logout_btn = Button::builder(&hub_panel).with_label("Abmelden").build();
-        login_row.add(&hub_login_btn, 0, SizerFlag::All, 4);
-        login_row.add(&hub_logout_btn, 0, SizerFlag::All, 4);
-        hv.add_sizer(&login_row, 0, SizerFlag::All, 2);
+        let hub_book = SimpleBook::builder(&hub_panel).build();
 
-        // Registrieren
-        hv.add(&StaticText::builder(&hub_panel).with_label("Neu registrieren").build(), 0, SizerFlag::All, 4);
-        let hub_phone_in = TextCtrl::builder(&hub_panel).build();
-        let hub_reg_user_in = TextCtrl::builder(&hub_panel).build();
-        let hub_reg_display_in = TextCtrl::builder(&hub_panel).build();
-        let hub_reg_pass_in = TextCtrl::builder(&hub_panel).with_style(TextCtrlStyle::Password).build();
-        add_form_row(&hub_panel, &hv, "Telefon (z. B. +49…):", &hub_phone_in);
-        add_form_row(&hub_panel, &hv, "Benutzername:", &hub_reg_user_in);
-        add_form_row(&hub_panel, &hv, "Anzeigename:", &hub_reg_display_in);
-        add_form_row(&hub_panel, &hv, "Passwort / neues Passwort:", &hub_reg_pass_in);
-        let hub_register_btn = Button::builder(&hub_panel).with_label("Code anfordern (SMS/WhatsApp)").build();
-        hv.add(&hub_register_btn, 0, SizerFlag::All, 4);
+        // Seite 0 — Anmelden
+        let hub_login_panel = Panel::builder(&hub_book).build();
+        let lv = BoxSizer::builder(Orientation::Vertical).build();
+        lv.add(&StaticText::builder(&hub_login_panel).with_label("Anmelden").build(), 0, SizerFlag::All, 4);
+        let hub_ident_in = TextCtrl::builder(&hub_login_panel).build();
+        let hub_login_pass_in = TextCtrl::builder(&hub_login_panel).with_style(TextCtrlStyle::Password).build();
+        add_form_row(&hub_login_panel, &lv, "Benutzername/Telefon:", &hub_ident_in);
+        add_form_row(&hub_login_panel, &lv, "Passwort:", &hub_login_pass_in);
+        let lrow = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_login_btn = Button::builder(&hub_login_panel).with_label("Anmelden").build();
+        let hub_show_register_btn = Button::builder(&hub_login_panel).with_label("Neu registrieren").build();
+        let hub_show_reset_btn = Button::builder(&hub_login_panel).with_label("Passwort vergessen").build();
+        lrow.add(&hub_login_btn, 0, SizerFlag::All, 4);
+        lrow.add(&hub_show_register_btn, 0, SizerFlag::All, 4);
+        lrow.add(&hub_show_reset_btn, 0, SizerFlag::All, 4);
+        lv.add_sizer(&lrow, 0, SizerFlag::All, 2);
+        hub_login_panel.set_sizer(lv, true);
 
-        // Code bestätigen / Passwort-Reset (nutzen Telefon-, Code- und Passwortfeld)
-        let hub_code_in = TextCtrl::builder(&hub_panel).build();
-        add_form_row(&hub_panel, &hv, "Bestätigungscode:", &hub_code_in);
-        let code_row = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_verify_btn = Button::builder(&hub_panel).with_label("Code bestätigen & anmelden").build();
-        let hub_reset_btn = Button::builder(&hub_panel).with_label("Passwort vergessen (Code)").build();
-        let hub_reset_confirm_btn = Button::builder(&hub_panel).with_label("Neues Passwort setzen").build();
-        code_row.add(&hub_verify_btn, 0, SizerFlag::All, 4);
-        code_row.add(&hub_reset_btn, 0, SizerFlag::All, 4);
-        code_row.add(&hub_reset_confirm_btn, 0, SizerFlag::All, 4);
-        hv.add_sizer(&code_row, 0, SizerFlag::All, 2);
+        // Seite 1 — Registrieren
+        let hub_register_panel = Panel::builder(&hub_book).build();
+        let rv = BoxSizer::builder(Orientation::Vertical).build();
+        rv.add(&StaticText::builder(&hub_register_panel).with_label("Neu registrieren (per Telefonnummer)").build(), 0, SizerFlag::All, 4);
+        let hub_phone_in = TextCtrl::builder(&hub_register_panel).build();
+        let hub_reg_user_in = TextCtrl::builder(&hub_register_panel).build();
+        let hub_reg_display_in = TextCtrl::builder(&hub_register_panel).build();
+        let hub_reg_pass_in = TextCtrl::builder(&hub_register_panel).with_style(TextCtrlStyle::Password).build();
+        add_form_row(&hub_register_panel, &rv, "Telefon (z. B. +49…):", &hub_phone_in);
+        add_form_row(&hub_register_panel, &rv, "Benutzername:", &hub_reg_user_in);
+        add_form_row(&hub_register_panel, &rv, "Anzeigename:", &hub_reg_display_in);
+        add_form_row(&hub_register_panel, &rv, "Passwort:", &hub_reg_pass_in);
+        let hub_register_btn = Button::builder(&hub_register_panel).with_label("Code anfordern (SMS/WhatsApp)").build();
+        rv.add(&hub_register_btn, 0, SizerFlag::All, 4);
+        let hub_code_in = TextCtrl::builder(&hub_register_panel).build();
+        add_form_row(&hub_register_panel, &rv, "Bestätigungscode:", &hub_code_in);
+        let rrow = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_verify_btn = Button::builder(&hub_register_panel).with_label("Code bestätigen & anmelden").build();
+        let hub_back_register_btn = Button::builder(&hub_register_panel).with_label("Zurück").build();
+        rrow.add(&hub_verify_btn, 0, SizerFlag::All, 4);
+        rrow.add(&hub_back_register_btn, 0, SizerFlag::All, 4);
+        rv.add_sizer(&rrow, 0, SizerFlag::All, 2);
+        hub_register_panel.set_sizer(rv, true);
 
-        // Server-Verzeichnis
-        hv.add(&StaticText::builder(&hub_panel).with_label("Server-Verzeichnis").build(), 0, SizerFlag::All, 4);
-        let hub_search_in = TextCtrl::builder(&hub_panel).build();
-        add_form_row(&hub_panel, &hv, "Suche:", &hub_search_in);
-        let hub_servers = ListBox::builder(&hub_panel).build();
-        hv.add(&hub_servers, 1, SizerFlag::Expand | SizerFlag::All, 4);
-        let dir_row = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_refresh_btn = Button::builder(&hub_panel).with_label("Verzeichnis laden").build();
-        let hub_join_btn = Button::builder(&hub_panel).with_label("Mit ausgewähltem verbinden").build();
-        let hub_create_btn = Button::builder(&hub_panel).with_label("Server anlegen…").build();
-        dir_row.add(&hub_refresh_btn, 0, SizerFlag::All, 4);
-        dir_row.add(&hub_join_btn, 0, SizerFlag::All, 4);
-        dir_row.add(&hub_create_btn, 0, SizerFlag::All, 4);
-        let hub_invites_btn = Button::builder(&hub_panel).with_label("Einladungen…").build();
-        let hub_profile_btn = Button::builder(&hub_panel).with_label("Profil bearbeiten…").build();
-        dir_row.add(&hub_invites_btn, 0, SizerFlag::All, 4);
-        dir_row.add(&hub_profile_btn, 0, SizerFlag::All, 4);
-        hv.add_sizer(&dir_row, 0, SizerFlag::All, 2);
+        // Seite 2 — Passwort zurücksetzen
+        let hub_reset_panel = Panel::builder(&hub_book).build();
+        let sv = BoxSizer::builder(Orientation::Vertical).build();
+        sv.add(&StaticText::builder(&hub_reset_panel).with_label("Passwort zurücksetzen (per SMS-Code)").build(), 0, SizerFlag::All, 4);
+        let hub_reset_phone_in = TextCtrl::builder(&hub_reset_panel).build();
+        add_form_row(&hub_reset_panel, &sv, "Telefon:", &hub_reset_phone_in);
+        let hub_reset_btn = Button::builder(&hub_reset_panel).with_label("Code anfordern").build();
+        sv.add(&hub_reset_btn, 0, SizerFlag::All, 4);
+        let hub_reset_code_in = TextCtrl::builder(&hub_reset_panel).build();
+        let hub_reset_pass_in = TextCtrl::builder(&hub_reset_panel).with_style(TextCtrlStyle::Password).build();
+        add_form_row(&hub_reset_panel, &sv, "Code:", &hub_reset_code_in);
+        add_form_row(&hub_reset_panel, &sv, "Neues Passwort:", &hub_reset_pass_in);
+        let srow = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_reset_confirm_btn = Button::builder(&hub_reset_panel).with_label("Neues Passwort setzen").build();
+        let hub_back_reset_btn = Button::builder(&hub_reset_panel).with_label("Zurück").build();
+        srow.add(&hub_reset_confirm_btn, 0, SizerFlag::All, 4);
+        srow.add(&hub_back_reset_btn, 0, SizerFlag::All, 4);
+        sv.add_sizer(&srow, 0, SizerFlag::All, 2);
+        hub_reset_panel.set_sizer(sv, true);
+
+        // Seite 3 — Eingeloggt: Verzeichnis, Profil, Abmelden
+        let hub_account_panel = Panel::builder(&hub_book).build();
+        let av = BoxSizer::builder(Orientation::Vertical).build();
+        let hub_logout_btn = Button::builder(&hub_account_panel).with_label("Abmelden").build();
+        av.add(&hub_logout_btn, 0, SizerFlag::All, 4);
+        av.add(&StaticText::builder(&hub_account_panel).with_label("Server-Verzeichnis").build(), 0, SizerFlag::All, 4);
+        let hub_search_in = TextCtrl::builder(&hub_account_panel).build();
+        add_form_row(&hub_account_panel, &av, "Suche:", &hub_search_in);
+        let hub_servers = ListBox::builder(&hub_account_panel).build();
+        av.add(&hub_servers, 1, SizerFlag::Expand | SizerFlag::All, 4);
+        let drow = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_refresh_btn = Button::builder(&hub_account_panel).with_label("Verzeichnis laden").build();
+        let hub_join_btn = Button::builder(&hub_account_panel).with_label("Mit ausgewähltem verbinden").build();
+        let hub_create_btn = Button::builder(&hub_account_panel).with_label("Server anlegen…").build();
+        let hub_invites_btn = Button::builder(&hub_account_panel).with_label("Einladungen…").build();
+        let hub_profile_btn = Button::builder(&hub_account_panel).with_label("Profil bearbeiten…").build();
+        drow.add(&hub_refresh_btn, 0, SizerFlag::All, 4);
+        drow.add(&hub_join_btn, 0, SizerFlag::All, 4);
+        drow.add(&hub_create_btn, 0, SizerFlag::All, 4);
+        drow.add(&hub_invites_btn, 0, SizerFlag::All, 4);
+        drow.add(&hub_profile_btn, 0, SizerFlag::All, 4);
+        av.add_sizer(&drow, 0, SizerFlag::All, 2);
+        hub_account_panel.set_sizer(av, true);
+
+        hub_book.add_page(&hub_login_panel, "Anmelden", true, None);
+        hub_book.add_page(&hub_register_panel, "Registrieren", false, None);
+        hub_book.add_page(&hub_reset_panel, "Passwort", false, None);
+        hub_book.add_page(&hub_account_panel, "Konto", false, None);
+        hv.add(&hub_book, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
         let hub_log = TextCtrl::builder(&hub_panel)
             .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
@@ -275,8 +327,9 @@ impl Ui {
         hv.add(&hub_log, 1, SizerFlag::Expand | SizerFlag::All, 6);
         hub_panel.set_sizer(hv, true);
 
-        notebook.add_page(&connect_panel, "Serverliste", true, None);
-        notebook.add_page(&hub_panel, "Server-Hub", false, None);
+        // Server-Hub zuerst, dann Serverliste.
+        notebook.add_page(&hub_panel, "Server-Hub", true, None);
+        notebook.add_page(&connect_panel, "Serverliste", false, None);
 
         // ── Hauptansicht ──
         let main_panel = Panel::builder(&frame).build();
@@ -388,6 +441,9 @@ impl Ui {
         set_a11y_name(&hub_reg_display_in, "Anzeigename");
         set_a11y_name(&hub_reg_pass_in, "Passwort oder neues Passwort");
         set_a11y_name(&hub_code_in, "Bestätigungscode");
+        set_a11y_name(&hub_reset_phone_in, "Telefonnummer für Reset");
+        set_a11y_name(&hub_reset_code_in, "Reset-Code");
+        set_a11y_name(&hub_reset_pass_in, "Neues Passwort");
         set_a11y_name(&hub_search_in, "Verzeichnis durchsuchen");
         set_a11y_name(&hub_servers, "Server im Verzeichnis");
         set_a11y_name(&hub_log, "Server-Hub Meldungen");
@@ -413,11 +469,13 @@ impl Ui {
             bookmark_btn,
             remove_btn,
             hub_panel,
+            hub_book,
             hub_status,
             hub_ident_in,
             hub_login_pass_in,
             hub_login_btn,
-            hub_logout_btn,
+            hub_show_register_btn,
+            hub_show_reset_btn,
             hub_phone_in,
             hub_reg_user_in,
             hub_reg_display_in,
@@ -425,8 +483,14 @@ impl Ui {
             hub_register_btn,
             hub_code_in,
             hub_verify_btn,
+            hub_back_register_btn,
+            hub_reset_phone_in,
+            hub_reset_code_in,
+            hub_reset_pass_in,
             hub_reset_btn,
             hub_reset_confirm_btn,
+            hub_back_reset_btn,
+            hub_logout_btn,
             hub_search_in,
             hub_servers,
             hub_refresh_btn,

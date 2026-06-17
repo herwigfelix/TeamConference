@@ -23,6 +23,16 @@ pub struct AccountDialogRef {
     pub accounts: Vec<(String, String)>,
 }
 
+/// Welche Seite im Server-Hub-Tab gezeigt wird, solange man NICHT eingeloggt
+/// ist (eingeloggt → Konto-Seite, unabhängig davon).
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum HubView {
+    #[default]
+    Login,
+    Register,
+    Reset,
+}
+
 /// UI-Thread-eigene Daten (nicht thread-shared): Index→Daten-Zuordnungen.
 #[derive(Default)]
 pub struct UiState {
@@ -32,6 +42,8 @@ pub struct UiState {
     pub hub_servers: Vec<crate::hub::ServerInfo>,
     /// Im Hub-Modus zu verwendende Unterserver-ID beim nächsten Verbinden.
     pub pending_server_id: Option<String>,
+    /// Aktuell sichtbare Hub-Seite (nur relevant, solange nicht eingeloggt).
+    pub hub_view: HubView,
     /// Dateien der Dateiliste (entspricht den Einträgen der files-ListBox)
     pub files: Vec<FileInfo>,
     /// DataViewItem-Pointer → Baumknoten (nur macOS/Linux genutzt)
