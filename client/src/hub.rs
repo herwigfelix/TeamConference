@@ -205,6 +205,10 @@ pub fn admin_reset_password(access_token: &str, uid: &str, new_password: &str) -
 pub fn admin_promote(access_token: &str, uid: &str) -> Result<(), String> {
     post_auth("/admin/promote", access_token, json!({ "central_uid": uid })).map(|_| ())
 }
+/// Registrierung ablehnen (Account löschen).
+pub fn admin_reject(access_token: &str, uid: &str) -> Result<(), String> {
+    post_auth("/admin/reject", access_token, json!({ "central_uid": uid })).map(|_| ())
+}
 
 /// Öffentliches Verzeichnis laden/durchsuchen.
 pub fn list_servers(access_token: &str, q: &str) -> Result<Vec<ServerInfo>, String> {

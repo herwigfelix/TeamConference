@@ -389,6 +389,11 @@ pub fn update_hub_view(ctx: &Ctx) {
         }
     };
     ctx.ui.hub_book.set_selection(idx);
+    // Admin-Knöpfe nur für Hub-Admins ein-/ausblenden.
+    let admin = hub_is_admin();
+    ctx.ui.hub_admin_pending_btn.show(admin);
+    ctx.ui.hub_admin_user_btn.show(admin);
+    ctx.ui.hub_panel.layout();
     update_hub_status(ctx);
 }
 
@@ -795,38 +800,98 @@ pub fn hub_delete_server(ctx: &Ctx) {
     });
 }
 
-/// Admin: wartende Konten freigeben.
+/// Admin: Liste der wartenden Konten als Dialog mit „Freigeben"/„Ablehnen".
 pub fn hub_admin_pending(ctx: &Ctx) {
     if !hub_is_admin() {
         notify(ctx, "Nur für Hub-Admins.", "Admin");
         return;
     }
-    let pending = match fresh_access_token().and_then(|t| crate::hub::admin_pending(&t)) {
-        Ok(v) => v,
-        Err(e) => {
-            notify(ctx, &format!("Konnte Freigaben nicht laden: {}", e), "Admin");
-            return;
-        }
-    };
-    if pending.is_empty() {
-        notify(ctx, "Keine wartenden Freigaben.", "Admin");
-        return;
-    }
-    for u in pending {
-        let dlg = MessageDialog::builder(
-            &ctx.ui.frame,
-            &format!("Konto „{}\" ({}) freigeben?", u.display_name, u.username),
-            "Freigaben",
-        )
-        .with_style(MessageDialogStyle::YesNo)
-        .build();
-        if dlg.show_modal() == ID_YES {
-            match fresh_access_token().and_then(|t| crate::hub::admin_approve(&t, &u.central_uid)) {
-                Ok(()) => ctx.ui.append_hub_log(&format!("Konto {} freigegeben.", u.username)),
-                Err(e) => ctx.ui.append_hub_log(&format!("Freigabe fehlgeschlagen: {}", e)),
+    let dlg = Dialog::builder(&ctx.ui.frame, "Wartende Freigaben").with_size(480, 420).build();
+    let v = BoxSizer::builder(Orientation::Vertical).build();
+    v.add(
+        &StaticText::builder(&dlg)
+            .with_label("Konto auswählen und freigeben oder ablehnen:")
+            .build(),
+        0,
+        SizerFlag::All,
+        6,
+    );
+    let list = ListBox::builder(&dlg).build();
+    crate::ui::set_a11y_name(&list, "Wartende Konten");
+    v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
+    let brow = BoxSizer::builder(Orientation::Horizontal).build();
+    let approve_btn = Button::builder(&dlg).with_label("Freigeben").build();
+    let reject_btn = Button::builder(&dlg).with_label("Ablehnen").build();
+    let close_btn = Button::builder(&dlg).with_label("Schließen").build();
+    brow.add(&approve_btn, 0, SizerFlag::All, 4);
+    brow.add(&reject_btn, 0, SizerFlag::All, 4);
+    brow.add(&close_btn, 0, SizerFlag::All, 4);
+    v.add_sizer(&brow, 0, SizerFlag::All, 6);
+    dlg.set_sizer(v, true);
+
+    // Daten + Nachlade-Funktion (Liste füllen). Blockierende Abrufe sind kurz
+    // und laufen auf dem UI-Thread, wie sonst auch.
+    let data: std::rc::Rc<std::cell::RefCell<Vec<crate::hub::UserSummary>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let fill: std::rc::Rc<dyn Fn()> = {
+        let data = data.clone();
+        std::rc::Rc::new(move || {
+            let items = fresh_access_token()
+                .and_then(|t| crate::hub::admin_pending(&t))
+                .unwrap_or_default();
+            list.clear();
+            for u in &items {
+                list.append(&format!("{} ({})", u.display_name, u.username));
             }
-        }
+            *data.borrow_mut() = items;
+        })
+    };
+    fill();
+
+    {
+        let data = data.clone();
+        let fill = fill.clone();
+        approve_btn.on_click(move |_| {
+            let uid = list
+                .get_selection()
+                .and_then(|i| data.borrow().get(i as usize).map(|u| u.central_uid.clone()));
+            if let Some(uid) = uid {
+                let _ = fresh_access_token().and_then(|t| crate::hub::admin_approve(&t, &uid));
+                fill();
+            }
+        });
     }
+    {
+        let data = data.clone();
+        let fill = fill.clone();
+        let frame = ctx.ui.frame;
+        reject_btn.on_click(move |_| {
+            let sel = list
+                .get_selection()
+                .and_then(|i| data.borrow().get(i as usize).cloned());
+            if let Some(u) = sel {
+                let ok = MessageDialog::builder(
+                    &frame,
+                    &format!("Registrierung von „{}\" ({}) ablehnen und löschen?", u.display_name, u.username),
+                    "Ablehnen",
+                )
+                .with_style(MessageDialogStyle::YesNo)
+                .build()
+                .show_modal()
+                    == ID_YES;
+                if ok {
+                    let _ = fresh_access_token().and_then(|t| crate::hub::admin_reject(&t, &u.central_uid));
+                    fill();
+                }
+            }
+        });
+    }
+    {
+        let d = dlg;
+        close_btn.on_click(move |_| d.end_modal(ID_OK));
+    }
+    dlg.show_modal();
+    dlg.destroy();
 }
 
 /// Admin: Nutzer suchen und verwalten (bannen/entsperren/Passwort/Admin).
