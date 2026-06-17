@@ -48,7 +48,7 @@ impl Default for ServerConfig {
             max_users: 100,
             allow_registration: false,
             central_login: false,
-            central_login_url: "https://srvhub.accessy.org".into(),
+            central_login_url: "https://srvapi.accessy.org".into(),
             central_login_pubkey: String::new(),
             multi_tenant: false,
         }

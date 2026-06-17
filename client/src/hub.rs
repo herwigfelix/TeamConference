@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde_json::json;
 
-const DEFAULT_BASE: &str = "https://srvhub.accessy.org";
+const DEFAULT_BASE: &str = "https://srvapi.accessy.org";
 const DEVICE_LABEL: &str = "TeamConference Desktop";
 
 pub fn base_url() -> String {
