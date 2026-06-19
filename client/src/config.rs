@@ -37,6 +37,9 @@ pub struct ServerEntry {
     /// Leer = normaler Einzelserver.
     #[serde(default)]
     pub server_id: String,
+    /// Audio-Port (Hub kann ≠ Steuerport+1 sein). 0 = Konvention Steuerport+1.
+    #[serde(default)]
+    pub audio_port: u16,
 }
 
 impl ServerEntry {

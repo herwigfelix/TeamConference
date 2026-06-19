@@ -103,6 +103,14 @@ pub fn do_connect(ctx: &Ctx) {
     let use_central = ctx.ui.use_central_chk.is_checked();
     // Unterserver-ID (Hub-Modus); vom Verzeichnis-Beitritt oder Lesezeichen gesetzt.
     let server_id = ctx.st.borrow().pending_server_id.clone().unwrap_or_default();
+    // Audio-Port: bei Hub-Servern aus dem Verzeichnis (kann vom Steuerport
+    // abweichen, z. B. Hub 10001/10303); sonst Konvention Steuerport + 1.
+    let udp_port = ctx
+        .st
+        .borrow()
+        .pending_audio_port
+        .filter(|&p| p != 0)
+        .unwrap_or(port + 1);
     let username = ctx.ui.user_in.get_value().trim().to_string();
     let password = ctx.ui.pass_in.get_value();
     let mut nickname = ctx.ui.nick_in.get_value().trim().to_string();
@@ -179,7 +187,7 @@ pub fn do_connect(ctx: &Ctx) {
             fail(format!("Verbindung fehlgeschlagen: {}", e));
             return;
         }
-        match crate::net::udp_client::start_udp_audio(&host, port + 1, app.clone()).await {
+        match crate::net::udp_client::start_udp_audio(&host, udp_port, app.clone()).await {
             Ok((send_shutdown, recv_shutdown)) => {
                 let mut inner = app.inner.lock();
                 inner.capture_shutdown = Some(send_shutdown);
@@ -305,8 +313,12 @@ pub fn fill_form_from_server(ctx: &Ctx) {
         ctx.ui.nick_in.set_value(&s.nickname);
         ctx.ui.pass_in.set_value(&s.password);
         ctx.ui.use_central_chk.set_value(s.use_central);
-        ctx.st.borrow_mut().pending_server_id =
-            if s.server_id.is_empty() { None } else { Some(s.server_id.clone()) };
+        {
+            let mut st = ctx.st.borrow_mut();
+            st.pending_server_id =
+                if s.server_id.is_empty() { None } else { Some(s.server_id.clone()) };
+            st.pending_audio_port = if s.audio_port > 0 { Some(s.audio_port) } else { None };
+        }
     }
 }
 
@@ -327,6 +339,7 @@ pub fn save_bookmark(ctx: &Ctx) {
         password: ctx.ui.pass_in.get_value(),
         use_central: ctx.ui.use_central_chk.is_checked(),
         server_id: ctx.st.borrow().pending_server_id.clone().unwrap_or_default(),
+        audio_port: ctx.st.borrow().pending_audio_port.unwrap_or(0),
     };
     ctx.st.borrow_mut().servers.push(entry);
     persist_servers(ctx);
@@ -684,8 +697,13 @@ pub fn hub_join_selected(ctx: &Ctx) {
     ctx.ui.port_in.set_value(&s.control_port.to_string());
     ctx.ui.ssl_chk.set_value(true);
     ctx.ui.use_central_chk.set_value(true);
-    // Unterserver-ID merken, damit auth_login den richtigen Bereich wählt.
-    ctx.st.borrow_mut().pending_server_id = Some(s.id.clone());
+    // Unterserver-ID + Audio-Port merken, damit auth_login den richtigen Bereich
+    // wählt und das Audio den richtigen UDP-Port trifft.
+    {
+        let mut st = ctx.st.borrow_mut();
+        st.pending_server_id = Some(s.id.clone());
+        st.pending_audio_port = if s.audio_port > 0 { Some(s.audio_port as u16) } else { None };
+    }
     // Zur „Serverliste" wechseln (Reiter 1; Server-Hub ist jetzt Reiter 0).
     ctx.ui.notebook.set_selection(1);
     do_connect(ctx);

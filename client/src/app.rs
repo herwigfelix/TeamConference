@@ -42,6 +42,8 @@ pub struct UiState {
     pub hub_servers: Vec<crate::hub::ServerInfo>,
     /// Im Hub-Modus zu verwendende Unterserver-ID beim nächsten Verbinden.
     pub pending_server_id: Option<String>,
+    /// Audio-Port des nächsten Servers (Hub: kann ≠ Steuerport+1 sein).
+    pub pending_audio_port: Option<u16>,
     /// Aktuell sichtbare Hub-Seite (nur relevant, solange nicht eingeloggt).
     pub hub_view: HubView,
     /// Dateien der Dateiliste (entspricht den Einträgen der files-ListBox)
