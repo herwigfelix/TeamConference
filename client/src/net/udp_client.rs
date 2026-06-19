@@ -200,19 +200,29 @@ pub async fn start_udp_audio(
 
                                 if !deafened && !own_file && !payload.is_empty() {
                                     let ch = header.channels.max(1);
+                                    // Kanalzahl des dekodierten PCM (für die spätere Kanal-
+                                    // umrechnung). Bei Opus immer Mono/Stereo.
+                                    let mut pcm_ch: u16 = ch as u16;
                                     let pcm: Option<Vec<u8>> = if header.bit_depth == 0 {
-                                        let key = (header.token, header.source_id, ch);
+                                        // Opus kann nur Mono/Stereo — Header-Kanalzahl
+                                        // defensiv auf 2 begrenzen (manche Geräte melden 4+),
+                                        // sonst Pufferüberlauf beim Dekodieren → Task-Crash.
+                                        let dch = ch.min(2);
+                                        pcm_ch = dch as u16;
+                                        let key = (header.token, header.source_id, dch);
                                         let decoder = decoders.entry(key).or_insert_with(|| {
-                                            let oc = if ch <= 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                                            let oc = if dch <= 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
                                             opus::Decoder::new(48000, oc).expect("Opus decoder creation failed")
                                         });
-                                        let out_samples = 960 * (ch as usize);
-                                        if pcm_out.len() < out_samples {
-                                            pcm_out.resize(out_samples, 0);
+                                        // Puffer für ein volles Opus-Frame (bis 120 ms @ 48 kHz
+                                        // = 5760 Samples/Kanal), damit decode nie überläuft.
+                                        let cap = 5760 * (dch as usize);
+                                        if pcm_out.len() < cap {
+                                            pcm_out.resize(cap, 0);
                                         }
-                                        match decoder.decode(payload, &mut pcm_out[..out_samples], false) {
+                                        match decoder.decode(payload, &mut pcm_out[..cap], false) {
                                             Ok(frames) => {
-                                                let total = frames * (ch as usize);
+                                                let total = (frames * (dch as usize)).min(pcm_out.len());
                                                 let mut bytes = Vec::with_capacity(total * 2);
                                                 for &s in &pcm_out[..total] {
                                                     bytes.extend_from_slice(&s.to_le_bytes());
@@ -232,7 +242,7 @@ pub async fn start_udp_audio(
 
                                     if let Some(pcm_data) = pcm {
                                         let dev_ch = recv_state.inner.lock().playback_device_channels;
-                                        let converted = convert_channels(&pcm_data, ch as u16, dev_ch);
+                                        let converted = convert_channels(&pcm_data, pcm_ch, dev_ch);
                                         let frame: Vec<i16> = converted
                                             .chunks_exact(2)
                                             .map(|c| i16::from_le_bytes([c[0], c[1]]))

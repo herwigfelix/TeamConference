@@ -97,8 +97,14 @@ pub fn start_capture(
         let frame_bytes = frame_samples * (channels as usize) * 2; // i16 = 2 bytes
         let mut accumulator: Vec<u8> = Vec::with_capacity(frame_bytes * 2);
 
+        // Opus unterstützt nur Mono/Stereo. Geräte mit mehr Kanälen (z. B. 4-Kanal-
+        // Interfaces) werden vor dem Kodieren auf Stereo heruntergemischt — sonst
+        // entstehen fehlerhafte Pakete (channels=4), die andere Clients beim
+        // Dekodieren zum Absturz bringen.
+        let wire_channels: u16 = channels.min(2);
+
         // Create Opus encoder
-        let opus_channels = if channels == 1 {
+        let opus_channels = if wire_channels == 1 {
             opus::Channels::Mono
         } else {
             opus::Channels::Stereo
@@ -106,9 +112,9 @@ pub fn start_capture(
         let mut encoder = match opus::Encoder::new(48000, opus_channels, opus::Application::Audio) {
             Ok(mut enc) => {
                 // High bitrate for transparent quality
-                let bitrate = if channels == 1 { 128_000 } else { 256_000 };
+                let bitrate = if wire_channels == 1 { 128_000 } else { 256_000 };
                 let _ = enc.set_bitrate(opus::Bitrate::Bits(bitrate));
-                tracing::info!("Capture: Opus encoder created, ch={}, bitrate={}kbps", channels, bitrate / 1000);
+                tracing::info!("Capture: Opus encoder created, dev_ch={}, wire_ch={}, bitrate={}kbps", channels, wire_channels, bitrate / 1000);
                 Some(enc)
             }
             Err(e) => {
@@ -201,7 +207,13 @@ pub fn start_capture(
                         // läuft unabhängig in file_stream.rs).
                         if !muted {
                             if let (Some(ref sock), Some(ref addr)) = (socket, server_addr) {
-                                let pcm_samples: Vec<i16> = frame
+                                // Auf Sende-Kanalzahl (max. Stereo) heruntermischen.
+                                let send_bytes: Vec<u8> = if channels as u16 == wire_channels {
+                                    frame.clone()
+                                } else {
+                                    crate::net::udp_client::convert_channels(&frame, channels as u16, wire_channels)
+                                };
+                                let pcm_samples: Vec<i16> = send_bytes
                                     .chunks_exact(2)
                                     .map(|c| i16::from_le_bytes([c[0], c[1]]))
                                     .collect();
@@ -214,11 +226,11 @@ pub fn start_capture(
                                             if packets_sent < 3 {
                                                 tracing::warn!("Capture: Opus encode failed: {}, sending raw PCM", e);
                                             }
-                                            (frame.clone(), 16u8)
+                                            (send_bytes.clone(), 16u8)
                                         }
                                     }
                                 } else {
-                                    (frame.clone(), 16u8)
+                                    (send_bytes.clone(), 16u8)
                                 };
 
                                 match send_audio_packet(
@@ -229,7 +241,7 @@ pub fn start_capture(
                                     timestamp_ms,
                                     sample_rate as u16,
                                     bit_depth,
-                                    channels as u8,
+                                    wire_channels as u8,
                                     crate::protocol::SOURCE_MIC,
                                     &payload,
                                 )
