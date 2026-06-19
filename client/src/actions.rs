@@ -1612,18 +1612,63 @@ pub fn volume_changed(ctx: &Ctx) {
 
 /// Dialog zur Auswahl von Mikrofon und Lautsprecher. Die Audio-Qualität
 /// (Samplerate, Mono/Stereo) bestimmt dagegen der Raum (siehe Raum-Dialog).
-fn audio_settings(ctx: &Ctx) {
-    let devices = crate::audio::device::list_devices();
-    let mut inputs: Vec<String> = vec!["Standardgerät".to_string()];
-    let mut outputs: Vec<String> = vec!["Standardgerät".to_string()];
-    for d in &devices {
-        if d.is_input {
-            inputs.push(d.name.clone());
-        }
-        if d.is_output {
-            outputs.push(d.name.clone());
-        }
+/// Audio-Pipeline mit den aktuell gewählten Geräten neu starten — ohne
+/// Reconnect. Stoppt Aufnahme/Wiedergabe und startet sie über dieselben Pfade
+/// wie beim Verbinden neu (Geräte aus dem State). Nur sinnvoll, wenn verbunden.
+fn restart_audio(ctx: &Ctx) {
+    if !ctx.app.inner.lock().connected {
+        return;
     }
+    // Aufnahme: alten Sende-Task stoppen, mit neuem Mikrofon neu starten.
+    {
+        let mut inner = ctx.app.inner.lock();
+        if let Some(tx) = inner.capture_shutdown.take() {
+            let _ = tx.send(true);
+        }
+        inner.capturing = false;
+    }
+    let cap_app = ctx.app.clone();
+    let input_device = ctx.app.inner.lock().input_device.clone();
+    ctx.rt.spawn(async move {
+        match crate::audio::capture::start_capture(cap_app.clone(), input_device) {
+            Ok((stream, shutdown_tx)) => {
+                let mut inner = cap_app.inner.lock();
+                inner.capturing = true;
+                inner.capture_shutdown = Some(shutdown_tx);
+                std::mem::forget(stream);
+            }
+            Err(e) => tracing::error!("Mikrofon-Neustart fehlgeschlagen: {}", e),
+        }
+    });
+    // Wiedergabe: neuen Lautsprecher-Stream starten (alter spielt dann Stille).
+    let output_device = ctx.app.inner.lock().output_device.clone();
+    let playback_state = ctx.app.clone();
+    std::thread::spawn(move || {
+        match crate::audio::playback::start_playback(playback_state, output_device) {
+            Ok(_stream) => loop {
+                std::thread::park();
+            },
+            Err(e) => tracing::error!("Wiedergabe-Neustart fehlgeschlagen: {}", e),
+        }
+    });
+}
+
+fn audio_settings(ctx: &Ctx) {
+    let enumerate = || -> (Vec<String>, Vec<String>) {
+        let devices = crate::audio::device::list_devices();
+        let mut inputs: Vec<String> = vec!["Standardgerät".to_string()];
+        let mut outputs: Vec<String> = vec!["Standardgerät".to_string()];
+        for d in &devices {
+            if d.is_input {
+                inputs.push(d.name.clone());
+            }
+            if d.is_output {
+                outputs.push(d.name.clone());
+            }
+        }
+        (inputs, outputs)
+    };
+    let (inputs, outputs) = enumerate();
 
     let (cur_in, cur_out) = {
         let inner = ctx.app.inner.lock();
@@ -1669,6 +1714,49 @@ fn audio_settings(ctx: &Ctx) {
     ui::set_a11y_name(&out_choice, "Lautsprecher");
     row("Lautsprecher:", &out_choice);
 
+    // Aktuelle Gerätelisten (für die Auswahl-Zuordnung). Der „Aktualisieren"-
+    // Knopf füllt die Auswahlfelder neu (z. B. nach Ein-/Ausstöpseln eines Geräts).
+    let lists = std::rc::Rc::new(std::cell::RefCell::new((inputs, outputs)));
+    let refresh_btn = Button::builder(&dialog).with_label("Geräte aktualisieren").build();
+    ui::set_a11y_name(&refresh_btn, "Geräteliste aktualisieren");
+    {
+        let lists = lists.clone();
+        refresh_btn.on_click(move |_| {
+            let devices = crate::audio::device::list_devices();
+            let mut ins: Vec<String> = vec!["Standardgerät".to_string()];
+            let mut outs: Vec<String> = vec!["Standardgerät".to_string()];
+            for d in &devices {
+                if d.is_input {
+                    ins.push(d.name.clone());
+                }
+                if d.is_output {
+                    outs.push(d.name.clone());
+                }
+            }
+            // Aktuelle Auswahl per Name beibehalten, falls noch vorhanden.
+            let sel_in = in_choice
+                .get_selection()
+                .and_then(|i| lists.borrow().0.get(i as usize).cloned());
+            let sel_out = out_choice
+                .get_selection()
+                .and_then(|i| lists.borrow().1.get(i as usize).cloned());
+            in_choice.clear();
+            for d in &ins {
+                in_choice.append(d);
+            }
+            out_choice.clear();
+            for d in &outs {
+                out_choice.append(d);
+            }
+            let ii = sel_in.and_then(|n| ins.iter().position(|d| *d == n)).unwrap_or(0);
+            let oi = sel_out.and_then(|n| outs.iter().position(|d| *d == n)).unwrap_or(0);
+            in_choice.set_selection(ii as u32);
+            out_choice.set_selection(oi as u32);
+            *lists.borrow_mut() = (ins, outs);
+        });
+    }
+    v.add(&refresh_btn, 0, SizerFlag::All, 6);
+
     // Toggle: Server-Ereignisse per Sprachausgabe ansagen (Standard an).
     let announce_chk = CheckBox::builder(&dialog)
         .with_label("Server-Ereignisse ansagen")
@@ -1697,15 +1785,20 @@ fn audio_settings(ctx: &Ctx) {
 
     let result = dialog.show_modal();
     if result == ID_OK {
-        // Index 0 = Standardgerät = None
-        let pick = |sel: Option<u32>, list: &[String]| -> Option<String> {
-            match sel {
-                Some(0) | None => None,
-                Some(i) => list.get(i as usize).cloned(),
-            }
+        // Index 0 = Standardgerät = None. Auswahl gegen die AKTUELLEN Listen.
+        let (input, output) = {
+            let g = lists.borrow();
+            let pick = |sel: Option<u32>, list: &[String]| -> Option<String> {
+                match sel {
+                    Some(0) | None => None,
+                    Some(i) => list.get(i as usize).cloned(),
+                }
+            };
+            (
+                pick(in_choice.get_selection(), &g.0),
+                pick(out_choice.get_selection(), &g.1),
+            )
         };
-        let input = pick(in_choice.get_selection(), &inputs);
-        let output = pick(out_choice.get_selection(), &outputs);
         let announce_events = announce_chk.is_checked();
         {
             let mut inner = ctx.app.inner.lock();
@@ -1718,12 +1811,15 @@ fn audio_settings(ctx: &Ctx) {
         cfg.output_device = output;
         cfg.announce_events = announce_events;
         let _ = config::save_config(&cfg);
+        let connected = ctx.app.inner.lock().connected;
         dialog.destroy();
-        notify(
-            ctx,
-            "Audiogeräte gespeichert. Gilt ab der nächsten Verbindung.",
-            "Audiogeräte",
-        );
+        // Geräte sofort übernehmen (ohne Reconnect), wenn verbunden.
+        if connected {
+            restart_audio(ctx);
+            notify(ctx, "Audiogeräte übernommen.", "Audiogeräte");
+        } else {
+            notify(ctx, "Audiogeräte gespeichert. Gilt ab der nächsten Verbindung.", "Audiogeräte");
+        }
     } else {
         dialog.destroy();
     }
