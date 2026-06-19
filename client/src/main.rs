@@ -122,6 +122,8 @@ fn main() {
         if let Some(first) = ctx.st.borrow().servers.first().cloned() {
             ui.host_in.set_value(&first.host);
             ui.port_in.set_value(&first.port.to_string());
+            let ap = if first.audio_port > 0 { first.audio_port.to_string() } else { String::new() };
+            ui.audio_port_in.set_value(&ap);
             ui.ssl_chk.set_value(first.ssl);
             ui.user_in.set_value(&first.username);
             ui.nick_in.set_value(&first.nickname);

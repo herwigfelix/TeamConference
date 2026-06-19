@@ -77,6 +77,8 @@ pub struct Ui {
     pub server_list: ListBox,
     pub host_in: TextCtrl,
     pub port_in: TextCtrl,
+    /// Optionaler Audio-Port; leer = Steuerport + 1.
+    pub audio_port_in: TextCtrl,
     pub ssl_chk: CheckBox,
     pub user_in: TextCtrl,
     pub pass_in: TextCtrl,
@@ -189,6 +191,7 @@ impl Ui {
         let host_in = TextCtrl::builder(&connect_panel).build();
         let port_in = TextCtrl::builder(&connect_panel).build();
         port_in.set_value("9500");
+        let audio_port_in = TextCtrl::builder(&connect_panel).build();
         let ssl_chk = CheckBox::builder(&connect_panel)
             .with_label("SSL/TLS verwenden")
             .build();
@@ -205,6 +208,7 @@ impl Ui {
 
         add_form_row(&connect_panel, &cv, "Host:", &host_in);
         add_form_row(&connect_panel, &cv, "Port:", &port_in);
+        add_form_row(&connect_panel, &cv, "Audioport (optional):", &audio_port_in);
         cv.add(&ssl_chk, 0, SizerFlag::All, 6);
         add_form_row(&connect_panel, &cv, "Benutzername:", &user_in);
         add_form_row(&connect_panel, &cv, "Passwort:", &pass_in);
@@ -444,6 +448,7 @@ impl Ui {
         set_a11y_name(&server_list, "Gespeicherte Server");
         set_a11y_name(&host_in, "Host");
         set_a11y_name(&port_in, "Port");
+        set_a11y_name(&audio_port_in, "Audioport optional");
         set_a11y_name(&ssl_chk, "SSL/TLS verwenden");
         set_a11y_name(&user_in, "Benutzername");
         set_a11y_name(&pass_in, "Passwort");
@@ -476,6 +481,7 @@ impl Ui {
             server_list,
             host_in,
             port_in,
+            audio_port_in,
             ssl_chk,
             user_in,
             pass_in,

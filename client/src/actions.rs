@@ -103,12 +103,15 @@ pub fn do_connect(ctx: &Ctx) {
     let use_central = ctx.ui.use_central_chk.is_checked();
     // Unterserver-ID (Hub-Modus); vom Verzeichnis-Beitritt oder Lesezeichen gesetzt.
     let server_id = ctx.st.borrow().pending_server_id.clone().unwrap_or_default();
-    // Audio-Port: bei Hub-Servern aus dem Verzeichnis (kann vom Steuerport
-    // abweichen, z. B. Hub 10001/10303); sonst Konvention Steuerport + 1.
+    // Audio-Port: optionales Feld (kann vom Steuerport abweichen, z. B. Hub);
+    // leer/ungültig → Konvention Steuerport + 1.
     let udp_port = ctx
-        .st
-        .borrow()
-        .pending_audio_port
+        .ui
+        .audio_port_in
+        .get_value()
+        .trim()
+        .parse::<u16>()
+        .ok()
         .filter(|&p| p != 0)
         .unwrap_or(port + 1);
     let username = ctx.ui.user_in.get_value().trim().to_string();
@@ -313,12 +316,10 @@ pub fn fill_form_from_server(ctx: &Ctx) {
         ctx.ui.nick_in.set_value(&s.nickname);
         ctx.ui.pass_in.set_value(&s.password);
         ctx.ui.use_central_chk.set_value(s.use_central);
-        {
-            let mut st = ctx.st.borrow_mut();
-            st.pending_server_id =
-                if s.server_id.is_empty() { None } else { Some(s.server_id.clone()) };
-            st.pending_audio_port = if s.audio_port > 0 { Some(s.audio_port) } else { None };
-        }
+        let ap = if s.audio_port > 0 { s.audio_port.to_string() } else { String::new() };
+        ctx.ui.audio_port_in.set_value(&ap);
+        ctx.st.borrow_mut().pending_server_id =
+            if s.server_id.is_empty() { None } else { Some(s.server_id.clone()) };
     }
 }
 
@@ -339,7 +340,7 @@ pub fn save_bookmark(ctx: &Ctx) {
         password: ctx.ui.pass_in.get_value(),
         use_central: ctx.ui.use_central_chk.is_checked(),
         server_id: ctx.st.borrow().pending_server_id.clone().unwrap_or_default(),
-        audio_port: ctx.st.borrow().pending_audio_port.unwrap_or(0),
+        audio_port: ctx.ui.audio_port_in.get_value().trim().parse::<u16>().unwrap_or(0),
     };
     ctx.st.borrow_mut().servers.push(entry);
     persist_servers(ctx);
@@ -697,13 +698,11 @@ pub fn hub_join_selected(ctx: &Ctx) {
     ctx.ui.port_in.set_value(&s.control_port.to_string());
     ctx.ui.ssl_chk.set_value(true);
     ctx.ui.use_central_chk.set_value(true);
-    // Unterserver-ID + Audio-Port merken, damit auth_login den richtigen Bereich
-    // wählt und das Audio den richtigen UDP-Port trifft.
-    {
-        let mut st = ctx.st.borrow_mut();
-        st.pending_server_id = Some(s.id.clone());
-        st.pending_audio_port = if s.audio_port > 0 { Some(s.audio_port as u16) } else { None };
-    }
+    // Unterserver-ID merken (für auth_login) und den Audio-Port ins Feld
+    // schreiben, damit das Audio den richtigen UDP-Port trifft (und sichtbar ist).
+    ctx.st.borrow_mut().pending_server_id = Some(s.id.clone());
+    let ap = if s.audio_port > 0 { s.audio_port.to_string() } else { String::new() };
+    ctx.ui.audio_port_in.set_value(&ap);
     // Zur „Serverliste" wechseln (Reiter 1; Server-Hub ist jetzt Reiter 0).
     ctx.ui.notebook.set_selection(1);
     do_connect(ctx);
