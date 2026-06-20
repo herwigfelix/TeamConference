@@ -143,6 +143,11 @@ jobs:
         run: |
           useradd -m builder
           cp packaging/arch/PKGBUILD ./PKGBUILD
+          # pkgver aus client/Cargo.toml übernehmen (sonst bleibt das .pkg auf der
+          # im PKGBUILD hartcodierten Version — .deb macht es bereits dynamisch).
+          VER="$(grep -m1 '^version' client/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          sed -i "s/^pkgver=.*/pkgver=${VER}/" ./PKGBUILD
+          echo "PKGBUILD pkgver -> ${VER}"
           chown -R builder:builder "$GITHUB_WORKSPACE"
           sudo -u builder bash -lc "cd '$GITHUB_WORKSPACE' && CMAKE_POLICY_VERSION_MINIMUM=3.5 makepkg -f --noconfirm --skipinteg --nodeps"
           mkdir -p dist
