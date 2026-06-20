@@ -46,6 +46,51 @@ jobs:
       - name: CMake-Version
         run: cmake --version
 
+      # Developer-ID-Zertifikat in einen temporären Keychain importieren und den
+      # App-Store-Connect-API-Key (.p8) für notarytool ablegen. Läuft nur auf
+      # macOS und überspringt sich selbst, wenn die Secrets fehlen (z. B. Forks)
+      # — dann baut compile.sh ad-hoc weiter.
+      - name: macOS – Signierung & Notarisierung vorbereiten
+        if: runner.os != 'Windows'
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          if [ -z "$MAC_CERT_P12" ]; then
+            echo "Keine Signatur-Secrets gesetzt — baue ad-hoc (unsigniert)."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          # Zertifikat (.p12) importieren und codesign Zugriff erlauben.
+          echo "$MAC_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          # Neuen Keychain in die Suchliste aufnehmen (sonst findet codesign die
+          # Identität nicht), vorhandene erhalten.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          # API-Key (.p8) für notarytool ablegen.
+          echo "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac_api_key.p8"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Variablen an die folgenden Steps (compile.sh) weiterreichen.
+          {
+            echo "MAC_SIGN_IDENTITY=$MAC_SIGN_IDENTITY"
+            echo "AC_API_KEY_PATH=$RUNNER_TEMP/ac_api_key.p8"
+            echo "AC_API_KEY_ID=$AC_API_KEY_ID"
+            echo "AC_API_ISSUER_ID=$AC_API_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+          echo "Keychain bereit, Signatur-Identität: $MAC_SIGN_IDENTITY"
+
       - name: Client bauen und paketieren (macOS)
         if: runner.os != 'Windows'
         run: bash compile.sh

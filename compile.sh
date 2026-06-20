@@ -8,6 +8,10 @@ CLIENT_DIR="$SCRIPT_DIR/client"
 DIST_DIR="$SCRIPT_DIR/dist"
 BIN_NAME="teamconference-client"
 
+# Version aus client/Cargo.toml (eine Quelle der Wahrheit – keine hartcodierte
+# Version mehr in der Info.plist).
+VERSION="$(grep -m1 '^version' "$CLIENT_DIR/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
@@ -48,7 +52,7 @@ if [ "$OSNAME" = "macos" ]; then
     <key>CFBundleIdentifier</key>      <string>org.accessy.TCClient</string>
     <key>CFBundleExecutable</key>      <string>$BIN_NAME</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>0.3.2</string>
+    <key>CFBundleShortVersionString</key> <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSMicrophoneUsageDescription</key> <string>TeamConference benötigt das Mikrofon für die Sprachübertragung.</string>
@@ -56,11 +60,26 @@ if [ "$OSNAME" = "macos" ]; then
 </plist>
 PLIST
 
-    # Ad-hoc-Signatur: ohne Signatur merkt sich macOS die einmal erteilte
-    # Mikrofon-Berechtigung nicht zuverlässig (TCC). "-" = ad-hoc, kein Zertifikat nötig.
-    codesign --force --deep --sign - "$APP" 2>/dev/null \
-        && echo "Ad-hoc signiert." \
-        || echo "WARNUNG: codesign nicht verfügbar — Mikrofon-Prompt evtl. unzuverlässig."
+    # Signieren. Ist MAC_SIGN_IDENTITY gesetzt (z. B. "Developer ID Application:
+    # Name (TEAMID)"), wird mit echtem Zertifikat + Hardened Runtime signiert –
+    # Voraussetzung für die Notarisierung. Ohne diese Variable fällt der Build
+    # auf eine Ad-hoc-Signatur zurück (lokale Builds: kein Zertifikat nötig, aber
+    # macOS warnt beim Öffnen und merkt sich die Mikrofon-Berechtigung weniger
+    # zuverlässig).
+    ENTITLEMENTS="$SCRIPT_DIR/packaging/macos/entitlements.plist"
+    if [ -n "${MAC_SIGN_IDENTITY:-}" ]; then
+        echo "Signiere mit Developer ID: $MAC_SIGN_IDENTITY"
+        codesign --force --options runtime --timestamp \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$MAC_SIGN_IDENTITY" "$APP"
+        codesign --verify --strict --verbose=2 "$APP"
+        echo "Developer-ID-signiert (Hardened Runtime)."
+    else
+        # "-" = ad-hoc, kein Zertifikat nötig.
+        codesign --force --deep --sign - "$APP" 2>/dev/null \
+            && echo "Ad-hoc signiert (keine MAC_SIGN_IDENTITY gesetzt)." \
+            || echo "WARNUNG: codesign nicht verfügbar — Mikrofon-Prompt evtl. unzuverlässig."
+    fi
 
     # In die DMG gehört nur die .app plus ein Alias auf /Applications, damit man
     # die App per Drag-and-drop installieren kann (keine README in der DMG).
@@ -70,6 +89,27 @@ PLIST
     DMG="$DIST_DIR/$PKG.dmg"
     rm -f "$DMG"
     hdiutil create -volname "TeamConference" -srcfolder "$OUT" -ov -format UDZO "$DMG" >/dev/null
+
+    # Notarisieren + Ticket anheften. Nur wenn echt signiert wurde UND die App-
+    # Store-Connect-API-Key-Variablen vorliegen. Apple prüft die DMG; nach Erfolg
+    # heftet "stapler" das Ticket an, sodass die DMG offline ohne Gatekeeper-
+    # Warnung per Doppelklick startet.
+    if [ -n "${MAC_SIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_PATH:-}" ] \
+        && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ]; then
+        echo "Notarisiere DMG bei Apple (kann einige Minuten dauern)…"
+        xcrun notarytool submit "$DMG" \
+            --key "$AC_API_KEY_PATH" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait
+        echo "Hefte Notarisierungs-Ticket an…"
+        xcrun stapler staple "$DMG"
+        xcrun stapler validate "$DMG"
+        echo "Notarisiert und gestapelt."
+    else
+        echo "Notarisierung übersprungen (keine Apple-Credentials/Signatur)."
+    fi
+
     echo ""
     echo "=== Fertig ==="
     echo "App:  $APP"
