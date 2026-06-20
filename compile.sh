@@ -81,8 +81,36 @@ PLIST
             || echo "WARNUNG: codesign nicht verfügbar — Mikrofon-Prompt evtl. unzuverlässig."
     fi
 
-    # In die DMG gehört nur die .app plus ein Alias auf /Applications, damit man
-    # die App per Drag-and-drop installieren kann (keine README in der DMG).
+    # Notarisierung ist möglich, wenn echt signiert wurde und alle App-Store-
+    # Connect-API-Key-Variablen vorliegen.
+    DO_NOTARIZE=0
+    if [ -n "${MAC_SIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_PATH:-}" ] \
+        && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ]; then
+        DO_NOTARIZE=1
+    fi
+
+    # Schritt 1: die App selbst notarisieren und das Ticket ANHEFTEN. Nur so ist
+    # die App auch beim allerersten Start OHNE Internet vertrauenswürdig (das
+    # Ticket hängt dann an der App, nicht nur am DMG). notarytool akzeptiert keine
+    # .app direkt → vorher als ZIP verpacken.
+    if [ "$DO_NOTARIZE" = "1" ]; then
+        echo "Notarisiere App bei Apple (kann einige Minuten dauern)…"
+        APP_ZIP="$DIST_DIR/$PKG-app.zip"
+        rm -f "$APP_ZIP"
+        ditto -c -k --keepParent "$APP" "$APP_ZIP"
+        xcrun notarytool submit "$APP_ZIP" \
+            --key "$AC_API_KEY_PATH" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait
+        xcrun stapler staple "$APP"
+        xcrun stapler validate "$APP"
+        rm -f "$APP_ZIP"
+        echo "App notarisiert und gestapelt."
+    fi
+
+    # In die DMG gehört nur die (jetzt gestapelte) .app plus ein Alias auf
+    # /Applications, damit man sie per Drag-and-drop installieren kann.
     ln -sf /Applications "$OUT/Applications"
 
     # DMG aus dem Ordner erzeugen (enthält die .app und den Applications-Alias)
@@ -90,22 +118,21 @@ PLIST
     rm -f "$DMG"
     hdiutil create -volname "TeamConference" -srcfolder "$OUT" -ov -format UDZO "$DMG" >/dev/null
 
-    # Notarisieren + Ticket anheften. Nur wenn echt signiert wurde UND die App-
-    # Store-Connect-API-Key-Variablen vorliegen. Apple prüft die DMG; nach Erfolg
-    # heftet "stapler" das Ticket an, sodass die DMG offline ohne Gatekeeper-
-    # Warnung per Doppelklick startet.
-    if [ -n "${MAC_SIGN_IDENTITY:-}" ] && [ -n "${AC_API_KEY_PATH:-}" ] \
-        && [ -n "${AC_API_KEY_ID:-}" ] && [ -n "${AC_API_ISSUER_ID:-}" ]; then
-        echo "Notarisiere DMG bei Apple (kann einige Minuten dauern)…"
+    # Schritt 2: das DMG-Image selbst codesignieren, dann notarisieren und das
+    # Ticket anheften. Das Signieren gibt dem Image eine "usable signature", damit
+    # es beim Download per Doppelklick ohne Gatekeeper-Warnung mountet (sonst
+    # meldet spctl "no usable signature", obwohl ein Ticket angeheftet ist).
+    if [ "$DO_NOTARIZE" = "1" ]; then
+        echo "Signiere und notarisiere DMG…"
+        codesign --force --timestamp --sign "$MAC_SIGN_IDENTITY" "$DMG"
         xcrun notarytool submit "$DMG" \
             --key "$AC_API_KEY_PATH" \
             --key-id "$AC_API_KEY_ID" \
             --issuer "$AC_API_ISSUER_ID" \
             --wait
-        echo "Hefte Notarisierungs-Ticket an…"
         xcrun stapler staple "$DMG"
         xcrun stapler validate "$DMG"
-        echo "Notarisiert und gestapelt."
+        echo "DMG signiert, notarisiert und gestapelt."
     else
         echo "Notarisierung übersprungen (keine Apple-Credentials/Signatur)."
     fi
