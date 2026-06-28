@@ -22,7 +22,27 @@ esac
 
 echo "=== Baue TeamConference-Client ($OSNAME-$ARCH) ==="
 cd "$CLIENT_DIR"
-cargo build --release
+
+# Auf macOS kann der wxWidgets-/wxDragon-CMake-Build mit sehr neuen
+# Apple-Clang-Versionen (z. B. aus einer Xcode-Beta) fehlschlagen — libc++
+# findet ohne passendes SDK seine C-Header nicht („<cstddef> tried including
+# <stddef.h> but didn't find libc++'s <stddef.h>"). Die Command Line Tools
+# bringen i. d. R. eine stabilere Toolchain mit. Daher: zuerst mit der aktiven
+# Toolchain bauen und nur bei Fehlschlag auf die Command Line Tools ausweichen.
+# Auf der CI (funktionierendes Xcode) greift der Fallback nie.
+CLT_DIR="/Library/Developer/CommandLineTools"
+if cargo build --release; then
+    :
+elif [ "$OSNAME" = "macos" ] && [ -z "${DEVELOPER_DIR:-}" ] \
+        && [ -x "$CLT_DIR/usr/bin/clang" ]; then
+    echo ""
+    echo "Build mit der aktiven Toolchain fehlgeschlagen — erneuter Versuch mit"
+    echo "den Command Line Tools ($CLT_DIR)…"
+    export DEVELOPER_DIR="$CLT_DIR"
+    cargo build --release
+else
+    exit 1
+fi
 
 BIN="$CLIENT_DIR/target/release/$BIN_NAME"
 if [ ! -f "$BIN" ]; then

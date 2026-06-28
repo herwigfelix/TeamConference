@@ -55,9 +55,22 @@ cargo build --release 2>&1
 echo ""
 
 # Build client (wxDragon)
+# Auf macOS kann der wxWidgets-/wxDragon-CMake-Build mit sehr neuen
+# Apple-Clang-Versionen (z. B. aus einer Xcode-Beta) an libc++ scheitern; dann
+# auf die stabileren Command Line Tools ausweichen. Siehe compile.sh.
 echo "=== Building client ==="
 cd "$CLIENT_DIR"
-cargo build --release 2>&1
+CLT_DIR="/Library/Developer/CommandLineTools"
+if cargo build --release 2>&1; then
+    :
+elif [ "$(uname -s)" = "Darwin" ] && [ -z "${DEVELOPER_DIR:-}" ] \
+        && [ -x "$CLT_DIR/usr/bin/clang" ]; then
+    echo "Client-Build mit aktiver Toolchain fehlgeschlagen — Wiederholung mit Command Line Tools…"
+    export DEVELOPER_DIR="$CLT_DIR"
+    cargo build --release 2>&1
+else
+    exit 1
+fi
 echo ""
 
 # Optional: zentralen Login-Server (TCServerHub) lokal starten und Server+Client
