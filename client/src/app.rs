@@ -23,6 +23,44 @@ pub struct AccountDialogRef {
     pub accounts: Vec<(String, String)>,
 }
 
+/// Anmeldeart einer Sitzung — gespeichert, um nach einem Verbindungsabbruch
+/// automatisch neu anmelden zu können. Beim zentralen Login wird das
+/// (rotierende) Token bei jedem Versuch frisch aus der Konfiguration geholt,
+/// daher genügt hier die Unterserver-ID.
+#[derive(Clone)]
+pub enum AuthSpec {
+    Password { username: String, password: String },
+    Central { server_id: String },
+}
+
+/// Alle Parameter einer aktiven Sitzung, um sie bei einem Abbruch identisch
+/// wiederherstellen zu können (Wiederverbindung). `None`, solange der Nutzer
+/// nicht (mehr) verbunden sein möchte — ein manuelles Trennen setzt es zurück,
+/// sodass kein automatischer Reconnect ausgelöst wird.
+#[derive(Clone)]
+pub struct SessionParams {
+    pub host: String,
+    pub port: u16,
+    pub ssl: bool,
+    pub udp_port: u16,
+    pub nickname: String,
+    pub input_device: Option<String>,
+    pub output_device: Option<String>,
+    pub auth: AuthSpec,
+}
+
+/// Laufender Wiederverbindungsversuch nach einem unerwarteten Abbruch.
+pub struct Reconnect {
+    /// Bisherige Versuche (wird vor jedem Versuch erhöht).
+    pub attempt: u32,
+    /// Höchstzahl an Versuchen, danach wird endgültig getrennt.
+    pub max_attempts: u32,
+    /// Raum, der nach erfolgreicher Wiederanmeldung erneut betreten wird.
+    pub room_id: Option<i64>,
+    /// Passwort dieses Raums (falls geschützt), für das automatische Betreten.
+    pub room_password: Option<String>,
+}
+
 /// Welche Seite im Server-Hub-Tab gezeigt wird, solange man NICHT eingeloggt
 /// ist (eingeloggt → Konto-Seite, unabhängig davon).
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +99,11 @@ pub struct UiState {
     /// Ob Server-Ereignisse (Joins/Verlassen/Abmelden/Raumnachrichten) per
     /// Sprachausgabe angesagt werden. Standardmäßig an (siehe Audio-Einstellungen).
     pub announce_events: bool,
+    /// Parameter der aktiven Sitzung (für die Wiederverbindung). `Some`, sobald
+    /// der Nutzer verbunden ist/sein möchte; `None` nach manuellem Trennen.
+    pub session: Option<SessionParams>,
+    /// Laufender automatischer Wiederverbindungsversuch (falls vorhanden).
+    pub reconnect: Option<Reconnect>,
 }
 
 /// Bündelt alles, was Event-Handler brauchen. Clone ist billig

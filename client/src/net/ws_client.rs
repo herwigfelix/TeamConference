@@ -1,8 +1,21 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio::time::{interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite;
+
+/// Maximale Dauer für den WebSocket-Verbindungsaufbau, damit ein Versuch bei
+/// unerreichbarem Server nicht unbegrenzt hängt (wichtig für die
+/// Wiederverbindungs-Schleife).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Abstand der WebSocket-Ping-Frames (Keepalive). Hält NAT-/Firewall-Mappings
+/// offen und verhindert, dass die Verbindung abreißt, während der Bildschirm
+/// aus ist bzw. der Rechner im Leerlauf läuft (auf macOS unterdrückt der
+/// regelmäßige Netzwerkverkehr zusätzlich „App Nap").
+const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 use crate::protocol::Message;
 use crate::state::AppState;
@@ -75,14 +88,18 @@ pub async fn connect(
         .with_no_client_auth();
 
         let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls_config));
-        let (stream, _) =
-            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
-                .await
-                .map_err(|e| format!("WSS connection failed: {}", e))?;
+        let (stream, _) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector)),
+        )
+        .await
+        .map_err(|_| "WSS connection timed out".to_string())?
+        .map_err(|e| format!("WSS connection failed: {}", e))?;
         stream
     } else {
-        let (stream, _) = tokio_tungstenite::connect_async(&url)
+        let (stream, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
             .await
+            .map_err(|_| "WS connection timed out".to_string())?
             .map_err(|e| format!("WS connection failed: {}", e))?;
         stream
     };
@@ -97,17 +114,37 @@ pub async fn connect(
         inner.connected = true;
     }
 
-    // Task: forward outgoing messages from channel → WebSocket
+    // Task: forward outgoing messages from channel → WebSocket und sende in
+    // Sprechpausen regelmäßig WebSocket-Ping-Frames als Keepalive. Ohne diesen
+    // Verkehr reißt die Verbindung ab, wenn der Bildschirm ausgeht oder der
+    // Rechner längere Zeit im Leerlauf ist (NAT-/Firewall-Timeouts, App Nap).
     let state_clone = state.clone();
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_tx
-                    .send(tungstenite::Message::Text(json.into()))
-                    .await
-                    .is_err()
-                {
-                    break;
+        let mut ping = interval(PING_INTERVAL);
+        ping.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        ping.tick().await; // erster Tick feuert sofort → überspringen
+        loop {
+            tokio::select! {
+                maybe_msg = rx.recv() => {
+                    let Some(msg) = maybe_msg else { break };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        if ws_tx
+                            .send(tungstenite::Message::Text(json.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                _ = ping.tick() => {
+                    if ws_tx
+                        .send(tungstenite::Message::Ping(Vec::new()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         }

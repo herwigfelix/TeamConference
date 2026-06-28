@@ -1,13 +1,17 @@
 //! Aktionen aus Menüs, Buttons, Tastatur und Dialogen.
 
+use std::sync::Arc;
+
 use wxdragon::prelude::*;
 
-use crate::app::Ctx;
+use crate::app::{AuthSpec, Ctx, Reconnect, SessionParams};
 use crate::config::{self, ServerEntry};
 use crate::handlers::{rebuild_files, rebuild_server_list, rebuild_tree, refresh_status};
 use crate::protocol::Message;
-use crate::state::PendingUpload;
+use crate::state::{AppState, PendingUpload};
 use crate::ui;
+
+use tokio::sync::mpsc::UnboundedSender;
 
 // ── kleine Helfer ──
 
@@ -124,10 +128,6 @@ pub fn do_connect(ctx: &Ctx) {
     }
 
     // Anmeldemodus: Passwort (klassisch) oder zentrales Token.
-    enum Auth {
-        Password { username: String, password: String },
-        Central { refresh_token: String },
-    }
     let auth = if use_central {
         match config::load_config().hub {
             Some(h) if !h.refresh_token.is_empty() => {
@@ -138,7 +138,7 @@ pub fn do_connect(ctx: &Ctx) {
                         h.username.clone()
                     };
                 }
-                Auth::Central { refresh_token: h.refresh_token }
+                AuthSpec::Central { server_id }
             }
             _ => {
                 notify(
@@ -161,7 +161,7 @@ pub fn do_connect(ctx: &Ctx) {
         if nickname.is_empty() {
             nickname = username.clone();
         }
-        Auth::Password { username, password }
+        AuthSpec::Password { username, password }
     };
 
     let (input_device, output_device) = {
@@ -171,35 +171,139 @@ pub fn do_connect(ctx: &Ctx) {
     {
         let mut inner = ctx.app.inner.lock();
         inner.nickname = nickname.clone();
-        inner.input_device = input_device;
+        inner.input_device = input_device.clone();
         inner.output_device = output_device.clone();
+    }
+
+    let params = SessionParams {
+        host,
+        port,
+        ssl,
+        udp_port,
+        nickname,
+        input_device,
+        output_device,
+        auth,
+    };
+    // Sitzung merken (ermöglicht Wiederverbindung); ein etwaiger früherer
+    // Reconnect-Zustand wird verworfen.
+    {
+        let mut st = ctx.st.borrow_mut();
+        st.session = Some(params.clone());
+        st.reconnect = None;
     }
 
     status(ctx, "Verbinde…");
 
+    // Neue Verbindungsgeneration → verwaist etwaige noch wartende Reconnect-Tasks.
+    let gen = ctx
+        .app
+        .connect_gen
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
     let app = ctx.app.clone();
     let ev_tx = ctx.ev_tx.clone();
-    ctx.rt.spawn(async move {
-        let fail = |text: String| {
-            let _ = ev_tx.send(Message::new("client_error", serde_json::json!({ "message": text })));
-        };
+    ctx.rt
+        .spawn(async move { establish_session(app, ev_tx, params, false, gen).await });
+}
 
-        if let Err(e) =
-            crate::net::ws_client::connect(&host, port, ssl, app.clone(), ev_tx.clone()).await
-        {
-            fail(format!("Verbindung fehlgeschlagen: {}", e));
-            return;
+/// Verbindung + Audio + Anmeldung herstellen (gemeinsam von `do_connect` und der
+/// automatischen Wiederverbindung genutzt). Läuft auf einem Tokio-Task.
+///
+/// Bei `is_reconnect` wird die Wiedergabe nicht erneut gestartet (der bestehende
+/// Wiedergabe-Thread bleibt aktiv und wird weiter aus dem AppState gespeist),
+/// damit sich Audiogeräte über mehrere Versuche nicht stapeln.
+///
+/// Ein nicht herstellbarer **WebSocket** (inkl. fehlgeschlagenem zentralem
+/// Token-Refresh) meldet `connect_failed`; darauf entscheidet der UI-Handler
+/// über erneuten Versuch (Reconnect) bzw. Fehleranzeige (Erstverbindung).
+/// Spätere, nicht fatale Fehler (UDP) melden nur `client_error`.
+async fn establish_session(
+    app: Arc<AppState>,
+    ev_tx: UnboundedSender<Message>,
+    params: SessionParams,
+    is_reconnect: bool,
+    gen: u64,
+) {
+    // Wurde inzwischen neu verbunden oder getrennt? Dann ist dieser (evtl. nach
+    // Backoff aufgewachte) Versuch veraltet → abbrechen, ohne etwas zu tun.
+    if app.connect_gen.load(std::sync::atomic::Ordering::SeqCst) != gen {
+        return;
+    }
+    let fail = |text: String| {
+        let _ = ev_tx.send(Message::new("connect_failed", serde_json::json!({ "message": text })));
+    };
+    let warn = |text: String| {
+        let _ = ev_tx.send(Message::new("client_error", serde_json::json!({ "message": text })));
+    };
+
+    // 1) Login-Daten zuerst bauen — beim zentralen Login ein frisches
+    // Access-Token holen (Refresh-Rotation), BEVOR ein Socket geöffnet wird.
+    // So lässt ein fehlgeschlagener Refresh keinen WebSocket zurück.
+    let nickname = params.nickname.clone();
+    let login_data = match &params.auth {
+        AuthSpec::Password { username, password } => {
+            serde_json::json!({ "username": username, "password": password, "nickname": nickname })
         }
-        match crate::net::udp_client::start_udp_audio(&host, udp_port, app.clone()).await {
-            Ok((send_shutdown, recv_shutdown)) => {
-                let mut inner = app.inner.lock();
-                inner.capture_shutdown = Some(send_shutdown);
-                inner.playback_shutdown = Some(recv_shutdown);
+        AuthSpec::Central { server_id } => {
+            let refresh_token = match config::load_config().hub {
+                Some(h) if !h.refresh_token.is_empty() => h.refresh_token,
+                _ => {
+                    fail("Zentrale Sitzung nicht mehr vorhanden.".into());
+                    return;
+                }
+            };
+            let res = tokio::task::spawn_blocking(move || crate::hub::refresh(&refresh_token)).await;
+            match res {
+                Ok(Ok(bundle)) => {
+                    let mut cfg = config::load_config();
+                    cfg.hub = Some(crate::config::HubSession {
+                        central_uid: bundle.central_uid.clone(),
+                        username: bundle.username.clone(),
+                        display_name: bundle.display_name.clone(),
+                        role: bundle.role.clone(),
+                        refresh_token: bundle.refresh_token.clone(),
+                        status: bundle.status.clone(),
+                    });
+                    let _ = config::save_config(&cfg);
+                    serde_json::json!({ "central_token": bundle.access_token, "nickname": nickname, "server_id": server_id })
+                }
+                Ok(Err(e)) => {
+                    fail(format!("Zentrales Login fehlgeschlagen: {}", e));
+                    return;
+                }
+                Err(e) => {
+                    fail(format!("Zentrales Login fehlgeschlagen: {}", e));
+                    return;
+                }
             }
-            Err(e) => fail(format!("UDP-Audio fehlgeschlagen: {}", e)),
         }
+    };
 
+    // 2) WebSocket herstellen.
+    if let Err(e) =
+        crate::net::ws_client::connect(&params.host, params.port, params.ssl, app.clone(), ev_tx.clone())
+            .await
+    {
+        fail(format!("Verbindung fehlgeschlagen: {}", e));
+        return;
+    }
+
+    // 3) UDP-Audio (nicht fatal — bei Fehler bleibt die Steuerverbindung).
+    match crate::net::udp_client::start_udp_audio(&params.host, params.udp_port, app.clone()).await {
+        Ok((send_shutdown, recv_shutdown)) => {
+            let mut inner = app.inner.lock();
+            inner.capture_shutdown = Some(send_shutdown);
+            inner.playback_shutdown = Some(recv_shutdown);
+        }
+        Err(e) => warn(format!("UDP-Audio fehlgeschlagen: {}", e)),
+    }
+
+    // 4) Wiedergabe-Thread — nur bei Erstverbindung; bei Wiederverbindung läuft
+    // der bestehende weiter (er liest aus dem AppState-Kanal).
+    if !is_reconnect {
         let playback_state = app.clone();
+        let output_device = params.output_device.clone();
         std::thread::spawn(move || {
             match crate::audio::playback::start_playback(playback_state, output_device) {
                 Ok(_stream) => loop {
@@ -208,49 +312,139 @@ pub fn do_connect(ctx: &Ctx) {
                 Err(e) => tracing::error!("Failed to start playback: {}", e),
             }
         });
+    }
 
-        // Login-Daten je nach Modus zusammenbauen. Beim zentralen Login holen
-        // wir ein frisches Access-Token (Refresh-Rotation) und senden es als
-        // `central_token`; das neue Refresh-Token wird lokal gespeichert.
-        let login_data = match auth {
-            Auth::Password { username, password } => {
-                serde_json::json!({ "username": username, "password": password, "nickname": nickname })
-            }
-            Auth::Central { refresh_token } => {
-                let res = tokio::task::spawn_blocking(move || crate::hub::refresh(&refresh_token)).await;
-                match res {
-                    Ok(Ok(bundle)) => {
-                        let mut cfg = crate::config::load_config();
-                        cfg.hub = Some(crate::config::HubSession {
-                            central_uid: bundle.central_uid.clone(),
-                            username: bundle.username.clone(),
-                            display_name: bundle.display_name.clone(),
-                            role: bundle.role.clone(),
-                            refresh_token: bundle.refresh_token.clone(),
-                            status: bundle.status.clone(),
-                        });
-                        let _ = crate::config::save_config(&cfg);
-                        serde_json::json!({ "central_token": bundle.access_token, "nickname": nickname, "server_id": server_id })
-                    }
-                    Ok(Err(e)) => {
-                        fail(format!("Zentrales Login fehlgeschlagen: {}", e));
-                        return;
-                    }
-                    Err(e) => {
-                        fail(format!("Zentrales Login fehlgeschlagen: {}", e));
-                        return;
-                    }
-                }
-            }
+    // 5) Anmelden.
+    if let Err(e) = app.send_ws(Message::new("auth_login", login_data)) {
+        warn(format!("Anmeldung fehlgeschlagen: {}", e));
+    }
+}
+
+/// Audio-Pipeline (Mikro-Aufnahme + UDP-Empfang) anhalten und Socket-bezogenen
+/// Zustand löschen, OHNE die UI zu verstecken oder den Wiedergabe-Thread zu
+/// beenden. Wird vor jedem Wiederverbindungsversuch genutzt, damit sich
+/// Aufnahme-/Empfangs-Tasks nicht stapeln.
+fn stop_audio_pipeline(app: &Arc<AppState>) {
+    let mut inner = app.inner.lock();
+    if let Some(tx) = inner.capture_shutdown.take() {
+        let _ = tx.send(true);
+    }
+    if let Some(tx) = inner.playback_shutdown.take() {
+        let _ = tx.send(true);
+    }
+    if let Some(tx) = inner.stream_shutdown.take() {
+        let _ = tx.send(true);
+    }
+    inner.udp_socket = None;
+    inner.server_udp_addr = None;
+    inner.session_token = None;
+    inner.capturing = false;
+    inner.streaming_file = false;
+    app.file_streaming
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Nach einem unerwarteten Abbruch die automatische Wiederverbindung einleiten
+/// bzw. fortsetzen. Tut nichts, wenn keine Sitzung mehr gewünscht ist (der
+/// Nutzer hat selbst getrennt → `session == None`).
+pub fn begin_reconnect(ctx: &Ctx) {
+    if ctx.st.borrow().session.is_none() {
+        return;
+    }
+    // Reste der alten Verbindung abräumen.
+    stop_audio_pipeline(&ctx.app);
+    {
+        let mut inner = ctx.app.inner.lock();
+        inner.connected = false;
+        inner.authenticated = false;
+        inner.ws_tx = None;
+    }
+    // Beim ersten Abbruch den Reconnect-Zustand anlegen (Raum zum Wiederbetreten
+    // merken). Ein Abbruch mitten in einem Versuch behält den Zustand bei.
+    let fresh = ctx.st.borrow().reconnect.is_none();
+    if fresh {
+        let (room_id, room_password) = {
+            let inner = ctx.app.inner.lock();
+            (inner.current_room_id, inner.current_room_password.clone())
         };
-        let login = Message::new("auth_login", login_data);
-        if let Err(e) = app.send_ws(login) {
-            fail(format!("Anmeldung fehlgeschlagen: {}", e));
+        ctx.st.borrow_mut().reconnect = Some(Reconnect {
+            attempt: 0,
+            max_attempts: 8,
+            room_id,
+            room_password,
+        });
+    }
+    schedule_reconnect(ctx);
+}
+
+/// Den nächsten Wiederverbindungsversuch planen (mit exponentiellem Backoff bis
+/// 10 s) oder nach Erschöpfen der Versuche endgültig trennen.
+pub fn schedule_reconnect(ctx: &Ctx) {
+    let plan = {
+        let mut st = ctx.st.borrow_mut();
+        let Some(rc) = st.reconnect.as_mut() else {
+            return;
+        };
+        rc.attempt += 1;
+        let attempt = rc.attempt;
+        let max = rc.max_attempts;
+        if attempt > max {
+            st.reconnect = None;
+            None
+        } else {
+            // 1, 2, 4, 8, 10, 10, … Sekunden
+            let delay = (1u64 << (attempt - 1).min(3)).min(10);
+            st.session.clone().map(|p| (attempt, max, delay, p))
         }
+    };
+
+    let Some((attempt, max, delay, params)) = plan else {
+        // Versuche erschöpft (oder keine Sitzung) → endgültig trennen.
+        do_disconnect(ctx);
+        ctx.ui
+            .append_chat("Wiederverbindung fehlgeschlagen. Verbindung getrennt.");
+        notify(
+            ctx,
+            "Wiederverbindung fehlgeschlagen. Verbindung zum Server verloren.",
+            "Verbindung",
+        );
+        return;
+    };
+
+    let text = format!(
+        "Verbindung verloren – Wiederverbindung… (Versuch {}/{})",
+        attempt, max
+    );
+    status(ctx, &text);
+    ctx.ui.append_chat(&text);
+
+    let gen = ctx.app.connect_gen.load(std::sync::atomic::Ordering::SeqCst);
+    let app = ctx.app.clone();
+    let ev_tx = ctx.ev_tx.clone();
+    ctx.rt.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        establish_session(app, ev_tx, params, true, gen).await;
     });
 }
 
+/// Einem Raum nach erfolgreicher Wiederverbindung erneut beitreten — mit dem
+/// beim ursprünglichen Betreten verwendeten Passwort (falls der Raum geschützt
+/// war), sodass keine erneute Eingabe nötig ist.
+pub fn rejoin_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
+    join_room(ctx, room_id, password);
+}
+
 pub fn do_disconnect(ctx: &Ctx) {
+    // Gewünschte Sitzung verwerfen → kein automatischer Reconnect mehr; die
+    // erhöhte Generation verwaist zudem evtl. noch wartende Reconnect-Tasks.
+    ctx.app
+        .connect_gen
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut st = ctx.st.borrow_mut();
+        st.session = None;
+        st.reconnect = None;
+    }
     {
         let mut inner = ctx.app.inner.lock();
         if let Some(ref tx) = inner.capture_shutdown {
@@ -273,6 +467,7 @@ pub fn do_disconnect(ctx: &Ctx) {
         inner.session_token = None;
         inner.rooms.clear();
         inner.current_room_id = None;
+        inner.current_room_password = None;
         inner.udp_socket = None;
         inner.server_udp_addr = None;
         inner.capturing = false;
@@ -1124,8 +1319,8 @@ fn private_message(ctx: &Ctx) {
 
 fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
     let mut data = serde_json::json!({ "room_id": room_id });
-    if let Some(pw) = password {
-        data["password"] = serde_json::Value::String(pw);
+    if let Some(pw) = &password {
+        data["password"] = serde_json::Value::String(pw.clone());
     }
     if !send_or_status(ctx, Message::new("room_join", data)) {
         return;
@@ -1134,6 +1329,8 @@ fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
     let (sr, bd, ch) = {
         let mut inner = ctx.app.inner.lock();
         inner.current_room_id = Some(room_id);
+        // Passwort für eine spätere automatische Wiederverbindung merken.
+        inner.current_room_password = password;
         let (mut sr, mut bd, mut ch, br) = inner
             .rooms
             .iter()
@@ -1210,6 +1407,7 @@ fn leave_room(ctx: &Ctx) {
         {
             let mut inner = ctx.app.inner.lock();
             inner.current_room_id = None;
+            inner.current_room_password = None;
             inner.current_files.clear();
         }
         ctx.ui.append_chat(&format!("* Raum {} verlassen.", room));

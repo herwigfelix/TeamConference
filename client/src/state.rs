@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -67,6 +67,10 @@ pub struct InnerState {
     // Rooms
     pub rooms: Vec<RoomInfo>,
     pub current_room_id: Option<i64>,
+    /// Passwort, mit dem der aktuelle Raum betreten wurde (falls geschützt).
+    /// Wird gemerkt, um den Raum nach einer Wiederverbindung automatisch und
+    /// ohne erneute Eingabe wieder betreten zu können.
+    pub current_room_password: Option<String>,
 
     // Audio
     pub muted: bool,
@@ -204,6 +208,12 @@ pub struct AppState {
     /// lokalen Mithören der gestreamten Datei (der Server schickt sie nicht
     /// zurück). Wird im UDP-Empfangs-/Mischtakt mit eingehendem Audio gemischt.
     pub local_audio_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<i16>>>>,
+    /// Generationszähler der „gewünschten Verbindung". Jedes Verbinden und jedes
+    /// (manuelle wie endgültige) Trennen erhöht ihn. Ein im Backoff wartender
+    /// Wiederverbindungs-Task vergleicht den beim Planen gemerkten Wert und
+    /// bricht ab, falls er sich geändert hat (z. B. weil der Nutzer in der
+    /// Zwischenzeit selbst getrennt hat).
+    pub connect_gen: AtomicU64,
 }
 
 impl AppState {
@@ -221,6 +231,7 @@ impl AppState {
             stream_volume_bits: AtomicU32::new(1.0f32.to_bits()),
             stream_seek_secs: AtomicI32::new(0),
             local_audio_tx: Mutex::new(None),
+            connect_gen: AtomicU64::new(0),
         }
     }
 

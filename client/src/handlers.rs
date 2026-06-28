@@ -78,7 +78,17 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 let server = resp.server_name.unwrap_or_else(|| "Server".into());
                 ui.frame.set_title(&format!("TeamConference — {}", server));
                 ui.show_main(true);
-                ui.append_chat(&format!("Verbunden mit {}.", server));
+                // War dies eine erfolgreiche Wiederverbindung? Dann Reconnect-
+                // Zustand beenden und ggf. den vorherigen Raum erneut betreten.
+                let reconnect = ctx.st.borrow_mut().reconnect.take();
+                if let Some(rc) = reconnect {
+                    ui.append_chat("Verbindung wiederhergestellt.");
+                    if let Some(rid) = rc.room_id {
+                        crate::actions::rejoin_room(ctx, rid, rc.room_password);
+                    }
+                } else {
+                    ui.append_chat(&format!("Verbunden mit {}.", server));
+                }
                 rebuild_tree(ctx);
                 rebuild_files(ctx);
                 refresh_status(ctx);
@@ -96,9 +106,32 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         },
 
         "connection_lost" => {
-            crate::actions::do_disconnect(ctx);
-            ui.append_chat("Verbindung zum Server verloren.");
-            crate::actions::notify(ctx, "Verbindung zum Server verloren.", "Verbindung");
+            // Bei gewünschter Sitzung erst Wiederverbindung versuchen; nur ein
+            // manuelles Trennen (session == None) ist endgültig.
+            if ctx.st.borrow().session.is_some() {
+                crate::actions::begin_reconnect(ctx);
+            }
+        }
+
+        // synthetisch: ein Verbindungsaufbau (Erst- oder Wiederverbindung) ist
+        // gescheitert, bevor eine WebSocket stand.
+        "connect_failed" => {
+            let text = msg
+                .data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Verbindung fehlgeschlagen")
+                .to_string();
+            if ctx.st.borrow().reconnect.is_some() {
+                // Laufender Wiederverbindungsversuch → nächsten Versuch planen.
+                ui.append_chat(&format!("Wiederverbindung fehlgeschlagen: {}", text));
+                crate::actions::schedule_reconnect(ctx);
+            } else {
+                // Erstverbindung gescheitert → sauber trennen und melden.
+                crate::actions::do_disconnect(ctx);
+                ui.append_chat(&text);
+                crate::actions::notify(ctx, &text, "Verbinden");
+            }
         }
 
         // synthetisch aus eigenen Tokio-Tasks (Verbindungs-/Streaming-Fehler, Hinweise)
@@ -487,7 +520,12 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         "user_moved" | "moved" => {
             let room_id = msg.data.get("room_id").and_then(|v| v.as_i64());
             if let Some(rid) = room_id {
-                ctx.app.inner.lock().current_room_id = Some(rid);
+                {
+                    let mut inner = ctx.app.inner.lock();
+                    inner.current_room_id = Some(rid);
+                    // Serverseitiger Wechsel ohne Passwort → kein Raum-Passwort merken.
+                    inner.current_room_password = None;
+                }
                 let name = ctx.app.inner.lock().room_name(rid);
                 ui.append_chat(&format!("* Du wurdest in den Raum {} verschoben.", name));
                 rebuild_tree(ctx);
