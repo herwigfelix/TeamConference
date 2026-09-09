@@ -26,5 +26,11 @@ opus = "0.3"
 crossbeam-channel = "0.5"
 base64 = "0.22"
 tracing = "0.1"
+# Nur fuer TC_LOG=<filter>: Protokoll auf stderr (sonst still).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 chrono = "0.4"
+
+[dev-dependencies]
+# Nur fuer examples/smoke.rs: die gebaute dylib per dlopen pruefen.
+libloading = "0.8"

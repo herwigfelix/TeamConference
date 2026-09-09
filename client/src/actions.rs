@@ -304,11 +304,16 @@ async fn establish_session(
     if !is_reconnect {
         let playback_state = app.clone();
         let output_device = params.output_device.clone();
+        // C4: Owner-Thread hält den cpal-Stream und wartet auf ein Stop-Signal,
+        // statt ewig zu parken. Bei Stop fällt `_stream` aus dem Scope → wird
+        // gedroppt (kein Leak; alter Stream ist vor einem Restart wirklich weg).
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        app.inner.lock().playback_stream_stop = Some(stop_tx);
         std::thread::spawn(move || {
             match crate::audio::playback::start_playback(playback_state, output_device) {
-                Ok(_stream) => loop {
-                    std::thread::park();
-                },
+                Ok(_stream) => {
+                    let _ = stop_rx.recv();
+                }
                 Err(e) => tracing::error!("Failed to start playback: {}", e),
             }
         });
@@ -329,6 +334,11 @@ fn stop_audio_pipeline(app: &Arc<AppState>) {
     if let Some(tx) = inner.capture_shutdown.take() {
         let _ = tx.send(true);
     }
+    // C1: auch den cpal-Aufnahme-Stream beenden (der Wiedergabe-Stream läuft über
+    // Reconnects weiter und wird hier bewusst nicht angefasst).
+    if let Some(tx) = inner.capture_stream_stop.take() {
+        let _ = tx.send(());
+    }
     if let Some(tx) = inner.playback_shutdown.take() {
         let _ = tx.send(true);
     }
@@ -338,6 +348,7 @@ fn stop_audio_pipeline(app: &Arc<AppState>) {
     inner.udp_socket = None;
     inner.server_udp_addr = None;
     inner.session_token = None;
+    inner.audio_id = None;
     inner.capturing = false;
     inner.streaming_file = false;
     app.file_streaming
@@ -451,6 +462,14 @@ pub fn do_disconnect(ctx: &Ctx) {
             let _ = tx.send(true);
         }
         inner.capture_shutdown = None;
+        // C1/C4: cpal-Aufnahme- und Wiedergabe-Stream sauber beenden (bei echtem
+        // Disconnect auch die Wiedergabe, anders als beim Reconnect).
+        if let Some(tx) = inner.capture_stream_stop.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = inner.playback_stream_stop.take() {
+            let _ = tx.send(());
+        }
         if let Some(ref tx) = inner.playback_shutdown {
             let _ = tx.send(true);
         }
@@ -465,6 +484,7 @@ pub fn do_disconnect(ctx: &Ctx) {
         inner.user_id = None;
         inner.self_role = None;
         inner.session_token = None;
+        inner.audio_id = None;
         inner.rooms.clear();
         inner.current_room_id = None;
         inner.current_room_password = None;
@@ -1808,6 +1828,11 @@ pub fn volume_changed(ctx: &Ctx) {
     ctx.app.set_volume(v as f32 / 100.0);
 }
 
+pub fn mic_volume_changed(ctx: &Ctx) {
+    let v = ctx.ui.mic_volume.get_value();
+    ctx.app.set_mic_volume(v as f32 / 100.0);
+}
+
 /// Dialog zur Auswahl von Mikrofon und Lautsprecher. Die Audio-Qualität
 /// (Samplerate, Mono/Stereo) bestimmt dagegen der Raum (siehe Raum-Dialog).
 /// Audio-Pipeline mit den aktuell gewählten Geräten neu starten — ohne
@@ -1817,35 +1842,48 @@ fn restart_audio(ctx: &Ctx) {
     if !ctx.app.inner.lock().connected {
         return;
     }
-    // Aufnahme: alten Sende-Task stoppen, mit neuem Mikrofon neu starten.
+    // Aufnahme: alten Sende-Task UND den alten cpal-Stream stoppen (C1), dann mit
+    // neuem Mikrofon neu starten.
     {
         let mut inner = ctx.app.inner.lock();
         if let Some(tx) = inner.capture_shutdown.take() {
             let _ = tx.send(true);
         }
+        if let Some(tx) = inner.capture_stream_stop.take() {
+            let _ = tx.send(());
+        }
         inner.capturing = false;
     }
     let cap_app = ctx.app.clone();
     let input_device = ctx.app.inner.lock().input_device.clone();
+    let cap_rt = ctx.rt.clone();
     ctx.rt.spawn(async move {
-        match crate::audio::capture::start_capture(cap_app.clone(), input_device) {
-            Ok((stream, shutdown_tx)) => {
+        match crate::audio::capture::start_capture_owned(cap_app.clone(), input_device, cap_rt) {
+            Ok((shutdown_tx, stop_tx)) => {
                 let mut inner = cap_app.inner.lock();
                 inner.capturing = true;
                 inner.capture_shutdown = Some(shutdown_tx);
-                std::mem::forget(stream);
+                inner.capture_stream_stop = Some(stop_tx);
             }
             Err(e) => tracing::error!("Mikrofon-Neustart fehlgeschlagen: {}", e),
         }
     });
-    // Wiedergabe: neuen Lautsprecher-Stream starten (alter spielt dann Stille).
+    // Wiedergabe: alten Stream sauber stoppen (C4), dann neuen starten.
+    {
+        let mut inner = ctx.app.inner.lock();
+        if let Some(tx) = inner.playback_stream_stop.take() {
+            let _ = tx.send(());
+        }
+    }
     let output_device = ctx.app.inner.lock().output_device.clone();
     let playback_state = ctx.app.clone();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    ctx.app.inner.lock().playback_stream_stop = Some(stop_tx);
     std::thread::spawn(move || {
         match crate::audio::playback::start_playback(playback_state, output_device) {
-            Ok(_stream) => loop {
-                std::thread::park();
-            },
+            Ok(_stream) => {
+                let _ = stop_rx.recv();
+            }
             Err(e) => tracing::error!("Wiedergabe-Neustart fehlgeschlagen: {}", e),
         }
     });
@@ -1963,6 +2001,14 @@ fn audio_settings(ctx: &Ctx) {
     ui::set_a11y_name(&announce_chk, "Server-Ereignisse per Sprachausgabe ansagen");
     v.add(&announce_chk, 0, SizerFlag::All, 6);
 
+    // Toggle: Mikrofon-Boost (+100% / 2x Lautstärke).
+    let boost_chk = CheckBox::builder(&dialog)
+        .with_label("Mikrofon-Boost (+100% / 2x Lautstärke)")
+        .build();
+    boost_chk.set_value(ctx.app.mic_boost());
+    ui::set_a11y_name(&boost_chk, "Mikrofon-Boost aktivieren, verdoppelt die Mikrofon-Lautstärke");
+    v.add(&boost_chk, 0, SizerFlag::All, 6);
+
     let btns = BoxSizer::builder(Orientation::Horizontal).build();
     let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
     let ok = Button::builder(&dialog).with_label("Speichern").build();
@@ -1998,6 +2044,8 @@ fn audio_settings(ctx: &Ctx) {
             )
         };
         let announce_events = announce_chk.is_checked();
+        let mic_boost = boost_chk.is_checked();
+        ctx.app.set_mic_boost(mic_boost);
         {
             let mut inner = ctx.app.inner.lock();
             inner.input_device = input.clone();
@@ -2008,6 +2056,7 @@ fn audio_settings(ctx: &Ctx) {
         cfg.input_device = input;
         cfg.output_device = output;
         cfg.announce_events = announce_events;
+        cfg.mic_boost = mic_boost;
         let _ = config::save_config(&cfg);
         let connected = ctx.app.inner.lock().connected;
         dialog.destroy();
@@ -2026,6 +2075,7 @@ fn audio_settings(ctx: &Ctx) {
 pub fn save_volume(ctx: &Ctx) {
     let mut cfg = config::load_config();
     cfg.volume = ctx.app.volume();
+    cfg.mic_volume = ctx.app.mic_volume();
     let _ = config::save_config(&cfg);
 }
 
@@ -2190,11 +2240,17 @@ fn download_file(ctx: &Ctx) {
         return;
     }
     let Some(path) = dlg.get_path() else { return };
+    // Kapazität nur vorreservieren, nicht blind der Server-Angabe vertrauen: eine
+    // bösartige/fehlerhafte size_bytes (untrusted i64) würde Vec::with_capacity zu
+    // einer riesigen Allokation zwingen (Capacity-Overflow → Prozess-Abort). Auf
+    // einen moderaten Deckel begrenzen; der Vec wächst bei Bedarf trotzdem mit.
+    const PREALLOC_CAP: i64 = 64 * 1024 * 1024;
+    let prealloc = file.size_bytes.clamp(0, PREALLOC_CAP) as usize;
     ctx.app.inner.lock().download_targets.insert(
         file.id,
         (
             std::path::PathBuf::from(path),
-            Vec::with_capacity(file.size_bytes.max(0) as usize),
+            Vec::with_capacity(prealloc),
         ),
     );
     if send_or_status(

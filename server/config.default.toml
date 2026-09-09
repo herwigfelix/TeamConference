@@ -2,6 +2,15 @@
 name = "TeamConference Server"
 welcome_message = "Willkommen auf dem TeamConference Server!"
 max_users = 100
+# Klango-Modus (siehe docs/klango.md): Geheimnis für die Anmelde-Token des
+# Klango-Servers. Leer = aus. Umgebungsvariable: TC_KLANGO_SECRET.
+# klango_secret = ""
+# Interner Push-Endpunkt auf 127.0.0.1, über den der Klango-Server
+# Benachrichtigungen einliefert (docs/klango.md 1.6). 0 = aus.
+# internal_port = 9502
+# Basis-URL des Klango-Servers für die Anwesenheitsmeldung
+# (POST <url>/internal/presence). Leer = keine Meldungen.
+# klango_url = "http://127.0.0.1:8000"
 
 [network]
 control_host = "0.0.0.0"

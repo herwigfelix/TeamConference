@@ -8,6 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use crate::config::Config;
 use crate::control::protocol::*;
 use crate::control::auth;
+use crate::control::klango;
 use crate::db::queries;
 use crate::chat::handler as chat_handler;
 use crate::admin::handler as admin_handler;
@@ -20,6 +21,18 @@ use crate::audio::udp_server::UdpAudioServer;
 /// True, wenn der angemeldete Nutzer Admin ist.
 async fn is_admin(state: &SharedState, uid: i64) -> bool {
     matches!(state.users.get_user(uid).await, Some(u) if u.is_admin())
+}
+
+/// True, wenn `uid` und `room_id` zum selben Tenant gehören. Im Einzelserver-
+/// Modus sind beide Tenants "" → immer true (der Check no-oppt dort).
+async fn same_tenant(state: &SharedState, uid: i64, room_id: i64) -> bool {
+    let ut = state.users.user_tenant(uid).await;
+    let rt = queries::get_room_tenant(&state.db, room_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    ut == rt
 }
 
 /// Standard-Antwort bei fehlenden Rechten.
@@ -59,6 +72,16 @@ pub struct SharedState {
     /// Prüfer für zentrale Access-Tokens; `Some`, wenn `central_login` aktiv ist
     /// und der Public Key des Identity Providers geladen werden konnte.
     pub central: Option<crate::control::central::CentralVerifier>,
+    /// S8: Login-Fehlversuche pro IP (Fenster-Start, Zähler) fürs Rate-Limiting.
+    pub login_throttle: std::sync::Mutex<
+        std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>,
+    >,
+    /// Klango-Modus: Anstoß für die Anwesenheitsmeldung (docs/klango.md 1.6).
+    pub presence: Arc<crate::control::internal::Presence>,
+    /// Laufende Nummer je WebSocket-Verbindung. Sie identifiziert einen
+    /// Push-Zuhörer — der Kontoname reicht nicht, weil ein Konto an mehreren
+    /// Rechnern angemeldet sein darf.
+    pub next_conn_id: std::sync::atomic::AtomicU64,
 }
 
 pub async fn handle_connection<S>(
@@ -77,6 +100,12 @@ pub async fn handle_connection<S>(
 
     let mut user_id: Option<i64> = None;
     let mut audio_streamer: Option<AudioFileStreamer> = None;
+    // Klango-Modus: unter diesem Namen hängt diese Verbindung als Push-Zuhörer
+    // (docs/klango.md 1.6). Sie überlebt eine verdrängte Konferenz-Sitzung.
+    let conn_id = state
+        .next_conn_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut push_name: Option<String> = None;
 
     // Task for sending messages from channel to WebSocket
     let send_task = tokio::spawn(async move {
@@ -116,6 +145,43 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
 
+                // S8: Rate-Limiting pro IP. Es werden nur FEHLversuche gezählt; ein
+                // erfolgreicher Login setzt den Zähler zurück, damit die v0.4.2-
+                // Auto-Reconnects (die erfolgreich sind) nicht gedrosselt werden.
+                // Schützt gegen Online-Brute-Force und Argon2-CPU-DoS.
+                const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+                const LOGIN_MAX_FAILS: u32 = 8;
+                let peer_ip = peer_addr.parse::<std::net::SocketAddr>().map(|s| s.ip()).ok();
+                if let Some(ip) = peer_ip {
+                    let now = std::time::Instant::now();
+                    let mut t = state.login_throttle.lock().unwrap();
+                    let throttled = match t.get(&ip).copied() {
+                        Some((start, count)) => {
+                            if now.duration_since(start) >= LOGIN_WINDOW {
+                                t.remove(&ip);
+                                false
+                            } else {
+                                count >= LOGIN_MAX_FAILS
+                            }
+                        }
+                        None => false,
+                    };
+                    if throttled {
+                        drop(t);
+                        let resp = AuthResponse {
+                            success: false,
+                            user_id: None,
+                            token: None,
+                            server_name: None,
+                            rooms: None,
+                            role: None,
+                            error: Some("Zu viele Fehlversuche — bitte kurz warten".to_string()),
+                        };
+                        let _ = tx.send(Message::new("auth_response", serde_json::to_value(&resp).unwrap()));
+                        continue;
+                    }
+                }
+
                 let response = auth::handle_login(
                     login,
                     peer_addr.clone(),
@@ -126,6 +192,25 @@ pub async fn handle_connection<S>(
                     state.central.as_ref(),
                     tx.clone(),
                 ).await;
+
+                // S8: Zähler pflegen — Erfolg löscht, Fehlschlag erhöht (Fenster-basiert).
+                if let Some(ip) = peer_ip {
+                    let now = std::time::Instant::now();
+                    let mut t = state.login_throttle.lock().unwrap();
+                    if response.success {
+                        t.remove(&ip);
+                    } else {
+                        let e = t.entry(ip).or_insert((now, 0));
+                        if now.duration_since(e.0) >= LOGIN_WINDOW {
+                            *e = (now, 0);
+                        }
+                        e.1 += 1;
+                        // Opportunistisches Pruning, damit die Map nicht unbegrenzt wächst.
+                        if t.len() > 4096 {
+                            t.retain(|_, (start, _)| now.duration_since(*start) < LOGIN_WINDOW);
+                        }
+                    }
+                }
 
                 if response.success {
                     user_id = response.user_id;
@@ -148,6 +233,17 @@ pub async fn handle_connection<S>(
                                 "nickname": u.nickname,
                             }));
                             state.users.broadcast_tenant_except(&u.tenant, presence, uid).await;
+
+                            // Diese Verbindung empfängt ab jetzt
+                            // Benachrichtigungen — auch dann noch, wenn sich
+                            // dasselbe Konto später anderswo anmeldet und die
+                            // Konferenz-Sitzung übernimmt.
+                            if state.config.server.klango_mode() {
+                                let name = u.username.to_lowercase();
+                                state.users.add_push_listener(&name, conn_id, tx.clone()).await;
+                                push_name = Some(name);
+                                state.presence.poke();
+                            }
                         }
                     }
                 }
@@ -162,44 +258,10 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-
-                // Leave current room first
-                let current_user = state.users.get_user(uid).await;
-                if let Some(ref cu) = current_user {
-                    if let Some(old_room) = cu.room_id {
-                        let leave_msg = Message::new("room_user_left", serde_json::json!({
-                            "room_id": old_room,
-                            "user_id": uid
-                        }));
-                        state.users.broadcast_to_room(old_room, leave_msg, Some(uid)).await;
-                    }
-                }
-
-                let tenant = state.users.user_tenant(uid).await;
-                match state.rooms.join_room(uid, req.room_id, req.password.as_deref(), &tenant).await {
-                    Ok(()) => {
-                        // Notify new room
-                        let user = state.users.get_user(uid).await.unwrap();
-                        let join_msg = Message::new("room_user_joined", serde_json::json!({
-                            "room_id": req.room_id,
-                            "user": user.to_info()
-                        }));
-                        state.users.broadcast_to_room(req.room_id, join_msg, Some(uid)).await;
-
-                        // Send updated room list
-                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
-                        let list_msg = Message::new("room_list", serde_json::json!({
-                            "rooms": room_list
-                        }));
-                        let _ = tx.send(list_msg);
-                    }
-                    Err(e) => {
-                        let err_msg = Message::new("error", serde_json::json!({
-                            "message": e.to_string()
-                        }));
-                        let _ = tx.send(err_msg);
-                    }
-                }
+                // Gemeinsamer Ablauf mit Gruppenräumen und Anrufen: alten Raum
+                // verlassen (und ggf. aufräumen), beitreten, room_joined,
+                // room_user_joined, Raumliste (control/klango.rs).
+                klango::join_room_flow(&state, uid, req.room_id, req.password.as_deref(), &tx).await;
             }
 
             "room_leave" => {
@@ -214,7 +276,12 @@ pub async fn handle_connection<S>(
                     "user_id": uid
                 }));
                 state.users.broadcast_to_room(req.room_id, leave_msg, Some(uid)).await;
+                let old_room = state.users.get_user(uid).await.and_then(|u| u.room_id);
                 state.rooms.leave_room(uid).await;
+                // Aufräumen (docs/klango.md 1.2): Anruf beenden, leeren
+                // temporären Raum löschen.
+                let tenant = state.users.user_tenant(uid).await;
+                state.rooms.after_leave(uid, old_room, &tenant).await;
             }
 
             "room_create" => {
@@ -223,6 +290,12 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
+
+                // Klango-Modus: jeder darf, der Raum ist temporär (control/klango.rs).
+                if state.config.server.klango_mode() {
+                    klango::handle_room_create(&state, uid, req, &tx).await;
+                    continue;
+                }
 
                 match state.users.get_user(uid).await {
                     Some(u) if u.is_admin() => {}
@@ -248,11 +321,7 @@ pub async fn handle_connection<S>(
                 ).await {
                     Ok(_) => {
                         // Aktualisierte Raumliste an den eigenen Unterserver senden.
-                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
-                        let list_msg = Message::new("room_list", serde_json::json!({
-                            "rooms": room_list
-                        }));
-                        state.users.broadcast_tenant(&tenant, list_msg).await;
+                        state.rooms.broadcast_room_list(&tenant).await;
                     }
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
@@ -269,25 +338,31 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
 
-                match state.users.get_user(uid).await {
-                    Some(u) if u.is_admin() => {}
+                let Some(user) = state.users.get_user(uid).await else { continue };
+                let tenant = user.tenant.clone();
+                // S3: nur Räume des eigenen Tenants löschen.
+                let room = match state.rooms.get_room(req.room_id, &tenant).await {
+                    Ok(Some(r)) => r,
                     _ => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": "Insufficient permissions"
-                        })));
+                        let _ = tx.send(deny());
                         continue;
                     }
                 };
-
-                let tenant = state.users.user_tenant(uid).await;
-                match state.rooms.delete_room(req.room_id, &tenant).await {
-                    Ok(()) => {
-                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
-                        let list_msg = Message::new("room_list", serde_json::json!({
-                            "rooms": room_list
-                        }));
-                        state.users.broadcast_tenant(&tenant, list_msg).await;
-                    }
+                // Serveradmin — oder im Klango-Modus der Eigentümer (docs/klango.md 1.2).
+                let allowed = user.is_admin()
+                    || (state.config.server.klango_mode() && room.owner_id != 0 && room.owner_id == uid);
+                if !allowed || room.is_default {
+                    let _ = tx.send(deny());
+                    continue;
+                }
+                let result = if state.config.server.klango_mode() {
+                    // Nutzer landen in keinem Raum und bekommen room_closed.
+                    state.rooms.close_room(room.id, &room.name).await
+                } else {
+                    state.rooms.delete_room(req.room_id, &tenant).await
+                };
+                match result {
+                    Ok(()) => state.rooms.broadcast_room_list(&tenant).await,
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
                             "message": e.to_string()
@@ -303,25 +378,25 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
 
-                match state.users.get_user(uid).await {
-                    Some(u) if u.is_admin() => {}
+                let Some(user) = state.users.get_user(uid).await else { continue };
+                let tenant = user.tenant.clone();
+                // S3: nur Räume des eigenen Tenants ändern.
+                let room = match state.rooms.get_room(req.room_id, &tenant).await {
+                    Ok(Some(r)) => r,
                     _ => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": "Insufficient permissions"
-                        })));
+                        let _ = tx.send(deny());
                         continue;
                     }
                 };
-
-                let tenant = state.users.user_tenant(uid).await;
+                // Serveradmin — oder im Klango-Modus ein Raum-Moderator (docs/klango.md 1.3).
+                let allowed = user.is_admin()
+                    || (state.config.server.klango_mode() && state.rooms.user_is_room_mod(&user, &room).await);
+                if !allowed {
+                    let _ = tx.send(deny());
+                    continue;
+                }
                 match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users, req.sample_rate, req.bit_depth, req.channels, req.bitrate).await {
-                    Ok(()) => {
-                        let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
-                        let list_msg = Message::new("room_list", serde_json::json!({
-                            "rooms": room_list
-                        }));
-                        state.users.broadcast_tenant(&tenant, list_msg).await;
-                    }
+                    Ok(()) => state.rooms.broadcast_room_list(&tenant).await,
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
                             "message": e.to_string()
@@ -362,16 +437,18 @@ pub async fn handle_connection<S>(
 
                 if valid {
                     state.users.set_audio_config(uid, req.sample_rate, req.bit_depth, req.channels, req.enabled).await;
-                    let user = state.users.get_user(uid).await.unwrap();
+                    let Some(user) = state.users.get_user(uid).await else { continue };
                     let ack = Message::new("audio_config_ack", serde_json::to_value(AudioConfigAck {
                         success: true,
                         udp_token: Some(user.session_token),
+                        audio_id: Some(user.audio_id),
                     }).unwrap());
                     let _ = tx.send(ack);
                 } else {
                     let ack = Message::new("audio_config_ack", serde_json::to_value(AudioConfigAck {
                         success: false,
                         udp_token: None,
+                        audio_id: None,
                     }).unwrap());
                     let _ = tx.send(ack);
                 }
@@ -385,7 +462,7 @@ pub async fn handle_connection<S>(
                 };
                 state.users.set_muted(uid, req.muted).await;
 
-                let user = state.users.get_user(uid).await.unwrap();
+                let Some(user) = state.users.get_user(uid).await else { continue };
                 if let Some(room_id) = user.room_id {
                     let state_msg = Message::new("audio_user_state", serde_json::to_value(AudioUserState {
                         user_id: uid,
@@ -404,7 +481,7 @@ pub async fn handle_connection<S>(
                 };
                 state.users.set_deafened(uid, req.deafened).await;
 
-                let user = state.users.get_user(uid).await.unwrap();
+                let Some(user) = state.users.get_user(uid).await else { continue };
                 if let Some(room_id) = user.room_id {
                     let state_msg = Message::new("audio_user_state", serde_json::to_value(AudioUserState {
                         user_id: uid,
@@ -431,6 +508,15 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
+                // S2: Upload nur in Räume des eigenen Tenants.
+                if !same_tenant(&state, uid, req.room_id).await {
+                    let _ = tx.send(Message::new("file_upload_ack", serde_json::json!({
+                        "upload_id": "",
+                        "success": false,
+                        "error": "Kein Zugriff auf diesen Raum"
+                    })));
+                    continue;
+                }
                 match state.files.start_upload(uid, req).await {
                     Ok(ack) => {
                         let _ = tx.send(Message::new("file_upload_ack", serde_json::to_value(ack).unwrap()));
@@ -482,11 +568,15 @@ pub async fn handle_connection<S>(
             }
 
             "file_list" => {
-                let Some(_uid) = user_id else { continue };
+                let Some(uid) = user_id else { continue };
                 let req: FileListRequest = match serde_json::from_value(parsed.data) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
+                // S2: Dateien nur aus Räumen des eigenen Tenants auflisten.
+                if !same_tenant(&state, uid, req.room_id).await {
+                    continue;
+                }
                 if let Ok(files) = state.files.get_file_list(req.room_id).await {
                     let _ = tx.send(Message::new("file_list", serde_json::json!({
                         "room_id": req.room_id,
@@ -496,27 +586,52 @@ pub async fn handle_connection<S>(
             }
 
             "file_download" => {
-                let Some(_uid) = user_id else { continue };
+                let Some(uid) = user_id else { continue };
                 let req: FileDownloadRequest = match serde_json::from_value(parsed.data) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                match state.files.download_file(req.file_id).await {
-                    Ok((_info, data)) => {
-                        let encoded = BASE64.encode(&data);
-                        let chunk_size = 64 * 1024; // 64KB chunks
-                        let total = encoded.len() as i64;
+                // S2: Datei auflösen und Tenant prüfen (kein Cross-Tenant-Download).
+                let db_file = match queries::get_room_file_by_id(&state.db, req.file_id).await {
+                    Ok(Some(f)) => f,
+                    _ => {
+                        let _ = tx.send(Message::new("error", serde_json::json!({
+                            "message": "File not found"
+                        })));
+                        continue;
+                    }
+                };
+                if !same_tenant(&state, uid, db_file.room_id).await {
+                    let _ = tx.send(Message::new("error", serde_json::json!({
+                        "message": "File not found"
+                    })));
+                    continue;
+                }
+                // S11: Datei blockweise von der Platte lesen statt komplett in den
+                // RAM (+ base64 doppelt) zu puffern. 48-KiB-Blöcke (Vielfaches von 3)
+                // ergeben paddingfreie Base64-Chunks, die der Client einzeln dekodiert.
+                // `total` = rohe Dateigröße (der Client vergleicht dekodierte Bytes).
+                match tokio::fs::File::open(&db_file.storage_path).await {
+                    Ok(mut file) => {
+                        use tokio::io::AsyncReadExt;
+                        let total = db_file.size_bytes;
                         let mut offset = 0i64;
-
-                        for chunk in encoded.as_bytes().chunks(chunk_size) {
-                            let chunk_str = String::from_utf8_lossy(chunk).to_string();
-                            let _ = tx.send(Message::new("file_download_data", serde_json::json!({
-                                "file_id": req.file_id,
-                                "data": chunk_str,
-                                "offset": offset,
-                                "total": total
-                            })));
-                            offset += chunk.len() as i64;
+                        let mut buf = vec![0u8; 48 * 1024];
+                        loop {
+                            match file.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let chunk_str = BASE64.encode(&buf[..n]);
+                                    let _ = tx.send(Message::new("file_download_data", serde_json::json!({
+                                        "file_id": req.file_id,
+                                        "data": chunk_str,
+                                        "offset": offset,
+                                        "total": total
+                                    })));
+                                    offset += n as i64;
+                                }
+                                Err(_) => break,
+                            }
                         }
                     }
                     Err(e) => {
@@ -537,6 +652,10 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(Message::new("error", serde_json::json!({
                         "message": e.to_string()
                     })));
+                } else {
+                    // Leer gewordene temporäre Räume entsorgen (docs/klango.md 1.2).
+                    let tenant = state.users.user_tenant(uid).await;
+                    state.rooms.sweep_empty(&tenant).await;
                 }
             }
 
@@ -550,6 +669,10 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(Message::new("error", serde_json::json!({
                         "message": e.to_string()
                     })));
+                } else {
+                    // Leer gewordene temporäre Räume entsorgen (docs/klango.md 1.2).
+                    let tenant = state.users.user_tenant(uid).await;
+                    state.rooms.sweep_empty(&tenant).await;
                 }
             }
 
@@ -563,6 +686,10 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(Message::new("error", serde_json::json!({
                         "message": e.to_string()
                     })));
+                } else {
+                    // Leer gewordene temporäre Räume entsorgen (docs/klango.md 1.2).
+                    let tenant = state.users.user_tenant(uid).await;
+                    state.rooms.sweep_empty(&tenant).await;
                 }
             }
 
@@ -585,11 +712,11 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                match state.users.get_user(uid).await {
-                    Some(u) if u.is_admin() => {}
+                let tenant = match state.users.get_user(uid).await {
+                    Some(u) if u.is_admin() => u.tenant,
                     _ => continue,
                 };
-                chat_handler::send_server_message(req.message, &state.users).await;
+                chat_handler::send_server_message(req.message, &tenant, &state.users).await;
             }
 
             "stream_file_start" => {
@@ -598,6 +725,12 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
+
+                // S7: privilegierte Aktion (spielt eine Server-Datei in den Raum).
+                if !state.users.get_user(uid).await.map(|u| u.is_moderator()).unwrap_or(false) {
+                    let _ = tx.send(deny());
+                    continue;
+                }
 
                 // Stop any existing stream
                 if let Some(ref streamer) = audio_streamer {
@@ -608,7 +741,23 @@ pub async fn handle_connection<S>(
                     let streamer = AudioFileStreamer::new();
                     let udp_clone = udp.clone();
                     let users_clone = state.users.clone();
-                    let path = std::path::PathBuf::from(&req.filename);
+
+                    // S7: kein beliebiger Serverpfad — Dateiname sanitisieren und
+                    // strikt unter das Upload-Verzeichnis einsperren (kein `..`,
+                    // keine absoluten Pfade, kein Verlassen des Basisverzeichnisses).
+                    let safe = crate::files::handler::sanitize_filename(&req.filename);
+                    let base = std::path::PathBuf::from(&state.config.storage.upload_dir);
+                    let path = base.join(&safe);
+                    let confined = match (path.canonicalize(), base.canonicalize()) {
+                        (Ok(p), Ok(b)) => p.starts_with(&b),
+                        _ => false,
+                    };
+                    if !confined {
+                        let _ = tx.send(Message::new("error", serde_json::json!({
+                            "message": "Datei nicht gefunden"
+                        })));
+                        continue;
+                    }
 
                     let _ = streamer.stream_file(&path, req.room_id, uid, udp_clone, users_clone).await;
                     audio_streamer = Some(streamer);
@@ -630,6 +779,13 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(deny());
                     continue;
                 }
+                // S4: Konten sind serverweit global (keine Pro-Tenant-Nutzertabelle).
+                // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
+                // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
+                if state.config.server.multi_tenant {
+                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    continue;
+                }
                 let _ = tx.send(account_list_msg(&state).await);
             }
 
@@ -637,6 +793,13 @@ pub async fn handle_connection<S>(
                 let Some(uid) = user_id else { continue };
                 if !is_admin(&state, uid).await {
                     let _ = tx.send(deny());
+                    continue;
+                }
+                // S4: Konten sind serverweit global (keine Pro-Tenant-Nutzertabelle).
+                // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
+                // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
+                if state.config.server.multi_tenant {
+                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -668,6 +831,13 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(deny());
                     continue;
                 }
+                // S4: Konten sind serverweit global (keine Pro-Tenant-Nutzertabelle).
+                // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
+                // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
+                if state.config.server.multi_tenant {
+                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    continue;
+                }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
                     Some(target) if target.id == uid => {
@@ -688,6 +858,13 @@ pub async fn handle_connection<S>(
                 let Some(uid) = user_id else { continue };
                 if !is_admin(&state, uid).await {
                     let _ = tx.send(deny());
+                    continue;
+                }
+                // S4: Konten sind serverweit global (keine Pro-Tenant-Nutzertabelle).
+                // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
+                // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
+                if state.config.server.multi_tenant {
+                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -711,6 +888,13 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(deny());
                     continue;
                 }
+                // S4: Konten sind serverweit global (keine Pro-Tenant-Nutzertabelle).
+                // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
+                // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
+                if state.config.server.multi_tenant {
+                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    continue;
+                }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 let role = match parsed.data.get("role").and_then(|v| v.as_str()) {
                     Some("admin") => "admin",
@@ -732,6 +916,13 @@ pub async fn handle_connection<S>(
                 let Some(uid) = user_id else { continue };
                 if !is_admin(&state, uid).await {
                     let _ = tx.send(deny());
+                    continue;
+                }
+                // S4: Konten sind serverweit global (keine Pro-Tenant-Nutzertabelle).
+                // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
+                // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
+                if state.config.server.multi_tenant {
+                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let open = parsed.data.get("open").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -767,14 +958,34 @@ pub async fn handle_connection<S>(
                 }
             }
 
-            _ => {
-                tracing::debug!("Unknown message type: {}", parsed.msg_type);
+            other => {
+                // Klango-Modus: Gruppenräume, Raum-Admins, Sperren, Anrufe.
+                let Some(uid) = user_id else { continue };
+                if !klango::handle_message(&state, uid, other, parsed.data, &tx).await {
+                    tracing::debug!("Unknown message type: {}", other);
+                }
             }
         }
     }
 
     // Cleanup on disconnect
+    //
+    // Der Push-Zuhörer geht IMMER weg, auch wenn die Konferenz-Sitzung längst
+    // einer anderen Verbindung gehört — sonst bliebe ein toter Kanal stehen.
+    if let Some(name) = push_name.take() {
+        state.users.remove_push_listener(&name, conn_id).await;
+        state.presence.poke();
+    }
+
+    // Nur aufräumen, wenn die Sitzung noch DIESER Verbindung gehört. Hat sich
+    // dasselbe Konto inzwischen anderswo angemeldet, gehört sie der neuen —
+    // und die darf hier nicht mit weggeräumt werden.
     if let Some(uid) = user_id {
+        if !state.users.session_belongs_to(uid, &tx).await {
+            tracing::info!("Alte Verbindung von Nutzer {} getrennt (Sitzung gehört einer neueren)", uid);
+            send_task.abort();
+            return;
+        }
         if let Some(ref streamer) = audio_streamer {
             streamer.stop();
         }
@@ -796,7 +1007,11 @@ pub async fn handle_connection<S>(
             state.users.broadcast_tenant_except(&user.tenant, presence, uid).await;
         }
 
-        state.users.remove_user(uid).await;
+        let gone = state.users.remove_user(uid).await;
+        // Offenen Anruf beenden, leeren temporären Raum löschen (docs/klango.md).
+        if let Some(u) = gone {
+            state.rooms.on_disconnect(uid, u.room_id, &u.tenant).await;
+        }
         tracing::info!("User {} disconnected", uid);
     }
 

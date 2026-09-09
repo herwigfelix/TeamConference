@@ -17,6 +17,21 @@ pub fn base_url() -> String {
         .unwrap_or_else(|| DEFAULT_BASE.to_string())
 }
 
+/// C6: Gemeinsamer HTTP-Agent mit Timeouts. Ohne Timeout blockiert ureq bei
+/// einem hängenden/unerreichbaren Hub UNBEGRENZT — und da einige Aufrufer noch
+/// auf dem UI-Thread laufen, fror die Oberfläche sonst endlos ein. Die Grenzen
+/// deckeln jeden Hub-Aufruf auf wenige Sekunden.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(6))
+            .timeout_read(std::time::Duration::from_secs(12))
+            .timeout_write(std::time::Duration::from_secs(12))
+            .build()
+    })
+}
+
 /// Vom Hub ausgestelltes Token-Paar samt Kontostatus.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TokenBundle {
@@ -40,7 +55,7 @@ pub struct TokenBundle {
 
 fn post(path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", base_url(), path);
-    match ureq::post(&url)
+    match agent().post(&url)
         .set("Content-Type", "application/json")
         .send_json(body)
     {
@@ -67,7 +82,7 @@ fn bundle(v: serde_json::Value) -> Result<TokenBundle, String> {
 
 fn get_auth(path: &str, token: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", base_url(), path);
-    match ureq::get(&url)
+    match agent().get(&url)
         .set("Authorization", &format!("Bearer {}", token))
         .call()
     {
@@ -85,7 +100,7 @@ fn get_auth(path: &str, token: &str) -> Result<serde_json::Value, String> {
 
 fn post_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", base_url(), path);
-    match ureq::post(&url)
+    match agent().post(&url)
         .set("Authorization", &format!("Bearer {}", token))
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -245,7 +260,7 @@ pub fn create_server(
 
 fn put_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", base_url(), path);
-    match ureq::put(&url)
+    match agent().put(&url)
         .set("Authorization", &format!("Bearer {}", token))
         .set("Content-Type", "application/json")
         .send_json(body)

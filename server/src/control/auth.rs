@@ -40,9 +40,46 @@ pub async fn handle_login(
         error: Some(msg.to_string()),
     };
 
-    // ── Anmeldung: zentrales Token ODER lokaler Benutzer/Passwort ──
-    // Ergebnis: (Account, Tenant/Unterserver, Rolle für diese Sitzung).
-    let (db_user, tenant, session_role) = if let Some(token) = login.central_token.as_deref() {
+    // ── Anmeldung: Klango-Token ODER zentrales Token ODER lokaler Benutzer/Passwort ──
+    // Ergebnis: (Account, Tenant/Unterserver, Rolle für diese Sitzung,
+    // Klango-Gruppen mit Adminrecht, Anzeigename aus dem Token).
+    let (db_user, tenant, session_role, klango_groups, token_nick) = if let Some(token) = login.klango_token.as_deref() {
+        // Klango-Modus (docs/klango.md 1.1): HMAC-Token des Klango-Servers.
+        if !config.server.klango_mode() {
+            return reject("Dieser Server unterstützt keine Klango-Anmeldung");
+        }
+        let claims = match crate::control::klango::verify_token(&config.server.klango_secret, token) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::info!("Klango-Token abgelehnt: {}", e);
+                return reject("Klango-Token ungültig — bitte neu anmelden");
+            }
+        };
+        let sub = claims.sub.trim().to_lowercase();
+        let central_uid = format!("klango:{}", sub);
+        let db_user = match queries::find_user_by_central_uid(db, central_uid.clone()).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                let uname = unique_username(db, &sub).await;
+                match queries::create_central_user(db, uname.clone(), central_uid.clone(), "user".to_string()).await {
+                    Ok(id) => {
+                        tracing::info!("Klango-Konto lokal angelegt: {} ({})", uname, central_uid);
+                        crate::db::queries::DbUser { id, username: uname, role: "user".to_string() }
+                    }
+                    Err(e) => {
+                        tracing::error!("Anlegen des Klango-Kontos fehlgeschlagen: {}", e);
+                        return reject("Konto konnte nicht angelegt werden");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("central_uid-Lookup fehlgeschlagen: {}", e);
+                return reject("Internal server error");
+            }
+        };
+        let role = if claims.sadm { "admin".to_string() } else { db_user.role.clone() };
+        (db_user, String::new(), role, claims.adm, claims.nick)
+    } else if let Some(token) = login.central_token.as_deref() {
         // Client will zentrales Login.
         if !config.server.central_login {
             return reject("Dieser Server unterstützt kein zentrales Login");
@@ -98,13 +135,13 @@ pub async fn handle_login(
                     }
                     // Eigentümer des Unterservers ist dort Admin.
                     let role = if dir.owner_uid == claims.sub { "admin".to_string() } else { db_user.role.clone() };
-                    (db_user, server_id.to_string(), role)
+                    (db_user, server_id.to_string(), role, Vec::new(), None)
                 }
                 Err(e) => return reject(&format!("Kein Zugriff auf diesen Server: {}", e)),
             }
         } else {
             let role = db_user.role.clone();
-            (db_user, String::new(), role)
+            (db_user, String::new(), role, Vec::new(), None)
         }
     } else {
         // Klassischer Pfad (Benutzername/Passwort).
@@ -124,8 +161,9 @@ pub async fn handle_login(
                 if exists {
                     return reject("Invalid username or password");
                 }
-                // Selbstregistrierung ist bei zentralem Login deaktiviert.
-                if config.server.central_login || !queries::is_registration_open(db).await {
+                // Selbstregistrierung ist bei zentralem Login und im
+                // Klango-Modus deaktiviert.
+                if config.server.central_login || config.server.klango_mode() || !queries::is_registration_open(db).await {
                     return reject("Invalid username or password");
                 }
                 match queries::create_user(db, username.clone(), password, "user".to_string()).await {
@@ -149,11 +187,17 @@ pub async fn handle_login(
             }
         };
         let role = db_user.role.clone();
-        (db_user, String::new(), role)
+        (db_user, String::new(), role, Vec::new(), None)
     };
 
     // Check ban
-    if let Ok(Some(ban)) = queries::is_user_banned(db, db_user.id, peer_ip).await {
+    // S9: Bans speichern die bloße IP (ohne Port); peer_ip ist aber "ip:port".
+    // Daher den Host-Teil extrahieren, sonst matcht der IP-Ban nie.
+    let ban_ip = peer_ip
+        .parse::<std::net::SocketAddr>()
+        .map(|s| s.ip().to_string())
+        .unwrap_or_else(|_| peer_ip.clone());
+    if let Ok(Some(ban)) = queries::is_user_banned(db, db_user.id, ban_ip).await {
         return AuthResponse {
             success: false,
             user_id: None,
@@ -165,7 +209,11 @@ pub async fn handle_login(
         };
     }
 
-    let nickname = login.nickname.unwrap_or_else(|| db_user.username.clone());
+    let nickname = login
+        .nickname
+        .filter(|n| !n.trim().is_empty())
+        .or(token_nick.filter(|n| !n.trim().is_empty()))
+        .unwrap_or_else(|| db_user.username.clone());
 
     let online_user = OnlineUser {
         user_id: db_user.id,
@@ -174,6 +222,7 @@ pub async fn handle_login(
         role: session_role.clone(),
         tenant: tenant.clone(),
         session_token: 0,
+        audio_id: 0,
         room_id: None,
         muted: false,
         deafened: false,
@@ -184,13 +233,15 @@ pub async fn handle_login(
         sample_rate: config.audio.default_sample_rate,
         bit_depth: config.audio.default_bit_depth,
         channels: config.audio.default_channels,
+        klango_groups,
         tx,
     };
 
     let token = users.add_user(online_user).await;
 
-    // Raumliste des eigenen Unterservers (im Einzelserver-Modus: tenant = "").
-    let room_list = rooms.get_room_list(&tenant).await.unwrap_or_default();
+    // Raumliste des eigenen Unterservers (im Einzelserver-Modus: tenant = ""),
+    // aus Sicht dieses Nutzers (private Anrufräume nur für Beteiligte).
+    let room_list = rooms.get_room_list_for(db_user.id).await.unwrap_or_default();
 
     AuthResponse {
         success: true,

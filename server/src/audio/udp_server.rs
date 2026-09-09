@@ -87,7 +87,14 @@ impl UdpAudioServer {
 
                     // Get room members and relay
                     if let Some(room_id) = user.room_id {
-                        let packet = buf[..len].to_vec();
+                        let mut packet = buf[..len].to_vec();
+                        // S1: Den geheimen Auth-Token an Offset 4..8 durch die
+                        // öffentliche Audio-ID des Senders ersetzen. So können
+                        // Empfänger die Audio zuordnen, ohne den geheimen Token
+                        // je zu sehen (verhindert Spoofing/Hijack durch Mithörer).
+                        if packet.len() >= 8 {
+                            packet[4..8].copy_from_slice(&user.audio_id.to_le_bytes());
+                        }
                         self.relay_to_room(room_id, user.user_id, &packet).await;
                     } else if packets_received <= 3 {
                         tracing::debug!("UDP: user {} has no room_id, skipping relay", user.user_id);

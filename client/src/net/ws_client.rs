@@ -240,19 +240,22 @@ fn pre_handle_message(msg: &Message, state: &Arc<AppState>) {
                 if ack.success {
                     let mut inner = state.inner.lock();
                     inner.session_token = ack.udp_token;
+                    inner.audio_id = ack.audio_id;
                     let already_capturing = inner.capturing;
                     let input_device = inner.input_device.clone();
                     drop(inner);
 
-                    // Auto-start capture if not already running
+                    // Auto-start capture if not already running.
+                    // C1: Stream auf einem Owner-Thread halten (kein mem::forget-Leak).
                     if !already_capturing {
-                        match crate::audio::capture::start_capture(state.clone(), input_device) {
-                            Ok((stream, shutdown_tx)) => {
+                        let rt = tokio::runtime::Handle::current();
+                        match crate::audio::capture::start_capture_owned(state.clone(), input_device, rt) {
+                            Ok((shutdown_tx, stop_tx)) => {
                                 let mut inner = state.inner.lock();
                                 inner.capturing = true;
                                 inner.capture_shutdown = Some(shutdown_tx);
-                                // Keep cpal stream alive — dropping stops capture
-                                std::mem::forget(stream);
+                                inner.capture_stream_stop = Some(stop_tx);
+                                drop(inner);
                                 tracing::info!("Audio capture auto-started");
                             }
                             Err(e) => {

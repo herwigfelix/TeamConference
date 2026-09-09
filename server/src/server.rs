@@ -21,7 +21,7 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
 
     // Initialize database
     let db = Arc::new(Connection::open(&config.storage.database_path).await?);
-    schema::initialize(&db).await?;
+    schema::initialize(&db, config.server.klango_mode()).await?;
     tracing::info!("Database initialized: {}", config.storage.database_path);
 
     // Create admin user if requested
@@ -104,6 +104,24 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
         None
     };
 
+    // Klango-Modus: der interne Draht zum Klango-Server (docs/klango.md 1.6) —
+    // Benachrichtigungen herein, Anwesenheit hinaus.
+    let presence = if config.server.klango_mode() {
+        crate::control::internal::start_push_endpoint(
+            users.clone(),
+            config.server.klango_secret.clone(),
+            config.server.internal_port,
+        )
+        .await;
+        crate::control::internal::start_presence(
+            users.clone(),
+            config.server.klango_url.clone(),
+            config.server.klango_secret.clone(),
+        )
+    } else {
+        crate::control::internal::Presence::disabled()
+    };
+
     let state = Arc::new(SharedState {
         config: config.clone(),
         db,
@@ -112,6 +130,9 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
         files,
         udp_server: Some(udp_server),
         central,
+        login_throttle: std::sync::Mutex::new(std::collections::HashMap::new()),
+        presence,
+        next_conn_id: std::sync::atomic::AtomicU64::new(1),
     });
 
     // Start WebSocket server

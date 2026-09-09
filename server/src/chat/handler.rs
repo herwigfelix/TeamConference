@@ -62,7 +62,8 @@ pub async fn deliver_offline_messages(
         let from_user = queries::get_user_by_id(db, msg.from_user_id).await?;
         let from_info = from_user.map(|u| UserInfo {
             id: u.id,
-            nickname: u.username,
+            nickname: u.username.clone(),
+            username: u.username,
             role: u.role,
             muted: false,
             deafened: false,
@@ -86,9 +87,10 @@ pub async fn deliver_offline_messages(
     Ok(())
 }
 
-pub async fn send_server_message(message: String, users: &Arc<UserManager>) {
+pub async fn send_server_message(message: String, tenant: &str, users: &Arc<UserManager>) {
     let msg = Message::new("chat_server", serde_json::json!({
         "message": message
     }));
-    users.broadcast_all(msg).await;
+    // Nur an den Tenant des sendenden Admins (Einzelserver: tenant="" → alle).
+    users.broadcast_tenant(tenant, msg).await;
 }

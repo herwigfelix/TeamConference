@@ -21,6 +21,9 @@ pub mod net;
 #[path = "../../client/src/audio/mod.rs"]
 pub mod audio;
 
+/// C-API (docs/klango.md, Abschnitt 2) — genutzt vom Klango-Host.
+pub mod ffi;
+
 /// FFI-Smoke-Test: beweist, dass das Crate ein exportiertes C-Symbol erzeugt
 /// und als `staticlib`/`cdylib` für mobile Anbindung taugt.
 /// Gibt einen statischen, nullterminierten Versions-String zurück.

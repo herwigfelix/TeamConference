@@ -26,7 +26,7 @@ pub fn rebuild_files(ctx: &Ctx) {
     let files: Vec<FileInfo> = ctx.app.inner.lock().current_files.clone();
     ctx.ui.files.clear();
     for f in &files {
-        let kb = (f.size_bytes + 1023) / 1024;
+        let kb = f.size_bytes.saturating_add(1023) / 1024;
         ctx.ui.files.append(&format!("{} ({} KB)", f.filename, kb));
     }
     ctx.st.borrow_mut().files = files;

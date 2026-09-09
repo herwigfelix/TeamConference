@@ -91,8 +91,12 @@ pub struct UserInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfigAck {
     pub success: bool,
+    /// S1: geheimer Auth-Token für ausgehende UDP-Pakete (nur der Besitzer).
     #[serde(default)]
     pub udp_token: Option<u32>,
+    /// S1: eigene öffentliche Audio-ID (zum Erkennen eigener zurückgespiegelter Pakete).
+    #[serde(default)]
+    pub audio_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

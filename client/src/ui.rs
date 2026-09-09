@@ -143,6 +143,7 @@ pub struct Ui {
     pub chat_in: TextCtrl,
     pub send_btn: Button,
     pub volume: Slider,
+    pub mic_volume: Slider,
     pub files: ListBox,
     pub download_btn: Button,
 }
@@ -402,7 +403,7 @@ impl Ui {
         let right = BoxSizer::builder(Orientation::Vertical).build();
         right.add(
             &StaticText::builder(&main_panel)
-                .with_label("Lautstärke % (100 = normal)")
+                .with_label("Wiedergabe % (100 = normal)")
                 .build(),
             0,
             SizerFlag::All,
@@ -415,6 +416,21 @@ impl Ui {
             .with_max_value(200)
             .build();
         right.add(&volume, 0, SizerFlag::Expand | SizerFlag::All, 4);
+
+        right.add(
+            &StaticText::builder(&main_panel)
+                .with_label("Mikrofon % (100 = normal)")
+                .build(),
+            0,
+            SizerFlag::All,
+            4,
+        );
+        let mic_volume = Slider::builder(&main_panel)
+            .with_value(100)
+            .with_min_value(0)
+            .with_max_value(200)
+            .build();
+        right.add(&mic_volume, 0, SizerFlag::Expand | SizerFlag::All, 4);
         right.add(
             &StaticText::builder(&main_panel)
                 .with_label("Dateien im aktuellen Raum")
@@ -471,7 +487,8 @@ impl Ui {
         set_a11y_name(&rooms_tree, "Räume und Nutzer");
         set_a11y_name(&chat_log, "Chatverlauf");
         set_a11y_name(&chat_in, "Chatnachricht eingeben");
-        set_a11y_name(&volume, "Lautstärke in Prozent, 100 ist normal");
+        set_a11y_name(&volume, "Wiedergabe-Lautstärke in Prozent, 100 ist normal");
+        set_a11y_name(&mic_volume, "Mikrofon-Lautstärke in Prozent, 100 ist normal");
         set_a11y_name(&files, "Dateien im aktuellen Raum");
 
         Ui {
@@ -533,6 +550,7 @@ impl Ui {
             chat_in,
             send_btn,
             volume,
+            mic_volume,
             files,
             download_btn,
         }

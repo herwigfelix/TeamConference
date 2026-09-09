@@ -176,12 +176,28 @@ pub async fn start_udp_audio(
                 result = recv_socket.recv_from(&mut buf) => {
                     match result {
                         Ok((len, addr)) => {
+                            // C3: Nur Audio von der erwarteten Serveradresse annehmen.
+                            // Sonst könnte jede Quelle, die den lokalen UDP-Port
+                            // erreicht, gefälschte Pakete einschleusen.
+                            let expected = recv_state.inner.lock().server_udp_addr.clone();
+                            if let Some(ref exp) = expected {
+                                if &addr.to_string() != exp {
+                                    if packets_received < 5 {
+                                        tracing::debug!("UDP recv: verwerfe Paket von unerwarteter Quelle {} (erwartet {})", addr, exp);
+                                    }
+                                    continue;
+                                }
+                            }
                             if let Some(header) = AudioPacketHeader::parse(&buf[..len]) {
                                 let payload = header.payload(&buf[..len]);
 
+                                // S1: eingehende Pakete tragen (nach dem Server-Rewrite)
+                                // die öffentliche Audio-ID des Senders. Zum Erkennen des
+                                // eigenen zurückgespiegelten Stroms daher die eigene
+                                // audio_id vergleichen, nicht den geheimen Token.
                                 let (deafened, own_token) = {
                                     let inner = recv_state.inner.lock();
-                                    (inner.deafened, inner.session_token.unwrap_or(0))
+                                    (inner.deafened, inner.audio_id.unwrap_or(0))
                                 };
 
                                 // Eigenen, vom Server zurückgespiegelten Datei-Strom
@@ -210,30 +226,45 @@ pub async fn start_udp_audio(
                                         let dch = ch.min(2);
                                         pcm_ch = dch as u16;
                                         let key = (header.token, header.source_id, dch);
-                                        let decoder = decoders.entry(key).or_insert_with(|| {
-                                            let oc = if dch <= 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
-                                            opus::Decoder::new(48000, oc).expect("Opus decoder creation failed")
-                                        });
-                                        // Puffer für ein volles Opus-Frame (bis 120 ms @ 48 kHz
-                                        // = 5760 Samples/Kanal), damit decode nie überläuft.
-                                        let cap = 5760 * (dch as usize);
-                                        if pcm_out.len() < cap {
-                                            pcm_out.resize(cap, 0);
-                                        }
-                                        match decoder.decode(payload, &mut pcm_out[..cap], false) {
-                                            Ok(frames) => {
-                                                let total = (frames * (dch as usize)).min(pcm_out.len());
-                                                let mut bytes = Vec::with_capacity(total * 2);
-                                                for &s in &pcm_out[..total] {
-                                                    bytes.extend_from_slice(&s.to_le_bytes());
+                                        'opus: {
+                                            let decoder = match decoders.entry(key) {
+                                                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                                                std::collections::hash_map::Entry::Vacant(e) => {
+                                                    let oc = if dch <= 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                                                    match opus::Decoder::new(48000, oc) {
+                                                        Ok(d) => e.insert(d),
+                                                        Err(err) => {
+                                                            // Decoder-Erstellung darf den Netzwerk-Task nicht
+                                                            // per Panic beenden — Paket verwerfen statt expect().
+                                                            if packets_received < 5 {
+                                                                tracing::warn!("UDP recv: Opus decoder creation failed: {}", err);
+                                                            }
+                                                            break 'opus None;
+                                                        }
+                                                    }
                                                 }
-                                                Some(bytes)
+                                            };
+                                            // Puffer für ein volles Opus-Frame (bis 120 ms @ 48 kHz
+                                            // = 5760 Samples/Kanal), damit decode nie überläuft.
+                                            let cap = 5760 * (dch as usize);
+                                            if pcm_out.len() < cap {
+                                                pcm_out.resize(cap, 0);
                                             }
-                                            Err(e) => {
-                                                if packets_received < 5 {
-                                                    tracing::warn!("UDP recv: Opus decode failed: {}", e);
+                                            match decoder.decode(payload, &mut pcm_out[..cap], false) {
+                                                Ok(frames) => {
+                                                    let total = (frames * (dch as usize)).min(pcm_out.len());
+                                                    let mut bytes = Vec::with_capacity(total * 2);
+                                                    for &s in &pcm_out[..total] {
+                                                        bytes.extend_from_slice(&s.to_le_bytes());
+                                                    }
+                                                    Some(bytes)
                                                 }
-                                                None
+                                                Err(e) => {
+                                                    if packets_received < 5 {
+                                                        tracing::warn!("UDP recv: Opus decode failed: {}", e);
+                                                    }
+                                                    None
+                                                }
                                             }
                                         }
                                     } else {

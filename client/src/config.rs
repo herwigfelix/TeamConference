@@ -86,6 +86,10 @@ pub struct ClientConfig {
     pub output_device: Option<String>,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    #[serde(default = "default_volume")]
+    pub mic_volume: f32,
+    #[serde(default)]
+    pub mic_boost: bool,
     /// Server-Ereignisse per Sprachausgabe ansagen (Standard: an).
     #[serde(default = "default_true")]
     pub announce_events: bool,
@@ -121,6 +125,8 @@ impl Default for ClientConfig {
             input_device: None,
             output_device: None,
             volume: default_volume(),
+            mic_volume: default_volume(),
+            mic_boost: false,
             announce_events: true,
         }
     }

@@ -117,17 +117,35 @@ impl FileHandler {
         let data = BASE64.decode(&chunk.data)?;
 
         let mut uploads = self.pending_uploads.write().await;
-        let upload = uploads.get_mut(&chunk.upload_id)
-            .ok_or_else(|| anyhow::anyhow!("Upload not found"))?;
+
+        // Harte Obergrenze pro Chunk erzwingen: die bei start_upload deklarierte
+        // Größe (die gegen die Limits geprüft wurde) UND das Server-Maximum. Ohne
+        // das kann ein Client size=1 deklarieren und danach beliebig viele Chunks
+        // streamen (Disk-Exhaustion-DoS, umgeht max_upload_size + Speicherlimit).
+        let (path, new_total, over) = {
+            let upload = uploads.get_mut(&chunk.upload_id)
+                .ok_or_else(|| anyhow::anyhow!("Upload not found"))?;
+            let new_total = upload.bytes_written.saturating_add(data.len() as i64);
+            let over = new_total > upload.size || new_total > self.max_upload_size;
+            (upload.storage_path.clone(), new_total, over)
+        };
+        if over {
+            uploads.remove(&chunk.upload_id);
+            drop(uploads);
+            tokio::fs::remove_file(&path).await.ok();
+            anyhow::bail!("Upload überschreitet die angegebene Größe");
+        }
 
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .append(true)
-            .open(&upload.storage_path)
+            .open(&path)
             .await?;
         file.write_all(&data).await?;
-        upload.bytes_written += data.len() as i64;
+        if let Some(upload) = uploads.get_mut(&chunk.upload_id) {
+            upload.bytes_written = new_total;
+        }
 
         Ok(())
     }
@@ -184,7 +202,7 @@ impl FileHandler {
     }
 }
 
-fn sanitize_filename(name: &str) -> String {
+pub fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect()

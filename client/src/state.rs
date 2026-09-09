@@ -57,7 +57,10 @@ pub struct InnerState {
     pub connected: bool,
     pub authenticated: bool,
     pub user_id: Option<i64>,
+    /// S1: geheimer Auth-Token für ausgehende UDP-Pakete (nie an andere sichtbar).
     pub session_token: Option<u32>,
+    /// S1: eigene öffentliche Audio-ID (zum Erkennen eigener zurückgespiegelter Pakete).
+    pub audio_id: Option<u32>,
     pub server_name: Option<String>,
     pub nickname: String,
     /// Eigene Rolle laut Server (aus auth_response, ggf. aus der Raumliste
@@ -103,6 +106,11 @@ pub struct InnerState {
     // Audio pipeline shutdown signals
     pub capture_shutdown: Option<tokio::sync::watch::Sender<bool>>,
     pub playback_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    // C1/C4: Stop-Signale für die Owner-Threads der cpal-Streams. cpal::Stream ist
+    // !Send und wird deshalb auf einem eigenen Thread gehalten; ein Signal hier
+    // beendet den Thread, der den Stream droppt (statt ihn zu leaken).
+    pub capture_stream_stop: Option<std::sync::mpsc::Sender<()>>,
+    pub playback_stream_stop: Option<std::sync::mpsc::Sender<()>>,
 
     // File streaming
     pub stream_shutdown: Option<tokio::sync::watch::Sender<bool>>,
@@ -197,6 +205,12 @@ pub struct AppState {
     pub stream_paused: AtomicBool,
     /// Playback volume as f32 bits (0.0 – 1.0), read lock-free in the audio callback
     pub volume_bits: Arc<AtomicU32>,
+    /// Microphone volume as f32 bits (0.0 – 2.0), 1.0 = normal
+    pub mic_volume_bits: AtomicU32,
+    /// Microphone boost flag (when true, doubles effective gain)
+    pub mic_boost: AtomicBool,
+    /// Effective microphone gain as f32 bits (mic_volume * boost), read lock-free in capture callback
+    pub mic_gain_bits: Arc<AtomicU32>,
     /// Lautstärke des gerade gestreamten Datei-Audios als f32-Bits (1.0 = normal,
     /// 0.0–2.0). Gilt für ALLE Hörer, weil sie das gesendete Datei-Audio skaliert
     /// (und das lokale Mithören). Wird lock-frei in der Streaming-Schleife gelesen.
@@ -228,6 +242,9 @@ impl AppState {
             file_streaming: AtomicBool::new(false),
             stream_paused: AtomicBool::new(false),
             volume_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            mic_volume_bits: AtomicU32::new(1.0f32.to_bits()),
+            mic_boost: AtomicBool::new(false),
+            mic_gain_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             stream_volume_bits: AtomicU32::new(1.0f32.to_bits()),
             stream_seek_secs: AtomicI32::new(0),
             local_audio_tx: Mutex::new(None),
@@ -243,6 +260,33 @@ impl AppState {
         // bis 2.0 (200 %) — Verstärkung über 1.0 wird in der Wiedergabe geclamped
         self.volume_bits
             .store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn mic_volume(&self) -> f32 {
+        f32::from_bits(self.mic_volume_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn mic_boost(&self) -> bool {
+        self.mic_boost.load(Ordering::Relaxed)
+    }
+
+    pub fn set_mic_volume(&self, v: f32) {
+        let v = v.clamp(0.0, 2.0);
+        self.mic_volume_bits.store(v.to_bits(), Ordering::Relaxed);
+        self.update_mic_gain();
+    }
+
+    pub fn set_mic_boost(&self, boost: bool) {
+        self.mic_boost.store(boost, Ordering::Relaxed);
+        self.update_mic_gain();
+    }
+
+    fn update_mic_gain(&self) {
+        let v = self.mic_volume();
+        let boost = if self.mic_boost() { 2.0 } else { 1.0 };
+        let effective = v * boost;
+        self.mic_gain_bits
+            .store(effective.to_bits(), Ordering::Relaxed);
     }
 
     /// Lautstärke des Datei-Streams (1.0 = normal).

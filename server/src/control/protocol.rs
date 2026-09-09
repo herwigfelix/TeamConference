@@ -44,6 +44,11 @@ pub struct AuthLogin {
     /// Im Multi-Tenant-/Hub-Modus: welcher Unterserver beigetreten werden soll.
     #[serde(default)]
     pub server_id: Option<String>,
+    /// Klango-Modus (docs/klango.md 1.1): vom Klango-Server signiertes
+    /// HMAC-Token. Ist es gesetzt und der Server hat `klango_secret`, wird
+    /// damit angemeldet.
+    #[serde(default)]
+    pub klango_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,12 +94,32 @@ pub struct RoomInfo {
     /// Opus-Bitrate in Bit/s; 0 = automatisch aus Kanälen ableiten
     #[serde(default)]
     pub bitrate: i64,
+    // ── Klango-Modus (docs/klango.md 1.2) ──
+    /// Klango-Gruppe (gid als String), zu der der Raum gehört; "" = keine.
+    #[serde(default)]
+    pub group_id: String,
+    /// Ersteller/Eigentümer des Raums; 0 = keiner.
+    #[serde(default)]
+    pub owner_id: i64,
+    /// Vom Eigentümer ernannte Raum-Admins.
+    #[serde(default)]
+    pub admins: Vec<i64>,
+    /// Verschwindet, sobald er leer ist.
+    #[serde(default)]
+    pub temporary: bool,
+    /// Anrufraum — nur für die Beteiligten sichtbar.
+    #[serde(default)]
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     pub id: i64,
     pub nickname: String,
+    /// Kontoname (im Klango-Modus die Klango-ID) — damit Clients Nutzer ihren
+    /// Kontakten zuordnen können.
+    #[serde(default)]
+    pub username: String,
     #[serde(default)]
     pub role: String,
     #[serde(default)]
@@ -137,6 +162,10 @@ pub struct RoomCreate {
     pub channels: Option<i64>,
     #[serde(default)]
     pub bitrate: Option<i64>,
+    /// Klango-Modus: Serveradmins können damit weiterhin dauerhafte Räume
+    /// anlegen (für alle anderen ist der Raum immer temporär).
+    #[serde(default)]
+    pub persistent: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,8 +229,13 @@ fn default_true() -> bool { true }
 #[derive(Debug, Serialize)]
 pub struct AudioConfigAck {
     pub success: bool,
+    /// S1: geheimer Auth-Token — nur an den Besitzer, für ausgehende UDP-Pakete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub udp_token: Option<u32>,
+    /// S1: eigene öffentliche Audio-ID — damit der Client seine eigenen (per Server
+    /// zurückgespiegelten) Pakete erkennen kann.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,4 +359,77 @@ pub struct StreamFileStatus {
     pub user_id: i64,
     pub filename: String,
     pub playing: bool,
+}
+
+// ── Klango-Modus (docs/klango.md) ──
+
+#[derive(Debug, Deserialize)]
+pub struct RoomJoinGroup {
+    pub group_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomAdminSet {
+    pub room_id: i64,
+    pub user_id: i64,
+    pub admin: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomKick {
+    pub room_id: i64,
+    pub user_id: i64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomBan {
+    pub room_id: i64,
+    pub user_id: i64,
+    #[serde(default)]
+    pub duration_minutes: Option<i64>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomUnban {
+    pub room_id: i64,
+    pub user_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomBans {
+    pub room_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomMute {
+    pub room_id: i64,
+    pub user_id: i64,
+    pub muted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserLookup {
+    pub username: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallInvite {
+    pub to_username: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallAnswer {
+    pub room_id: i64,
+    pub accept: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallCancel {
+    pub room_id: i64,
 }

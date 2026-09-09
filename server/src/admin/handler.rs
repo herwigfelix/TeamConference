@@ -18,6 +18,13 @@ pub async fn handle_kick(
         anyhow::bail!("Insufficient permissions");
     }
 
+    // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
+    let target = users.get_user(kick.user_id).await
+        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+    if admin.tenant != target.tenant {
+        anyhow::bail!("Insufficient permissions");
+    }
+
     let reason = kick.reason.unwrap_or_default();
 
     // Notify the kicked user
@@ -58,9 +65,15 @@ pub async fn handle_ban(
         anyhow::bail!("Only admins can ban users");
     }
 
+    // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
+    let target = users.get_user(ban.user_id).await
+        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+    if admin.tenant != target.tenant {
+        anyhow::bail!("Insufficient permissions");
+    }
+
     let reason = ban.reason.clone().unwrap_or_default();
-    let ip = users.get_user(ban.user_id).await
-        .and_then(|u| u.udp_addr.map(|a| a.ip().to_string()));
+    let ip = target.udp_addr.map(|a| a.ip().to_string());
 
     queries::create_ban(
         db,
@@ -110,6 +123,11 @@ pub async fn handle_move(
 
     let target = users.get_user(mv.user_id).await
         .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+
+    // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
+    if admin.tenant != target.tenant {
+        anyhow::bail!("Insufficient permissions");
+    }
 
     let old_room_id = target.room_id;
 
@@ -162,6 +180,14 @@ pub async fn handle_admin_mute(
         .ok_or_else(|| anyhow::anyhow!("Admin not found"))?;
 
     if !admin.is_moderator() {
+        anyhow::bail!("Insufficient permissions");
+    }
+
+    // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
+    // Vor dem Mutieren prüfen.
+    let pre = users.get_user(mute.user_id).await
+        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+    if admin.tenant != pre.tenant {
         anyhow::bail!("Insufficient permissions");
     }
 

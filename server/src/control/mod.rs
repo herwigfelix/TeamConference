@@ -3,3 +3,5 @@ pub mod handler;
 pub mod auth;
 pub mod central;
 pub mod hubdir;
+pub mod internal;
+pub mod klango;

@@ -55,15 +55,19 @@ pub fn start_capture(
         tracing::error!("Audio capture stream error: {}", err);
     };
 
+    // Volume gain shared with UI/config (lock-free)
+    let mic_gain_bits = state.mic_gain_bits.clone();
+
     // Build stream with f32 samples (most universally supported on macOS)
     let stream = device
         .build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Convert f32 samples to i16 LE bytes
+                let gain = f32::from_bits(mic_gain_bits.load(Ordering::Relaxed));
+                // Convert f32 samples to i16 LE bytes, applying microphone gain/boost
                 let mut bytes = Vec::with_capacity(data.len() * 2);
                 for &sample in data {
-                    let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                    let s16 = (sample * gain * 32767.0).clamp(-32768.0, 32767.0) as i16;
                     bytes.extend_from_slice(&s16.to_le_bytes());
                 }
 
@@ -278,4 +282,43 @@ pub fn start_capture(
     });
 
     Ok((stream, shutdown_tx))
+}
+
+/// C1: Startet die Aufnahme auf einem dedizierten Owner-Thread und hält den
+/// cpal-`Stream` dort, bis das Stop-Signal kommt — dann wird er gedroppt
+/// (beendet die OS-Aufnahme sauber). `cpal::Stream` ist auf macOS `!Send`, kann
+/// also weder im `Arc<Mutex<InnerState>>` noch in einem Tokio-Task (Work-Stealing)
+/// gehalten werden — deshalb muss er auf genau diesem Thread erzeugt UND gedroppt
+/// werden. Gibt `(capture_shutdown, stream_stop)` zurück; blockiert kurz, bis der
+/// Stream initialisiert ist (Gerät geöffnet).
+pub fn start_capture_owned(
+    state: Arc<AppState>,
+    input_device_name: Option<String>,
+    rt: tokio::runtime::Handle,
+) -> Result<(watch::Sender<bool>, std::sync::mpsc::Sender<()>), String> {
+    let (init_tx, init_rx) =
+        std::sync::mpsc::channel::<Result<watch::Sender<bool>, String>>();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // Runtime-Kontext betreten, damit das interne tokio::spawn im Sende-Task
+        // funktioniert (der Owner-Thread ist kein Tokio-Worker).
+        let _guard = rt.enter();
+        match start_capture(state, input_device_name) {
+            Ok((stream, shutdown_tx)) => {
+                let _ = init_tx.send(Ok(shutdown_tx));
+                // Stream lebt, bis das Stop-Signal kommt (oder der Sender wegfällt).
+                let _ = stop_rx.recv();
+                drop(stream);
+                tracing::info!("Capture-Stream gestoppt und freigegeben");
+            }
+            Err(e) => {
+                let _ = init_tx.send(Err(e));
+            }
+        }
+    });
+    match init_rx.recv() {
+        Ok(Ok(shutdown_tx)) => Ok((shutdown_tx, stop_tx)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Capture-Owner-Thread abgebrochen".to_string()),
+    }
 }

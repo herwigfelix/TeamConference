@@ -38,6 +38,25 @@ pub struct ServerConfig {
     /// abgeschottete Bereiche (server_id). Aus = klassischer Einzelserver
     /// (selbst hostbar, unverändertes Verhalten). Erfordert zentrales Login.
     pub multi_tenant: bool,
+    /// Klango-Modus (docs/klango.md): gemeinsames Geheimnis, mit dem der
+    /// Klango-Server Anmelde-Token signiert. Leer = Klango-Modus aus. Ist es
+    /// gesetzt, dürfen alle Nutzer Räume anlegen, Räume kennen Eigentümer und
+    /// Raum-Admins, und Nutzer können sich gegenseitig anrufen.
+    pub klango_secret: String,
+    /// Klango-Modus: Port des internen HTTP-Endpunkts auf 127.0.0.1, über den
+    /// der Klango-Server Benachrichtigungen einliefert (docs/klango.md 1.6).
+    /// 0 = aus. Der Endpunkt bindet NUR auf die Loopback-Adresse.
+    pub internal_port: u16,
+    /// Klango-Modus: Basis-URL des Klango-Servers für Anwesenheitsmeldungen
+    /// (`POST <url>/internal/presence`). Leer = keine Meldungen.
+    pub klango_url: String,
+}
+
+impl ServerConfig {
+    /// True, wenn der Klango-Modus aktiv ist.
+    pub fn klango_mode(&self) -> bool {
+        !self.klango_secret.trim().is_empty()
+    }
 }
 
 impl Default for ServerConfig {
@@ -51,6 +70,9 @@ impl Default for ServerConfig {
             central_login_url: "https://srvapi.accessy.org".into(),
             central_login_pubkey: String::new(),
             multi_tenant: false,
+            klango_secret: String::new(),
+            internal_port: 9502,
+            klango_url: "http://127.0.0.1:8000".into(),
         }
     }
 }
@@ -195,6 +217,9 @@ impl Config {
         env_override(&mut self.server.central_login_url, "TC_CENTRAL_LOGIN_URL");
         env_override(&mut self.server.central_login_pubkey, "TC_CENTRAL_LOGIN_PUBKEY");
         env_override(&mut self.server.multi_tenant, "TC_MULTI_TENANT");
+        env_override(&mut self.server.klango_secret, "TC_KLANGO_SECRET");
+        env_override(&mut self.server.internal_port, "TC_INTERNAL_PORT");
+        env_override(&mut self.server.klango_url, "TC_KLANGO_URL");
 
         env_override(&mut self.network.control_host, "TC_CONTROL_HOST");
         env_override(&mut self.network.control_port, "TC_CONTROL_PORT");

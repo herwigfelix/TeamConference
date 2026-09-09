@@ -73,6 +73,8 @@ fn main() {
     let app_state = Arc::new(AppState::new());
     let cfg = config::load_config();
     app_state.set_volume(cfg.volume);
+    app_state.set_mic_volume(cfg.mic_volume);
+    app_state.set_mic_boost(cfg.mic_boost);
     // Gespeicherte Audio-Einstellungen übernehmen
     {
         let mut inner = app_state.inner.lock();
@@ -119,6 +121,8 @@ fn main() {
         handlers::rebuild_server_list(&ctx);
         ui.volume
             .set_value((cfg.volume * 100.0).clamp(0.0, 200.0) as i32);
+        ui.mic_volume
+            .set_value((cfg.mic_volume * 100.0).clamp(0.0, 200.0) as i32);
         if let Some(first) = ctx.st.borrow().servers.first().cloned() {
             ui.host_in.set_value(&first.host);
             ui.port_in.set_value(&first.port.to_string());
@@ -169,6 +173,7 @@ fn main() {
     // Beim Beenden Lautstärke sichern
     let mut saved = config::load_config();
     saved.volume = app_state_exit.volume();
+    saved.mic_volume = app_state_exit.mic_volume();
     let _ = config::save_config(&saved);
 }
 
@@ -304,6 +309,10 @@ fn wire_events(ctx: &Ctx) {
     {
         let ctx = ctx.clone();
         ui.volume.on_slider(move |_| actions::volume_changed(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.mic_volume.on_slider(move |_| actions::mic_volume_changed(&ctx));
     }
     // Enter/Doppelklick auf einen Baumeintrag tritt dem Raum bei
     {
