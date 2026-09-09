@@ -118,6 +118,9 @@ fn post_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_j
 }
 
 /// Eintrag aus dem Server-Verzeichnis.
+///
+/// Alle Felder außer `id`/`name` sind optional, weil der Hub private Server in
+/// Admin-Listen bewusst beschnitten ausliefert (nur `id`, `name`, `private`).
 #[derive(Debug, Clone, Deserialize, serde::Serialize, Default)]
 pub struct ServerInfo {
     pub id: String,
@@ -132,6 +135,16 @@ pub struct ServerInfo {
     pub control_port: i64,
     #[serde(default)]
     pub audio_port: i64,
+    /// central_uid des Eigentümers — daran erkennt der Client „eigener Server".
+    #[serde(default)]
+    pub owner_uid: String,
+    /// Vom Hub gesetzt, wenn Details zurückgehalten wurden (privat, kein Zugriff).
+    #[serde(default)]
+    pub private: bool,
+    #[serde(default)]
+    pub file_limit_bytes: i64,
+    #[serde(default)]
+    pub storage_used_bytes: i64,
 }
 
 /// Server bearbeiten (Name/Beschreibung/öffentlich). Host/Ports unverändert
@@ -235,6 +248,48 @@ pub fn list_servers(access_token: &str, q: &str) -> Result<Vec<ServerInfo>, Stri
     let v = get_auth(&path, access_token)?;
     let arr = v.get("servers").cloned().unwrap_or_default();
     serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+/// Eigene Server + Server, bei denen man Mitglied ist — inklusive der privaten,
+/// die im öffentlichen Verzeichnis (`/servers`) NICHT auftauchen.
+pub fn list_my_servers(access_token: &str) -> Result<Vec<ServerInfo>, String> {
+    let v = get_auth("/servers/mine", access_token)?;
+    let arr = v.get("servers").cloned().unwrap_or_default();
+    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+/// Nutzer zu einem Server einladen (Mitglieder und Eigentümer dürfen das).
+pub fn create_invite(access_token: &str, server_id: &str, invitee_uid: &str) -> Result<String, String> {
+    let v = post_auth(
+        "/invites",
+        access_token,
+        json!({ "server_id": server_id, "invitee_uid": invitee_uid }),
+    )?;
+    Ok(v.get("invite_id").and_then(|s| s.as_str()).unwrap_or("").to_string())
+}
+
+/// Öffentliches Profil eines anderen Nutzers (z. B. vor dem Einladen).
+pub fn get_user_profile(access_token: &str, uid: &str) -> Result<Profile, String> {
+    let v = get_auth(&format!("/users/{}/profile", urlencode(uid)), access_token)?;
+    serde_json::from_value(v.get("profile").cloned().unwrap_or_default())
+        .map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+/// Admin: alle Server des Hubs (private nur mit Name).
+pub fn admin_list_servers(access_token: &str) -> Result<Vec<ServerInfo>, String> {
+    let v = get_auth("/admin/servers", access_token)?;
+    let arr = v.get("servers").cloned().unwrap_or_default();
+    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+}
+
+/// Admin: Datei-Limit eines Servers setzen (Bytes).
+pub fn admin_set_quota(access_token: &str, server_id: &str, file_limit_bytes: i64) -> Result<(), String> {
+    post_auth(
+        "/servers/quota",
+        access_token,
+        json!({ "server_id": server_id, "file_limit_bytes": file_limit_bytes }),
+    )
+    .map(|_| ())
 }
 
 /// Neuen Server im Hub anlegen → server_id.
@@ -384,4 +439,59 @@ pub fn reset_confirm(phone: &str, code: &str, new_password: &str) -> Result<(), 
         json!({ "phone": phone, "code": code, "new_password": new_password }),
     )
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `/servers/mine` liefert den vollen Datensatz — owner_uid entscheidet im
+    /// Client über die Kennzeichnung „eigener Server".
+    #[test]
+    fn server_info_voll() {
+        let v = serde_json::json!({
+            "id": "a11a", "owner_uid": "u1", "name": "Privater Testserver",
+            "description": "nur intern", "is_public": false, "host": "127.0.0.1",
+            "control_port": 10001, "audio_port": 10002,
+            "file_limit_bytes": 0, "storage_used_bytes": 0, "created_at": 1788979712
+        });
+        let s: ServerInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(s.owner_uid, "u1");
+        assert!(!s.is_public);
+        assert_eq!(s.audio_port, 10002);
+        assert!(!s.private);
+    }
+
+    /// `/admin/servers` beschneidet private Einträge auf id/name/is_public/private
+    /// — die fehlenden Felder müssen auf Defaults fallen statt zu scheitern.
+    #[test]
+    fn server_info_beschnitten() {
+        let v = serde_json::json!({
+            "id": "a11a", "name": "Privater Testserver", "is_public": false, "private": true
+        });
+        let s: ServerInfo = serde_json::from_value(v).unwrap();
+        assert!(s.private);
+        assert_eq!(s.host, "");
+        assert_eq!(s.control_port, 0);
+    }
+
+    #[test]
+    fn invite_info() {
+        let v = serde_json::json!({
+            "id": "16fe", "server_id": "a11a", "server_name": "Privater Testserver",
+            "inviter_uid": "u1", "invitee_uid": "u2", "status": "pending", "created_at": 1
+        });
+        let i: InviteInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(i.server_name, "Privater Testserver");
+    }
+
+    #[test]
+    fn ports_aus_formular() {
+        // Der Client rechnet Audio = Steuerport+1, wenn das Feld leer bleibt —
+        // dieselbe Konvention wie im Hub.
+        assert_eq!(crate::actions::parse_ports_for_test("9500", "", 9500).unwrap(), (9500, 9501));
+        assert_eq!(crate::actions::parse_ports_for_test("", "", 9500).unwrap(), (9500, 9501));
+        assert!(crate::actions::parse_ports_for_test("abc", "", 9500).is_err());
+        assert!(crate::actions::parse_ports_for_test("70000", "", 9500).is_err());
+    }
 }

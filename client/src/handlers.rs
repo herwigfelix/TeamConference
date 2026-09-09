@@ -160,25 +160,58 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         }
 
         // Server-Hub: Verzeichnis neu laden (nach Login/Anlegen/Bearbeiten/Löschen).
+        // `mine = true` schaltet zusätzlich auf „Meine Server" um — private
+        // Server erscheinen im öffentlichen Verzeichnis nicht.
         "hub_dir_reload" => {
-            crate::actions::hub_load_directory(ctx);
+            if msg.data.get("mine").and_then(|v| v.as_bool()).unwrap_or(false) {
+                crate::actions::hub_show_my_servers(ctx);
+            } else {
+                crate::actions::hub_load_directory(ctx);
+            }
         }
 
-        // Server-Hub: aktualisiertes Verzeichnis → Liste füllen. Host/Port werden
-        // NICHT angezeigt (immer derselbe Hub); nur Name (+ Beschreibung).
+        // Server-Hub: aktualisierte Serverliste → Liste füllen. Host/Port werden
+        // NICHT angezeigt (immer derselbe Hub); dafür sagt der Eintrag, ob der
+        // Server öffentlich oder privat ist und in welcher Rolle man ihn sieht —
+        // sonst ist einem Screenreader-Nutzer nicht erkennbar, warum ein Server
+        // nur in einer der beiden Ansichten auftaucht.
         "hub_servers" => {
             let servers: Vec<crate::hub::ServerInfo> = serde_json::from_value(
                 msg.data.get("servers").cloned().unwrap_or_default(),
             )
             .unwrap_or_default();
+            let mine_view = msg.data.get("scope").and_then(|v| v.as_str()) == Some("mine");
+            let my_uid = crate::config::load_config()
+                .hub
+                .map(|h| h.central_uid)
+                .unwrap_or_default();
             ui.hub_servers.clear();
             for s in &servers {
-                let label = if s.description.trim().is_empty() {
+                let mut label = if s.description.trim().is_empty() {
                     s.name.clone()
                 } else {
                     format!("{} — {}", s.name, s.description)
                 };
+                label.push_str(if s.is_public { " · öffentlich" } else { " · privat" });
+                if !my_uid.is_empty() && s.owner_uid == my_uid {
+                    label.push_str(" · eigener Server");
+                } else if mine_view {
+                    label.push_str(" · Mitglied");
+                }
                 ui.hub_servers.append(&label);
+            }
+            if servers.is_empty() {
+                ui.append_hub_log(if mine_view {
+                    "Keine eigenen Server und keine Mitgliedschaften."
+                } else {
+                    "Keine öffentlichen Server gefunden."
+                });
+            } else {
+                ui.append_hub_log(&format!(
+                    "{} Server geladen ({}).",
+                    servers.len(),
+                    if mine_view { "meine Server" } else { "öffentliches Verzeichnis" }
+                ));
             }
             ctx.st.borrow_mut().hub_servers = servers;
         }

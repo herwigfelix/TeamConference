@@ -45,7 +45,13 @@ fn selected_file(ctx: &Ctx) -> Option<crate::protocol::FileInfo> {
 }
 
 fn ask_text(ctx: &Ctx, message: &str, caption: &str, default: &str) -> Option<String> {
-    let dlg = TextEntryDialog::builder(&ctx.ui.frame, message, caption)
+    ask_text_on(&ctx.ui.frame, message, caption, default)
+}
+
+/// Wie `ask_text`, aber nur mit dem Elternfenster — für Closures in Dialogen,
+/// die kein `Ctx` einfangen können (Widgets sind `!Send`/`Copy`).
+fn ask_text_on(parent: &Frame, message: &str, caption: &str, default: &str) -> Option<String> {
+    let dlg = TextEntryDialog::builder(parent, message, caption)
         .with_default_value(default)
         .build();
     if dlg.show_modal() == ID_OK {
@@ -622,6 +628,7 @@ pub fn update_hub_view(ctx: &Ctx) {
     let admin = hub_is_admin();
     ctx.ui.hub_admin_pending_btn.show(admin);
     ctx.ui.hub_admin_user_btn.show(admin);
+    ctx.ui.hub_admin_servers_btn.show(admin);
     ctx.ui.hub_panel.layout();
     update_hub_status(ctx);
 }
@@ -875,25 +882,58 @@ pub fn hub_load_directory(ctx: &Ctx) {
         return;
     }
     let q = ctx.ui.hub_search_in.get_value().trim().to_string();
-    ctx.ui.append_hub_log("Lade Verzeichnis…");
+    // Ansicht 1 = „Meine Server": /servers/mine liefert eigene UND fremde
+    // Server mit Mitgliedschaft, öffentlich wie privat. Das öffentliche
+    // Verzeichnis (/servers) zeigt private Server grundsätzlich nicht.
+    let mine = hub_scope_is_mine(ctx);
+    ctx.ui.append_hub_log(if mine { "Lade meine Server…" } else { "Lade Verzeichnis…" });
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
-        let r = tokio::task::spawn_blocking(move || {
+        let r = tokio::task::spawn_blocking(move || -> Result<Vec<crate::hub::ServerInfo>, String> {
             let access = fresh_access_token()?;
-            crate::hub::list_servers(&access, &q)
+            if mine {
+                // /servers/mine kennt keinen Suchparameter → hier filtern.
+                let all = crate::hub::list_my_servers(&access)?;
+                let needle = q.to_lowercase();
+                Ok(all
+                    .into_iter()
+                    .filter(|s| {
+                        needle.is_empty()
+                            || s.name.to_lowercase().contains(&needle)
+                            || s.description.to_lowercase().contains(&needle)
+                    })
+                    .collect())
+            } else {
+                crate::hub::list_servers(&access, &q)
+            }
         })
         .await;
         match r {
             Ok(Ok(servers)) => {
                 let _ = ev_tx.send(Message::new(
                     "hub_servers",
-                    serde_json::json!({ "servers": servers }),
+                    serde_json::json!({
+                        "servers": servers,
+                        "scope": if mine { "mine" } else { "public" },
+                    }),
                 ));
             }
-            Ok(Err(e)) => hub_msg(&ev_tx, format!("Verzeichnis konnte nicht geladen werden: {}", e)),
+            Ok(Err(e)) => hub_msg(&ev_tx, format!("Serverliste konnte nicht geladen werden: {}", e)),
             Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
         }
     });
+}
+
+/// Steht der Ansicht-Umschalter auf „Meine Server"?
+fn hub_scope_is_mine(ctx: &Ctx) -> bool {
+    ctx.ui.hub_scope.get_selection().unwrap_or(0) == 1
+}
+
+/// Auf „Meine Server" umschalten und neu laden (nach Anlegen/Annehmen sinnvoll,
+/// weil private Server nur dort erscheinen).
+pub fn hub_show_my_servers(ctx: &Ctx) {
+    ctx.ui.hub_scope.set_selection(1);
+    hub_load_directory(ctx);
 }
 
 pub fn hub_join_selected(ctx: &Ctx) {
@@ -931,7 +971,13 @@ pub fn hub_create_server(ctx: &Ctx) {
     let Some((vals, is_public)) = form_dialog(
         ctx,
         "Server anlegen",
-        &[("Name:", String::new(), false), ("Beschreibung:", String::new(), false)],
+        &[
+            ("Name:", String::new(), false),
+            ("Beschreibung:", String::new(), false),
+            ("Adresse (leer = vom Hub gehostet):", String::new(), false),
+            ("Steuerport (leer = 9500):", String::new(), false),
+            ("Audio-Port (leer = Steuerport+1):", String::new(), false),
+        ],
         Some(("Öffentlich im Verzeichnis", true)),
     ) else { return };
     let name = vals[0].trim().to_string();
@@ -940,22 +986,75 @@ pub fn hub_create_server(ctx: &Ctx) {
         return;
     }
     let description = vals[1].clone();
+    // Adresse leer → der Hub hostet den Server selbst und trägt seine eigene
+    // TC-Adresse ein; Beitreten läuft dann über die server_id. Mit Adresse wird
+    // ein selbst gehosteter Server nur ins Verzeichnis eingetragen.
+    let host = vals[2].trim().to_string();
+    let (control_port, audio_port) = match parse_ports(&vals[3], &vals[4], 9500) {
+        Ok(p) => p,
+        Err(e) => {
+            notify(ctx, &e, "Server anlegen");
+            return;
+        }
+    };
+    let (control_port, audio_port) = if host.is_empty() { (0, 0) } else { (control_port, audio_port) };
+    let private_hint = !is_public;
     ctx.ui.append_hub_log("Lege Server an…");
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || {
             let access = fresh_access_token()?;
-            // Host/Ports leer → der Hub hostet den Server selbst und trägt seine
-            // eigene TC-Adresse ein. Beitreten erfolgt dann per server_id.
-            crate::hub::create_server(&access, &name, &description, is_public, "", 0, 0)
+            crate::hub::create_server(&access, &name, &description, is_public, &host, control_port, audio_port)
         })
         .await;
         match r {
-            Ok(Ok(_id)) => { hub_msg(&ev_tx, "Server angelegt.".to_string()); request_dir_reload(&ev_tx); }
+            Ok(Ok(_id)) => {
+                hub_msg(
+                    &ev_tx,
+                    if private_hint {
+                        "Server angelegt (privat) — sichtbar unter „Meine Server\"."
+                            .to_string()
+                    } else {
+                        "Server angelegt.".to_string()
+                    },
+                );
+                // Private Server tauchen im öffentlichen Verzeichnis nicht auf,
+                // deshalb direkt in die eigene Liste wechseln.
+                let _ = ev_tx.send(Message::new(
+                    "hub_dir_reload",
+                    serde_json::json!({ "mine": private_hint }),
+                ));
+            }
             Ok(Err(e)) => hub_msg(&ev_tx, format!("Server konnte nicht angelegt werden: {}", e)),
             Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
         }
     });
+}
+
+/// Testzugang zu `parse_ports` (die Funktion selbst braucht kein `Ctx`).
+#[cfg(test)]
+pub fn parse_ports_for_test(c: &str, a: &str, d: i64) -> Result<(i64, i64), String> {
+    parse_ports(c, a, d)
+}
+
+/// Port-Felder auswerten: leer → Vorgabe, Audio-Port leer → Steuerport+1.
+fn parse_ports(control: &str, audio: &str, default_control: i64) -> Result<(i64, i64), String> {
+    let c = control.trim();
+    let a = audio.trim();
+    let cp = if c.is_empty() {
+        default_control
+    } else {
+        c.parse::<i64>().map_err(|_| "Steuerport ist keine Zahl.".to_string())?
+    };
+    let ap = if a.is_empty() {
+        cp + 1
+    } else {
+        a.parse::<i64>().map_err(|_| "Audio-Port ist keine Zahl.".to_string())?
+    };
+    if !(1..=65535).contains(&cp) || !(1..=65535).contains(&ap) {
+        return Err("Ports müssen zwischen 1 und 65535 liegen.".into());
+    }
+    Ok((cp, ap))
 }
 
 fn selected_hub_server(ctx: &Ctx) -> Option<crate::hub::ServerInfo> {
@@ -971,7 +1070,13 @@ pub fn hub_edit_server(ctx: &Ctx) {
     let Some((vals, is_public)) = form_dialog(
         ctx,
         "Server bearbeiten",
-        &[("Name:", s.name.clone(), false), ("Beschreibung:", s.description.clone(), false)],
+        &[
+            ("Name:", s.name.clone(), false),
+            ("Beschreibung:", s.description.clone(), false),
+            ("Adresse (leer = unverändert):", s.host.clone(), false),
+            ("Steuerport:", if s.control_port > 0 { s.control_port.to_string() } else { String::new() }, false),
+            ("Audio-Port:", if s.audio_port > 0 { s.audio_port.to_string() } else { String::new() }, false),
+        ],
         Some(("Öffentlich im Verzeichnis", s.is_public)),
     ) else { return };
     let name = vals[0].trim().to_string();
@@ -980,9 +1085,29 @@ pub fn hub_edit_server(ctx: &Ctx) {
         return;
     }
     let description = vals[1].clone();
+    // Leere Adresse NICHT durchreichen: der Hub würde die hinterlegte Adresse
+    // überschreiben und der Server wäre nicht mehr erreichbar.
+    let new_host = vals[2].trim().to_string();
+    let (new_cp, new_ap) = if new_host.is_empty() {
+        (s.control_port, s.audio_port)
+    } else {
+        let default_control = if s.control_port > 0 { s.control_port } else { 9500 };
+        match parse_ports(&vals[3], &vals[4], default_control) {
+            Ok(p) => p,
+            Err(e) => {
+                notify(ctx, &e, "Server bearbeiten");
+                return;
+            }
+        }
+    };
     ctx.ui.append_hub_log("Speichere Server…");
     let ev_tx = ctx.ev_tx.clone();
-    let (sid, host, cp, ap) = (s.id.clone(), s.host.clone(), s.control_port, s.audio_port);
+    let (sid, host, cp, ap) = (
+        s.id.clone(),
+        if new_host.is_empty() { s.host.clone() } else { new_host },
+        new_cp,
+        new_ap,
+    );
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || {
             let access = fresh_access_token()?;
@@ -1186,6 +1311,208 @@ pub fn hub_admin_user(ctx: &Ctx) {
     }
 }
 
+/// Jemanden auf den ausgewählten Server einladen: Nutzer suchen, Treffer wählen,
+/// Profil zur Kontrolle anzeigen, Einladung anlegen (POST /invites). Einladen
+/// darf, wer Mitglied oder Eigentümer des Servers ist.
+pub fn hub_invite_user(ctx: &Ctx) {
+    if config::load_config().hub.is_none() {
+        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        return;
+    }
+    let Some(server) = selected_hub_server(ctx) else {
+        notify(
+            ctx,
+            "Bitte zuerst den Server in der Liste auswählen, auf den eingeladen werden soll. Eigene private Server stehen unter „Meine Server\".",
+            "Nutzer einladen",
+        );
+        return;
+    };
+    let Some(q) = ask_text(
+        ctx,
+        &format!("Wen auf „{}\" einladen? Name (mind. 3 Zeichen):", server.name),
+        "Nutzer einladen",
+        "",
+    ) else { return };
+    // Kurze blockierende Aufrufe wie in den anderen Hub-Dialogen.
+    let results = match fresh_access_token().and_then(|t| crate::hub::search_users(&t, q.trim())) {
+        Ok(v) => v,
+        Err(e) => {
+            notify(ctx, &format!("Suche fehlgeschlagen: {}", e), "Nutzer einladen");
+            return;
+        }
+    };
+    if results.is_empty() {
+        notify(ctx, "Kein Nutzer gefunden.", "Nutzer einladen");
+        return;
+    }
+    let labels: Vec<String> = results
+        .iter()
+        .map(|u| format!("{} ({})", u.display_name, u.username))
+        .collect();
+    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let pick = SingleChoiceDialog::builder(&ctx.ui.frame, "Nutzer wählen:", "Nutzer einladen", &label_refs).build();
+    if pick.show_modal() != ID_OK {
+        return;
+    }
+    let sel = pick.get_selection();
+    if sel < 0 {
+        return;
+    }
+    let u = results[sel as usize].clone();
+    // Profil dazuholen, damit man vor dem Einladen die richtige Person erwischt.
+    let bio = fresh_access_token()
+        .and_then(|t| crate::hub::get_user_profile(&t, &u.central_uid))
+        .map(|p| p.bio)
+        .unwrap_or_default();
+    let question = if bio.trim().is_empty() {
+        format!("{} ({}) zu „{}\" einladen?", u.display_name, u.username, server.name)
+    } else {
+        format!(
+            "{} ({}) zu „{}\" einladen?\n\nÜber die Person: {}",
+            u.display_name, u.username, server.name, bio
+        )
+    };
+    let ok = MessageDialog::builder(&ctx.ui.frame, &question, "Nutzer einladen")
+        .with_style(MessageDialogStyle::YesNo)
+        .build()
+        .show_modal()
+        == ID_YES;
+    if !ok {
+        return;
+    }
+    match fresh_access_token().and_then(|t| crate::hub::create_invite(&t, &server.id, &u.central_uid)) {
+        Ok(_) => {
+            ctx.ui.append_hub_log(&format!(
+                "{} ({}) zu „{}\" eingeladen.",
+                u.display_name, u.username, server.name
+            ));
+            notify(
+                ctx,
+                &format!(
+                    "{} wurde eingeladen. Die Einladung erscheint dort unter „Einladungen…\" und muss angenommen werden.",
+                    u.display_name
+                ),
+                "Nutzer einladen",
+            );
+        }
+        Err(e) => notify(ctx, &format!("Einladung fehlgeschlagen: {}", e), "Nutzer einladen"),
+    }
+}
+
+/// Admin: alle Server des Hubs ansehen und das Datei-Limit setzen.
+pub fn hub_admin_servers(ctx: &Ctx) {
+    if !hub_is_admin() {
+        notify(ctx, "Nur für Hub-Admins.", "Admin");
+        return;
+    }
+    let dlg = Dialog::builder(&ctx.ui.frame, "Admin — Server").with_size(560, 440).build();
+    let v = BoxSizer::builder(Orientation::Vertical).build();
+    v.add(
+        &StaticText::builder(&dlg)
+            .with_label("Server auswählen und Datei-Limit setzen (private Server zeigen nur den Namen):")
+            .build(),
+        0,
+        SizerFlag::All,
+        6,
+    );
+    let list = ListBox::builder(&dlg).build();
+    crate::ui::set_a11y_name(&list, "Alle Server im Hub");
+    v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
+    let brow = BoxSizer::builder(Orientation::Horizontal).build();
+    let quota_btn = Button::builder(&dlg).with_label("Datei-Limit setzen…").build();
+    let refresh_btn = Button::builder(&dlg).with_label("Aktualisieren").build();
+    let close_btn = Button::builder(&dlg).with_label("Schließen").build();
+    brow.add(&quota_btn, 0, SizerFlag::All, 4);
+    brow.add(&refresh_btn, 0, SizerFlag::All, 4);
+    brow.add(&close_btn, 0, SizerFlag::All, 4);
+    v.add_sizer(&brow, 0, SizerFlag::All, 6);
+    dlg.set_sizer(v, true);
+
+    let data: std::rc::Rc<std::cell::RefCell<Vec<crate::hub::ServerInfo>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let fill: std::rc::Rc<dyn Fn()> = {
+        let data = data.clone();
+        std::rc::Rc::new(move || {
+            let items = fresh_access_token()
+                .and_then(|t| crate::hub::admin_list_servers(&t))
+                .unwrap_or_default();
+            list.clear();
+            for s in &items {
+                list.append(&admin_server_label(s));
+            }
+            *data.borrow_mut() = items;
+        })
+    };
+    fill();
+
+    {
+        let data = data.clone();
+        let fill = fill.clone();
+        let frame = ctx.ui.frame;
+        quota_btn.on_click(move |_| {
+            let sel = list
+                .get_selection()
+                .and_then(|i| data.borrow().get(i as usize).cloned());
+            let Some(s) = sel else { return };
+            let current_mb = if s.file_limit_bytes > 0 {
+                (s.file_limit_bytes / (1024 * 1024)).to_string()
+            } else {
+                String::new()
+            };
+            let Some(txt) = ask_text_on(
+                &frame,
+                &format!("Datei-Limit für „{}\" in MB (0 = kein Limit):", s.name),
+                "Datei-Limit",
+                &current_mb,
+            ) else { return };
+            let Ok(mb) = txt.trim().parse::<i64>() else {
+                MessageDialog::builder(&frame, "Bitte eine Zahl eingeben.", "Datei-Limit").build().show_modal();
+                return;
+            };
+            match fresh_access_token()
+                .and_then(|t| crate::hub::admin_set_quota(&t, &s.id, mb.max(0) * 1024 * 1024))
+            {
+                Ok(()) => fill(),
+                Err(e) => {
+                    MessageDialog::builder(&frame, &format!("Limit setzen fehlgeschlagen: {}", e), "Datei-Limit")
+                        .build()
+                        .show_modal();
+                }
+            }
+        });
+    }
+    {
+        let fill = fill.clone();
+        refresh_btn.on_click(move |_| fill());
+    }
+    {
+        let d = dlg;
+        close_btn.on_click(move |_| d.end_modal(ID_OK));
+    }
+    dlg.show_modal();
+    dlg.destroy();
+}
+
+/// Listeneintrag für die Admin-Serverliste (privat = ohne Details).
+fn admin_server_label(s: &crate::hub::ServerInfo) -> String {
+    if s.private || !s.is_public {
+        return format!("{} — privat (Details verborgen)", s.name);
+    }
+    let limit = if s.file_limit_bytes > 0 {
+        format!("{} MB", s.file_limit_bytes / (1024 * 1024))
+    } else {
+        "kein Limit".to_string()
+    };
+    format!(
+        "{} — öffentlich · {}:{} · belegt {} MB von {}",
+        s.name,
+        s.host,
+        s.control_port,
+        s.storage_used_bytes / (1024 * 1024),
+        limit
+    )
+}
+
 /// Offene Einladungen laden und einzeln zum Annehmen/Ablehnen anbieten.
 pub fn hub_invites(ctx: &Ctx) {
     if config::load_config().hub.is_none() {
@@ -1223,8 +1550,9 @@ pub fn hub_invites(ctx: &Ctx) {
             Err(e) => ctx.ui.append_hub_log(&format!("Fehler bei Einladung: {}", e)),
         }
     }
-    // Verzeichnis aktualisieren (neue Mitgliedschaften sichtbar machen).
-    hub_load_directory(ctx);
+    // Neue Mitgliedschaften stehen unter „Meine Server" — dorthin wechseln und
+    // neu laden, sonst bliebe ein privater Server unsichtbar.
+    hub_show_my_servers(ctx);
 }
 
 /// Anzeigename und Bio bearbeiten.

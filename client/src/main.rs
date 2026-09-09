@@ -271,6 +271,10 @@ fn wire_events(ctx: &Ctx) {
     }
     {
         let ctx = ctx.clone();
+        ui.hub_invite_btn.on_click(move |_| actions::hub_invite_user(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
         ui.hub_invites_btn.on_click(move |_| actions::hub_invites(&ctx));
     }
     {
@@ -284,6 +288,21 @@ fn wire_events(ctx: &Ctx) {
     {
         let ctx = ctx.clone();
         ui.hub_admin_user_btn.on_click(move |_| actions::hub_admin_user(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_admin_servers_btn.on_click(move |_| actions::hub_admin_servers(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_search_in
+            .on_text_enter(move |_| actions::hub_load_directory(&ctx));
+    }
+    // Ansicht umschalten (Verzeichnis ⇄ meine Server) lädt sofort neu.
+    {
+        let ctx = ctx.clone();
+        ui.hub_scope
+            .on_selection_changed(move |_| actions::hub_load_directory(&ctx));
     }
 
     // Hauptansicht

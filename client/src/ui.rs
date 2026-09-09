@@ -119,6 +119,8 @@ pub struct Ui {
     pub hub_back_reset_btn: Button,
     // Seite Konto: Verzeichnis + Profil/Einladungen + Abmelden
     pub hub_logout_btn: Button,
+    /// Umschalter: öffentliches Verzeichnis ⇄ eigene/private Server
+    pub hub_scope: Choice,
     pub hub_search_in: TextCtrl,
     pub hub_servers: ListBox,
     pub hub_refresh_btn: Button,
@@ -126,10 +128,12 @@ pub struct Ui {
     pub hub_create_btn: Button,
     pub hub_edit_btn: Button,
     pub hub_delete_btn: Button,
+    pub hub_invite_btn: Button,
     pub hub_invites_btn: Button,
     pub hub_profile_btn: Button,
     pub hub_admin_pending_btn: Button,
     pub hub_admin_user_btn: Button,
+    pub hub_admin_servers_btn: Button,
     pub hub_log: TextCtrl,
 
     // Hauptansicht — Räume/Nutzer als nativer Baum (plattformspezifisch:
@@ -306,7 +310,22 @@ impl Ui {
         let hub_logout_btn = Button::builder(&hub_account_panel).with_label("Abmelden").build();
         av.add(&hub_logout_btn, 0, SizerFlag::All, 4);
         av.add(&StaticText::builder(&hub_account_panel).with_label("Server-Verzeichnis").build(), 0, SizerFlag::All, 4);
-        let hub_search_in = TextCtrl::builder(&hub_account_panel).build();
+        // Ansicht umschalten: das öffentliche Verzeichnis zeigt nur öffentliche
+        // Server — eigene private und Server, bei denen man Mitglied ist,
+        // liefert erst „Meine Server" (/servers/mine).
+        let scope_row = BoxSizer::builder(Orientation::Horizontal).build();
+        let scope_lbl = StaticText::builder(&hub_account_panel).with_label("Ansicht:").build();
+        let hub_scope = Choice::builder(&hub_account_panel).build();
+        hub_scope.append("Öffentliches Verzeichnis");
+        hub_scope.append("Meine Server (auch private)");
+        hub_scope.set_selection(0);
+        scope_row.add(&scope_lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 6);
+        scope_row.add(&hub_scope, 1, SizerFlag::Expand | SizerFlag::All, 6);
+        av.add_sizer(&scope_row, 0, SizerFlag::Expand, 0);
+        // ProcessEnter: Enter im Suchfeld lädt die Liste neu (siehe main.rs).
+        let hub_search_in = TextCtrl::builder(&hub_account_panel)
+            .with_style(TextCtrlStyle::ProcessEnter)
+            .build();
         add_form_row(&hub_account_panel, &av, "Suche:", &hub_search_in);
         let hub_servers = ListBox::builder(&hub_account_panel).build();
         av.add(&hub_servers, 1, SizerFlag::Expand | SizerFlag::All, 4);
@@ -325,14 +344,18 @@ impl Ui {
         av.add_sizer(&drow, 0, SizerFlag::All, 2);
         // Zeile 2: Konto + Admin
         let drow2 = BoxSizer::builder(Orientation::Horizontal).build();
+        let hub_invite_btn = Button::builder(&hub_account_panel).with_label("Nutzer einladen…").build();
         let hub_invites_btn = Button::builder(&hub_account_panel).with_label("Einladungen…").build();
         let hub_profile_btn = Button::builder(&hub_account_panel).with_label("Profil bearbeiten…").build();
         let hub_admin_pending_btn = Button::builder(&hub_account_panel).with_label("Admin: Freigaben…").build();
         let hub_admin_user_btn = Button::builder(&hub_account_panel).with_label("Admin: Nutzer…").build();
+        let hub_admin_servers_btn = Button::builder(&hub_account_panel).with_label("Admin: Server…").build();
+        drow2.add(&hub_invite_btn, 0, SizerFlag::All, 4);
         drow2.add(&hub_invites_btn, 0, SizerFlag::All, 4);
         drow2.add(&hub_profile_btn, 0, SizerFlag::All, 4);
         drow2.add(&hub_admin_pending_btn, 0, SizerFlag::All, 4);
         drow2.add(&hub_admin_user_btn, 0, SizerFlag::All, 4);
+        drow2.add(&hub_admin_servers_btn, 0, SizerFlag::All, 4);
         av.add_sizer(&drow2, 0, SizerFlag::All, 2);
         hub_account_panel.set_sizer(av, true);
 
@@ -481,6 +504,7 @@ impl Ui {
         set_a11y_name(&hub_reset_phone_in, "Telefonnummer für Reset");
         set_a11y_name(&hub_reset_code_in, "Reset-Code");
         set_a11y_name(&hub_reset_pass_in, "Neues Passwort");
+        set_a11y_name(&hub_scope, "Ansicht: öffentliches Verzeichnis oder meine Server");
         set_a11y_name(&hub_search_in, "Verzeichnis durchsuchen");
         set_a11y_name(&hub_servers, "Server im Verzeichnis");
         set_a11y_name(&hub_log, "Server-Hub Meldungen");
@@ -530,6 +554,7 @@ impl Ui {
             hub_reset_confirm_btn,
             hub_back_reset_btn,
             hub_logout_btn,
+            hub_scope,
             hub_search_in,
             hub_servers,
             hub_refresh_btn,
@@ -537,10 +562,12 @@ impl Ui {
             hub_create_btn,
             hub_edit_btn,
             hub_delete_btn,
+            hub_invite_btn,
             hub_invites_btn,
             hub_profile_btn,
             hub_admin_pending_btn,
             hub_admin_user_btn,
+            hub_admin_servers_btn,
             hub_log,
             main_panel,
             rooms_tree,

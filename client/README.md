@@ -42,6 +42,44 @@ die Mikrofonrechte des Terminals.
 - Formular: Host, Port, SSL/TLS, Benutzername, Passwort, Spitzname.
 - *Verbinden* stellt die Verbindung her.
 
+## Server-Hub (zentrales Konto)
+
+Der Reiter **Server-Hub** meldet an einem zentralen Konto an (Registrierung per
+Telefonnummer, Bestätigungscode) und verwaltet Server im Hub-Verzeichnis.
+
+- **Ansicht** schaltet zwischen zwei Listen um:
+  - *Öffentliches Verzeichnis* — alle öffentlich gelisteten Server.
+  - *Meine Server (auch private)* — eigene Server **und** Server, bei denen man
+    Mitglied ist, öffentlich wie privat. Private Server erscheinen ausschließlich
+    hier; das öffentliche Verzeichnis zeigt sie grundsätzlich nicht.
+- Jeder Listeneintrag nennt Name, Beschreibung, ob er öffentlich oder privat ist
+  und ob er einem selbst gehört oder man Mitglied ist.
+- *Suche* filtert beide Ansichten (Enter oder *Aktualisieren*).
+- *Verbinden* übernimmt Adresse und Ports des markierten Servers und meldet mit
+  dem zentralen Konto an.
+- *Server anlegen…* — Name, Beschreibung, Häkchen „Öffentlich im Verzeichnis"
+  sowie optional Adresse und Ports. **Adresse leer** = der Hub hostet den Server
+  selbst; mit Adresse wird ein selbst gehosteter Server nur eingetragen
+  (Audio-Port leer = Steuerport+1). Ein privat angelegter Server wird direkt
+  unter *Meine Server* angezeigt.
+- *Bearbeiten…* / *Löschen* gelten für den markierten Server (nur Eigentümer und
+  Hub-Admins). Eine leere Adresse beim Bearbeiten lässt die hinterlegte Adresse
+  unverändert.
+- *Nutzer einladen…* lädt jemanden auf den **markierten** Server ein: Namen
+  suchen (mindestens 3 Zeichen), Treffer wählen, Profil zur Kontrolle ansehen,
+  bestätigen. Einladen darf, wer Eigentümer oder Mitglied des Servers ist. So
+  kommen andere auf einen privaten Server, der nirgends gelistet ist.
+- *Einladungen…* zeigt die an einen selbst gerichteten Einladungen einzeln zum
+  Annehmen oder Ablehnen; danach wechselt die Liste auf *Meine Server*, wo der
+  neue Server steht.
+- *Profil bearbeiten…* setzt Anzeigename und Bio.
+- Nur für Hub-Admins sichtbar: *Admin: Freigaben…* (wartende Registrierungen),
+  *Admin: Nutzer…* (bannen, entsperren, Passwort zurücksetzen, zum Admin machen)
+  und *Admin: Server…* (alle Server, Datei-Limit setzen).
+
+Rückmeldungen aller Hub-Aktionen landen im Meldungsfeld des Reiters und
+zusätzlich als Dialog, damit Screenreader sie sicher vorlesen.
+
 ## Hauptfenster
 
 - **Räume und Nutzer** als plattformnativer Baum (wxTreeCtrl auf Windows,
