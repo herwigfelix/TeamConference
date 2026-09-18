@@ -2,13 +2,8 @@ use tokio_rusqlite::Connection;
 
 const MIGRATION: &str = include_str!("../../migrations/001_initial.sql");
 
-/// `klango_mode`: im Klango-Modus gibt es KEINEN Standardraum. Die Raumliste
-/// zeigt dort die Gruppen des Nutzers und die offenen Raeume; eine "Lobby",
-/// in der jeder landet, waere ein Raum ohne Zweck — und ein Raum, den niemand
-/// schliessen kann. Die Migration legt sie unvermeidlich an (INSERT OR IGNORE
-/// mit fester id), deshalb wird sie hier direkt danach wieder entfernt.
-pub async fn initialize(conn: &Connection, klango_mode: bool) -> anyhow::Result<()> {
-    conn.call(move |conn| {
+pub async fn initialize(conn: &Connection) -> anyhow::Result<()> {
+    conn.call(|conn| {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(MIGRATION)?;
         // Audio-Spalten für bestehende DBs nachrüsten (Fehler ignorieren, falls
@@ -23,12 +18,6 @@ pub async fn initialize(conn: &Connection, klango_mode: bool) -> anyhow::Result<
             // Multi-Tenant: Zugehörigkeit eines Raums zu einem Unterserver.
             // '' = Einzelserver-Modus (Default, unverändertes Verhalten).
             "ALTER TABLE rooms ADD COLUMN tenant TEXT NOT NULL DEFAULT ''",
-            // Klango-Modus (docs/klango.md 1.2): Gruppenraum, Eigentümer,
-            // temporär (verschwindet leer), privat (Anrufraum).
-            "ALTER TABLE rooms ADD COLUMN group_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE rooms ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE rooms ADD COLUMN temporary INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE rooms ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(stmt, []);
         }
@@ -38,13 +27,6 @@ pub async fn initialize(conn: &Connection, klango_mode: bool) -> anyhow::Result<
             [],
         );
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_tenant ON rooms(tenant)", []);
-        // Temporäre Räume überleben keinen Neustart: was hier noch liegt, sind
-        // Reste eines Absturzes (ihre Admin-/Sperrlisten lebten ohnehin nur im
-        // Speicher).
-        let _ = conn.execute("DELETE FROM rooms WHERE temporary = 1", []);
-        if klango_mode {
-            let _ = conn.execute("DELETE FROM rooms WHERE is_default = 1", []);
-        }
         // Unterserver (Tenants) im Multi-Tenant-Modus.
         let _ = conn.execute(
             "CREATE TABLE IF NOT EXISTS tenants (

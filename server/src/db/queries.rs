@@ -26,15 +26,6 @@ pub struct DbRoom {
     pub bitrate: i64,
     /// Unterserver-Zugehörigkeit ('' = Einzelserver-Modus).
     pub tenant: String,
-    // ── Klango-Modus (docs/klango.md 1.2) ──
-    /// Klango-Gruppe (gid als String); '' = keine.
-    pub group_id: String,
-    /// Eigentümer; 0 = keiner.
-    pub owner_id: i64,
-    /// Wird gelöscht, sobald er leer ist.
-    pub temporary: bool,
-    /// Anrufraum — nur für Beteiligte sichtbar.
-    pub private: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -224,8 +215,7 @@ pub async fn create_ban(
 pub async fn get_all_rooms(conn: &Connection, tenant: String) -> anyhow::Result<Vec<DbRoom>> {
     conn.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels, bitrate, tenant,
-                    group_id, owner_id, temporary, private
+            "SELECT id, name, parent_id, password_hash, max_users, description, is_default, sort_order, sample_rate, bit_depth, channels, bitrate, tenant
              FROM rooms WHERE tenant = ?1 ORDER BY sort_order, name"
         )?;
         let rooms = stmt.query_map([tenant], |row| {
@@ -243,10 +233,6 @@ pub async fn get_all_rooms(conn: &Connection, tenant: String) -> anyhow::Result<
                 channels: row.get(10)?,
                 bitrate: row.get(11)?,
                 tenant: row.get(12)?,
-                group_id: row.get(13)?,
-                owner_id: row.get(14)?,
-                temporary: row.get::<_, i64>(15)? != 0,
-                private: row.get::<_, i64>(16)? != 0,
             })
         })?.filter_map(|r| r.ok()).collect();
         Ok(rooms)
@@ -268,42 +254,12 @@ pub async fn create_room(
     bitrate: i64,
     tenant: String,
 ) -> anyhow::Result<i64> {
-    create_room_ext(conn, name, parent_id, password, max_users, sample_rate, bit_depth, channels, bitrate, tenant, RoomExtra::default()).await
-}
-
-/// Klango-Zusatzfelder eines neuen Raums (docs/klango.md 1.2).
-#[derive(Debug, Clone, Default)]
-pub struct RoomExtra {
-    pub group_id: String,
-    pub owner_id: i64,
-    pub temporary: bool,
-    pub private: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn create_room_ext(
-    conn: &Connection,
-    name: String,
-    parent_id: Option<i64>,
-    password: Option<String>,
-    max_users: i64,
-    sample_rate: i64,
-    bit_depth: i64,
-    channels: i64,
-    bitrate: i64,
-    tenant: String,
-    extra: RoomExtra,
-) -> anyhow::Result<i64> {
     let password_hash = password.map(|p| hash_password(&p)).transpose()?;
     conn.call(move |conn| {
         conn.execute(
-            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate, tenant,
-                                group_id, owner_id, temporary, private)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            rusqlite::params![
-                name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate, tenant,
-                extra.group_id, extra.owner_id, extra.temporary as i64, extra.private as i64
-            ],
+            "INSERT INTO rooms (name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate, tenant)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![name, parent_id, password_hash, max_users, sample_rate, bit_depth, channels, bitrate, tenant],
         )?;
         Ok(conn.last_insert_rowid())
     })

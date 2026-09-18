@@ -1,11 +1,11 @@
 //! Rauchtest der C-API gegen einen laufenden TeamConference-Server — geht
-//! den Weg, den Klango später über `k_Conf_*` nimmt: Bibliothek per dlopen
+//! den Weg eines fremden Hosts: Bibliothek per dlopen
 //! laden (KEINE Rust-Abhängigkeit zum Kern, damit wirklich die exportierten
 //! Symbole geprüft werden), anmelden, Standardraum betreten, chatten, eine
 //! Datei streamen und das gemischte PCM aus `tc_read_audio` lesen.
 //!
 //!   cargo build --release
-//!   cargo run --release --example smoke -- [dylib] [host] [port] [audiodatei]
+//!   cargo run --release --example smoke -- <dylib> <host> <port> <audiodatei>
 //!
 //! Voraussetzung: Server mit admin/admin (`--create-admin`) auf host:port (TLS).
 
@@ -50,9 +50,10 @@ fn main() {
         .unwrap_or_else(|| "target/release/libteamconference_core.dylib".into());
     let host = args.get(2).cloned().unwrap_or_else(|| "127.0.0.1".into());
     let port: c_int = args.get(3).and_then(|p| p.parse().ok()).unwrap_or(9500);
-    let audio = args.get(4).cloned().unwrap_or_else(|| {
-        "/Users/phantasmo/Documents/projekte/klango/klango_code/llib/skin/default/alarm.ogg".into()
-    });
+    let audio = args
+        .get(4)
+        .cloned()
+        .expect("Audiodatei fehlt (4. Argument, z. B. eine .ogg oder .mp3)");
 
     let lib = unsafe { libloading::Library::new(&dylib) }.expect("dylib laden");
     macro_rules! sym {

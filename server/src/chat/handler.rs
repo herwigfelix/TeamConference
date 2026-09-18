@@ -62,8 +62,7 @@ pub async fn deliver_offline_messages(
         let from_user = queries::get_user_by_id(db, msg.from_user_id).await?;
         let from_info = from_user.map(|u| UserInfo {
             id: u.id,
-            nickname: u.username.clone(),
-            username: u.username,
+            nickname: u.username,
             role: u.role,
             muted: false,
             deafened: false,

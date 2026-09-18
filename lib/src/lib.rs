@@ -21,7 +21,7 @@ pub mod net;
 #[path = "../../client/src/audio/mod.rs"]
 pub mod audio;
 
-/// C-API (docs/klango.md, Abschnitt 2) — genutzt vom Klango-Host.
+/// C-API (`include/teamconference_core.h`) für Hosts in anderen Sprachen.
 pub mod ffi;
 
 /// FFI-Smoke-Test: beweist, dass das Crate ein exportiertes C-Symbol erzeugt

@@ -28,9 +28,6 @@ pub struct OnlineUser {
     pub sample_rate: u32,
     pub bit_depth: u8,
     pub channels: u8,
-    /// Klango-Modus: Gruppen (Klango-gid als String), in denen der Nutzer
-    /// Admin oder Moderator ist — aus dem Anmelde-Token (docs/klango.md 1.1).
-    pub klango_groups: Vec<String>,
     pub tx: mpsc::UnboundedSender<Message>,
 }
 
@@ -39,7 +36,6 @@ impl OnlineUser {
         UserInfo {
             id: self.user_id,
             nickname: self.nickname.clone(),
-            username: self.username.clone(),
             role: self.role.clone(),
             muted: self.muted || self.admin_muted,
             deafened: self.deafened,
@@ -64,14 +60,6 @@ pub struct UserManager {
     /// Öffentliche Audio-ID → user_id (nur zur Eindeutigkeit; Relay nutzt die
     /// audio_id direkt vom Absender).
     audio_map: RwLock<HashMap<u32, i64>>,
-    /// Klango-Modus: Klangoid (kleingeschrieben) → alle Verbindungen dieses
-    /// Kontos. BEWUSST getrennt von `users`, denn beide zählen Verschiedenes:
-    /// `users` ist die KONFERENZ-Sitzung, davon gibt es eine je Konto (in zwei
-    /// Sprachräumen gleichzeitig zu stehen ergäbe keinen Sinn). Benachrichtigungen
-    /// dagegen sollen ALLE Rechner erreichen, an denen jemand angemeldet ist —
-    /// sonst bekäme der Rechner im Arbeitszimmer nichts mehr mit, sobald sich
-    /// derselbe Nutzer am Laptop anmeldet.
-    push_listeners: RwLock<HashMap<String, Vec<(u64, mpsc::UnboundedSender<Message>)>>>,
 }
 
 impl UserManager {
@@ -80,7 +68,6 @@ impl UserManager {
             users: RwLock::new(HashMap::new()),
             token_map: RwLock::new(HashMap::new()),
             audio_map: RwLock::new(HashMap::new()),
-            push_listeners: RwLock::new(HashMap::new()),
         })
     }
 
@@ -94,8 +81,7 @@ impl UserManager {
         //
         // Der alten Verbindung wird das GESAGT. Vorher verstummte sie still:
         // sie hielt sich weiter für angemeldet, konnte aber keinem Raum mehr
-        // beitreten, weil der Server sie nicht mehr kannte. Als Push-Zuhörer
-        // bleibt sie bestehen — Benachrichtigungen erreichen sie weiterhin.
+        // beitreten, weil der Server sie nicht mehr kannte.
         if let Some(old) = users.remove(&user_id) {
             tokens.remove(&old.session_token);
             audio_ids.remove(&old.audio_id);
@@ -142,9 +128,8 @@ impl UserManager {
 
     /// True, wenn die Sitzung dieses Kontos noch zu `tx` gehört.
     ///
-    /// Nötig, seit sich ein Konto an mehreren Rechnern anmelden darf: die
-    /// zweite Anmeldung übernimmt die Konferenz-Sitzung (`add_user` verdrängt
-    /// die erste). Trennt sich danach die ERSTE Verbindung, darf ihr Aufräumen
+    /// Meldet sich ein Konto ein zweites Mal an, übernimmt die neue Verbindung
+    /// die Sitzung (`add_user` verdrängt die erste). Trennt sich danach die ERSTE Verbindung, darf ihr Aufräumen
     /// die Sitzung der zweiten nicht mitreißen — sonst wäre der Nutzer nach dem
     /// Schließen des alten Fensters plötzlich nirgends mehr angemeldet.
     pub async fn session_belongs_to(
@@ -170,18 +155,6 @@ impl UserManager {
         } else {
             None
         }
-    }
-
-    /// Klango-Modus: Online-Nutzer über den Kontonamen (Klango-ID) finden,
-    /// unabhängig von Groß-/Kleinschreibung, nur im selben Tenant.
-    pub async fn get_user_by_username(&self, username: &str, tenant: &str) -> Option<OnlineUser> {
-        let want = username.trim().to_lowercase();
-        self.users
-            .read()
-            .await
-            .values()
-            .find(|u| u.tenant == tenant && u.username.to_lowercase() == want)
-            .cloned()
     }
 
     pub async fn is_online(&self, user_id: i64) -> bool {
@@ -317,72 +290,5 @@ impl UserManager {
                 let _ = user.tx.send(msg.clone());
             }
         }
-    }
-
-    // ── Push-Zuhörer (docs/klango.md 1.6) ──
-
-    /// Diese Verbindung als Empfänger für Benachrichtigungen eintragen.
-    /// `conn_id` ist die laufende Nummer der WebSocket-Verbindung; sie und
-    /// nicht der Kontoname identifiziert den Eintrag, weil ein Konto mehrere
-    /// Verbindungen haben darf.
-    pub async fn add_push_listener(
-        &self,
-        klangoid: &str,
-        conn_id: u64,
-        tx: mpsc::UnboundedSender<Message>,
-    ) {
-        let key = klangoid.trim().to_lowercase();
-        if key.is_empty() {
-            return;
-        }
-        let mut map = self.push_listeners.write().await;
-        let list = map.entry(key).or_default();
-        // Eine erneute Anmeldung auf DERSELBEN Verbindung ersetzt den Eintrag,
-        // statt ihn zu verdoppeln.
-        list.retain(|(id, _)| *id != conn_id);
-        list.push((conn_id, tx));
-    }
-
-    /// Eintrag dieser Verbindung entfernen (beim Trennen).
-    pub async fn remove_push_listener(&self, klangoid: &str, conn_id: u64) {
-        let key = klangoid.trim().to_lowercase();
-        let mut map = self.push_listeners.write().await;
-        if let Some(list) = map.get_mut(&key) {
-            list.retain(|(id, _)| *id != conn_id);
-            if list.is_empty() {
-                map.remove(&key);
-            }
-        }
-    }
-
-    /// Nachricht an alle Verbindungen der genannten Konten. Rückgabe: wie viele
-    /// Verbindungen erreicht wurden. Geschlossene Kanäle werden dabei
-    /// aussortiert — ein Empfänger, der nicht mehr da ist, zählt nicht mit.
-    pub async fn push_to(&self, klangoids: &[String], msg: Message) -> usize {
-        let mut sent = 0usize;
-        let mut map = self.push_listeners.write().await;
-        for name in klangoids {
-            let key = name.trim().to_lowercase();
-            let Some(list) = map.get_mut(&key) else { continue };
-            list.retain(|(_, tx)| {
-                if tx.send(msg.clone()).is_ok() {
-                    sent += 1;
-                    true
-                } else {
-                    false
-                }
-            });
-            if list.is_empty() {
-                map.remove(&key);
-            }
-        }
-        sent
-    }
-
-    /// Alle Konten, die gerade mindestens eine Verbindung halten
-    /// (kleingeschrieben). Grundlage der Anwesenheitsmeldung an den
-    /// Klango-Server.
-    pub async fn push_listener_names(&self) -> Vec<String> {
-        self.push_listeners.read().await.keys().cloned().collect()
     }
 }

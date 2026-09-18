@@ -33,12 +33,6 @@ services:
       - TC_SERVER_NAME=TeamConference Server
       - TC_WELCOME_MESSAGE=Willkommen auf dem TeamConference Server!
       # - TC_MAX_USERS=100
-      # Klango-Modus (docs/klango.md): Geheimnis der Klango-Anmelde-Token. Leer = aus.
-      # - TC_KLANGO_SECRET=
-      # Interner Push-Endpunkt (bindet nur auf 127.0.0.1, also im Container). 0 = aus.
-      # - TC_INTERNAL_PORT=9502
-      # Klango-Server für die Anwesenheitsmeldung. Leer = keine Meldungen.
-      # - TC_KLANGO_URL=http://127.0.0.1:8000
 
       # ── Netzwerk ──
       # - TC_CONTROL_HOST=0.0.0.0

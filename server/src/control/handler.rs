@@ -8,7 +8,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use crate::config::Config;
 use crate::control::protocol::*;
 use crate::control::auth;
-use crate::control::klango;
 use crate::db::queries;
 use crate::chat::handler as chat_handler;
 use crate::admin::handler as admin_handler;
@@ -76,12 +75,6 @@ pub struct SharedState {
     pub login_throttle: std::sync::Mutex<
         std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>,
     >,
-    /// Klango-Modus: Anstoß für die Anwesenheitsmeldung (docs/klango.md 1.6).
-    pub presence: Arc<crate::control::internal::Presence>,
-    /// Laufende Nummer je WebSocket-Verbindung. Sie identifiziert einen
-    /// Push-Zuhörer — der Kontoname reicht nicht, weil ein Konto an mehreren
-    /// Rechnern angemeldet sein darf.
-    pub next_conn_id: std::sync::atomic::AtomicU64,
 }
 
 pub async fn handle_connection<S>(
@@ -100,12 +93,6 @@ pub async fn handle_connection<S>(
 
     let mut user_id: Option<i64> = None;
     let mut audio_streamer: Option<AudioFileStreamer> = None;
-    // Klango-Modus: unter diesem Namen hängt diese Verbindung als Push-Zuhörer
-    // (docs/klango.md 1.6). Sie überlebt eine verdrängte Konferenz-Sitzung.
-    let conn_id = state
-        .next_conn_id
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut push_name: Option<String> = None;
 
     // Task for sending messages from channel to WebSocket
     let send_task = tokio::spawn(async move {
@@ -233,17 +220,6 @@ pub async fn handle_connection<S>(
                                 "nickname": u.nickname,
                             }));
                             state.users.broadcast_tenant_except(&u.tenant, presence, uid).await;
-
-                            // Diese Verbindung empfängt ab jetzt
-                            // Benachrichtigungen — auch dann noch, wenn sich
-                            // dasselbe Konto später anderswo anmeldet und die
-                            // Konferenz-Sitzung übernimmt.
-                            if state.config.server.klango_mode() {
-                                let name = u.username.to_lowercase();
-                                state.users.add_push_listener(&name, conn_id, tx.clone()).await;
-                                push_name = Some(name);
-                                state.presence.poke();
-                            }
                         }
                     }
                 }
@@ -258,10 +234,38 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                // Gemeinsamer Ablauf mit Gruppenräumen und Anrufen: alten Raum
-                // verlassen (und ggf. aufräumen), beitreten, room_joined,
-                // room_user_joined, Raumliste (control/klango.rs).
-                klango::join_room_flow(&state, uid, req.room_id, req.password.as_deref(), &tx).await;
+                let Some(user) = state.users.get_user(uid).await else { continue };
+                let tenant = user.tenant.clone();
+                let old_room = user.room_id;
+
+                if let Err(e) = state.rooms.join_room(uid, req.room_id, req.password.as_deref(), &tenant).await {
+                    let _ = tx.send(Message::new("error", serde_json::json!({
+                        "message": e.to_string()
+                    })));
+                    continue;
+                }
+
+                // Den alten Raum erst informieren, wenn der Beitritt geklappt
+                // hat — sonst hieße ein falsches Passwort "hat verlassen".
+                if let Some(old) = old_room.filter(|&o| o != req.room_id) {
+                    state.users.broadcast_to_room(old, Message::new("room_user_left", serde_json::json!({
+                        "room_id": old,
+                        "user_id": uid
+                    })), Some(uid)).await;
+                }
+                if old_room != Some(req.room_id) {
+                    if let Some(u) = state.users.get_user(uid).await {
+                        state.users.broadcast_to_room(req.room_id, Message::new("room_user_joined", serde_json::json!({
+                            "room_id": req.room_id,
+                            "user": u.to_info()
+                        })), Some(uid)).await;
+                    }
+                }
+
+                let room_list = state.rooms.get_room_list(&tenant).await.unwrap_or_default();
+                let _ = tx.send(Message::new("room_list", serde_json::json!({
+                    "rooms": room_list
+                })));
             }
 
             "room_leave" => {
@@ -276,12 +280,7 @@ pub async fn handle_connection<S>(
                     "user_id": uid
                 }));
                 state.users.broadcast_to_room(req.room_id, leave_msg, Some(uid)).await;
-                let old_room = state.users.get_user(uid).await.and_then(|u| u.room_id);
                 state.rooms.leave_room(uid).await;
-                // Aufräumen (docs/klango.md 1.2): Anruf beenden, leeren
-                // temporären Raum löschen.
-                let tenant = state.users.user_tenant(uid).await;
-                state.rooms.after_leave(uid, old_room, &tenant).await;
             }
 
             "room_create" => {
@@ -290,12 +289,6 @@ pub async fn handle_connection<S>(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-
-                // Klango-Modus: jeder darf, der Raum ist temporär (control/klango.rs).
-                if state.config.server.klango_mode() {
-                    klango::handle_room_create(&state, uid, req, &tx).await;
-                    continue;
-                }
 
                 match state.users.get_user(uid).await {
                     Some(u) if u.is_admin() => {}
@@ -348,20 +341,11 @@ pub async fn handle_connection<S>(
                         continue;
                     }
                 };
-                // Serveradmin — oder im Klango-Modus der Eigentümer (docs/klango.md 1.2).
-                let allowed = user.is_admin()
-                    || (state.config.server.klango_mode() && room.owner_id != 0 && room.owner_id == uid);
-                if !allowed || room.is_default {
+                if !user.is_admin() || room.is_default {
                     let _ = tx.send(deny());
                     continue;
                 }
-                let result = if state.config.server.klango_mode() {
-                    // Nutzer landen in keinem Raum und bekommen room_closed.
-                    state.rooms.close_room(room.id, &room.name).await
-                } else {
-                    state.rooms.delete_room(req.room_id, &tenant).await
-                };
-                match result {
+                match state.rooms.delete_room(room.id, &tenant).await {
                     Ok(()) => state.rooms.broadcast_room_list(&tenant).await,
                     Err(e) => {
                         let _ = tx.send(Message::new("error", serde_json::json!({
@@ -381,17 +365,7 @@ pub async fn handle_connection<S>(
                 let Some(user) = state.users.get_user(uid).await else { continue };
                 let tenant = user.tenant.clone();
                 // S3: nur Räume des eigenen Tenants ändern.
-                let room = match state.rooms.get_room(req.room_id, &tenant).await {
-                    Ok(Some(r)) => r,
-                    _ => {
-                        let _ = tx.send(deny());
-                        continue;
-                    }
-                };
-                // Serveradmin — oder im Klango-Modus ein Raum-Moderator (docs/klango.md 1.3).
-                let allowed = user.is_admin()
-                    || (state.config.server.klango_mode() && state.rooms.user_is_room_mod(&user, &room).await);
-                if !allowed {
+                if !user.is_admin() || !matches!(state.rooms.get_room(req.room_id, &tenant).await, Ok(Some(_))) {
                     let _ = tx.send(deny());
                     continue;
                 }
@@ -652,10 +626,6 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(Message::new("error", serde_json::json!({
                         "message": e.to_string()
                     })));
-                } else {
-                    // Leer gewordene temporäre Räume entsorgen (docs/klango.md 1.2).
-                    let tenant = state.users.user_tenant(uid).await;
-                    state.rooms.sweep_empty(&tenant).await;
                 }
             }
 
@@ -669,10 +639,6 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(Message::new("error", serde_json::json!({
                         "message": e.to_string()
                     })));
-                } else {
-                    // Leer gewordene temporäre Räume entsorgen (docs/klango.md 1.2).
-                    let tenant = state.users.user_tenant(uid).await;
-                    state.rooms.sweep_empty(&tenant).await;
                 }
             }
 
@@ -686,10 +652,6 @@ pub async fn handle_connection<S>(
                     let _ = tx.send(Message::new("error", serde_json::json!({
                         "message": e.to_string()
                     })));
-                } else {
-                    // Leer gewordene temporäre Räume entsorgen (docs/klango.md 1.2).
-                    let tenant = state.users.user_tenant(uid).await;
-                    state.rooms.sweep_empty(&tenant).await;
                 }
             }
 
@@ -958,24 +920,13 @@ pub async fn handle_connection<S>(
                 }
             }
 
-            other => {
-                // Klango-Modus: Gruppenräume, Raum-Admins, Sperren, Anrufe.
-                let Some(uid) = user_id else { continue };
-                if !klango::handle_message(&state, uid, other, parsed.data, &tx).await {
-                    tracing::debug!("Unknown message type: {}", other);
-                }
+            _ => {
+                tracing::debug!("Unknown message type: {}", parsed.msg_type);
             }
         }
     }
 
     // Cleanup on disconnect
-    //
-    // Der Push-Zuhörer geht IMMER weg, auch wenn die Konferenz-Sitzung längst
-    // einer anderen Verbindung gehört — sonst bliebe ein toter Kanal stehen.
-    if let Some(name) = push_name.take() {
-        state.users.remove_push_listener(&name, conn_id).await;
-        state.presence.poke();
-    }
 
     // Nur aufräumen, wenn die Sitzung noch DIESER Verbindung gehört. Hat sich
     // dasselbe Konto inzwischen anderswo angemeldet, gehört sie der neuen —
@@ -1007,11 +958,7 @@ pub async fn handle_connection<S>(
             state.users.broadcast_tenant_except(&user.tenant, presence, uid).await;
         }
 
-        let gone = state.users.remove_user(uid).await;
-        // Offenen Anruf beenden, leeren temporären Raum löschen (docs/klango.md).
-        if let Some(u) = gone {
-            state.rooms.on_disconnect(uid, u.room_id, &u.tenant).await;
-        }
+        state.users.remove_user(uid).await;
         tracing::info!("User {} disconnected", uid);
     }
 
