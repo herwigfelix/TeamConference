@@ -98,6 +98,25 @@ pub fn start_playback(
     let max_buf_cap = MAX_PRE_BUFFER_MS * 2 * bytes_per_ms;
     let mut local_buf: Vec<u8> = Vec::with_capacity(max_buf_cap);
 
+    // Alles, was hier ankommt (Empfangsmischer, Loopback, lokale Datei), ist
+    // 48 kHz. Läuft das Gerät mit einer anderen Rate (z. B. 44,1 kHz), muss
+    // umgerechnet werden — sonst klingt alles zu tief/hoch und der Puffer
+    // läuft über bzw. leer (Knacken, Ruckeln).
+    let mut resampler = crate::audio::file_stream::LinearResampler::with_output(
+        crate::net::udp_client::PIPELINE_RATE,
+        sample_rate,
+        channels as usize,
+    );
+    if !resampler.is_passthrough() {
+        tracing::info!(
+            "Playback: Gerät läuft mit {} Hz — rechne von {} Hz um",
+            sample_rate,
+            crate::net::udp_client::PIPELINE_RATE
+        );
+    }
+    let mut rs_in: Vec<i16> = Vec::with_capacity(4096);
+    let mut rs_out: Vec<i16> = Vec::with_capacity(4096);
+
     let stream = device
         .build_output_stream(
             &config,
@@ -109,7 +128,19 @@ pub fn start_playback(
 
                 // Drain all available chunks from channel into local buffer (lock-free)
                 while let Ok(chunk) = playback_rx.try_recv() {
-                    local_buf.extend_from_slice(&chunk);
+                    if resampler.is_passthrough() {
+                        local_buf.extend_from_slice(&chunk);
+                    } else {
+                        rs_in.clear();
+                        rs_in.extend(
+                            chunk.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])),
+                        );
+                        rs_out.clear();
+                        resampler.process(&rs_in, &mut rs_out);
+                        for s in &rs_out {
+                            local_buf.extend_from_slice(&s.to_le_bytes());
+                        }
+                    }
                 }
 
                 // Cap buffer to prevent unbounded growth

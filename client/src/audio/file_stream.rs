@@ -14,21 +14,37 @@ const TARGET_RATE: u32 = 48_000;
 /// hinweg, damit an Paketgrenzen keine Knackser entstehen.
 pub(crate) struct LinearResampler {
     in_rate: u32,
+    out_rate: u32,
     channels: usize,
     t: f64,
     prev: Vec<f32>,
+    cur: Vec<f32>,
     primed: bool,
 }
 
 impl LinearResampler {
+    /// Resampler `in_rate` → 48 kHz (Pipeline-Rate).
     pub(crate) fn new(in_rate: u32, channels: usize) -> Self {
+        Self::with_output(in_rate, TARGET_RATE, channels)
+    }
+
+    /// Resampler `in_rate` → `out_rate` (z. B. 48 kHz → Rate des Ausgabegeräts).
+    pub(crate) fn with_output(in_rate: u32, out_rate: u32, channels: usize) -> Self {
+        let ch = channels.max(1);
         Self {
             in_rate,
-            channels: channels.max(1),
+            out_rate: out_rate.max(1),
+            channels: ch,
             t: 0.0,
-            prev: vec![0.0; channels.max(1)],
+            prev: vec![0.0; ch],
+            cur: vec![0.0; ch],
             primed: false,
         }
+    }
+
+    /// True, wenn nichts umgerechnet werden muss.
+    pub(crate) fn is_passthrough(&self) -> bool {
+        self.in_rate == self.out_rate
     }
 
     /// Zustand zurücksetzen (nach einem Sprung/Spulen), damit an der neuen
@@ -38,32 +54,35 @@ impl LinearResampler {
         self.primed = false;
     }
 
-    /// Resampelt `input` (interleaved i16 @ in_rate) nach TARGET_RATE und hängt
-    /// das Ergebnis (interleaved i16) an `out` an.
+    /// Resampelt `input` (interleaved i16 @ in_rate) nach out_rate und hängt
+    /// das Ergebnis (interleaved i16) an `out` an. Alloziert nichts außer dem
+    /// Wachstum von `out` — darf daher auch im Audio-Callback laufen.
     pub(crate) fn process(&mut self, input: &[i16], out: &mut Vec<i16>) {
         let ch = self.channels;
-        if self.in_rate == TARGET_RATE {
+        if self.is_passthrough() {
             out.extend_from_slice(input);
             return;
         }
-        let step = self.in_rate as f64 / TARGET_RATE as f64;
+        let step = self.in_rate as f64 / self.out_rate as f64;
         let frames = input.len() / ch;
         for f in 0..frames {
-            let cur: Vec<f32> = (0..ch).map(|c| input[f * ch + c] as f32).collect();
+            for c in 0..ch {
+                self.cur[c] = input[f * ch + c] as f32;
+            }
             if !self.primed {
-                self.prev = cur.clone();
+                self.prev.copy_from_slice(&self.cur);
                 self.primed = true;
             }
             while self.t < 1.0 {
                 let t = self.t as f32;
                 for c in 0..ch {
-                    let v = self.prev[c] * (1.0 - t) + cur[c] * t;
+                    let v = self.prev[c] * (1.0 - t) + self.cur[c] * t;
                     out.push(v.clamp(-32768.0, 32767.0) as i16);
                 }
                 self.t += step;
             }
             self.t -= 1.0;
-            self.prev = cur;
+            std::mem::swap(&mut self.prev, &mut self.cur);
         }
     }
 }
@@ -346,4 +365,31 @@ pub async fn stream_audio_file(
 
     finish(&state);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinearResampler;
+
+    #[test]
+    fn resampler_haelt_rate_ueber_bloecke() {
+        // 1 s Stereo @ 48 kHz in 20-ms-Blöcken → 44,1 kHz.
+        let mut rs = LinearResampler::with_output(48_000, 44_100, 2);
+        let block: Vec<i16> = (0..960 * 2).map(|i| (i % 200) as i16).collect();
+        let mut out = Vec::new();
+        for _ in 0..50 {
+            rs.process(&block, &mut out);
+        }
+        let frames = out.len() / 2;
+        assert!((44_090..=44_110).contains(&frames), "frames={}", frames);
+        assert_eq!(out.len() % 2, 0);
+    }
+
+    #[test]
+    fn resampler_ohne_umrechnung_reicht_durch() {
+        let mut rs = LinearResampler::with_output(48_000, 48_000, 1);
+        let mut out = Vec::new();
+        rs.process(&[1, 2, 3], &mut out);
+        assert_eq!(out, vec![1, 2, 3]);
+    }
 }

@@ -8,6 +8,10 @@ use tokio::sync::watch;
 use crate::protocol::{AudioPacketHeader, build_audio_packet};
 use crate::state::AppState;
 
+/// Rate, mit der alles Empfangene dekodiert und gemischt wird. Die Wiedergabe
+/// (audio/playback.rs) rechnet davon auf die Rate des Ausgabegeräts um.
+pub const PIPELINE_RATE: u32 = 48_000;
+
 /// Start the UDP audio pipeline:
 ///   1. Bind a local UDP socket
 ///   2. Spawn a recv task: UDP recv -> Opus decode -> channel convert -> playback_tx
@@ -231,7 +235,7 @@ pub async fn start_udp_audio(
                                                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                                                 std::collections::hash_map::Entry::Vacant(e) => {
                                                     let oc = if dch <= 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
-                                                    match opus::Decoder::new(48000, oc) {
+                                                    match opus::Decoder::new(PIPELINE_RATE, oc) {
                                                         Ok(d) => e.insert(d),
                                                         Err(err) => {
                                                             // Decoder-Erstellung darf den Netzwerk-Task nicht
