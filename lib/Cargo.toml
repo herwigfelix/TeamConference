@@ -31,6 +31,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 chrono = "0.4"
 
+# Android: cpal/oboe ist C++ und braucht libc++_shared.so (das Build-Skript
+# legt sie neben die .so); ndk-context für tc_android_init (cpal fragt über
+# JNI den AudioManager ab und stürzt ohne gesetzten JavaVM/Context ab).
+[target.'cfg(target_os = "android")'.dependencies]
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+ndk-context = "0.1"
+
 [dev-dependencies]
 # Nur fuer examples/smoke.rs: die gebaute dylib per dlopen pruefen.
 libloading = "0.8"

@@ -204,6 +204,26 @@ pub extern "C" fn tc_last_error() -> *const c_char {
     }
 }
 
+/// Nur Android: JavaVM und Anwendungs-Context übergeben — VOR dem ersten
+/// Raumbeitritt bzw. `tc_list_input_devices`. cpal/oboe fragen darüber per JNI
+/// den AudioManager ab; ohne diesen Aufruf bricht die Aufnahme ab.
+/// `context` muss eine globale Referenz sein (`NewGlobalRef`), die lebt, solange
+/// die Bibliothek geladen ist. Wiederholte Aufrufe sind wirkungslos (Rückgabe 1).
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn tc_android_init(
+    java_vm: *mut std::ffi::c_void,
+    context: *mut std::ffi::c_void,
+) -> c_int {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    if java_vm.is_null() || context.is_null() {
+        set_error("tc_android_init: java_vm/context fehlt");
+        return 0;
+    }
+    DONE.call_once(|| ndk_context::initialize_android_context(java_vm, context));
+    1
+}
+
 // ---------------------------------------------------------------------------
 // Verbindung
 // ---------------------------------------------------------------------------

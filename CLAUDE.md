@@ -22,7 +22,12 @@ compile.bat           # Windows
 
 # Server in Docker (config entirely via TC_* env vars in docker-compose.yml):
 docker compose up -d --build
+
+# Core library (lib/, C-API in lib/include/teamconference_core.h) for iOS/Android → dist/mobile/:
+lib/build-mobile.sh [ios|android]
 ```
+
+`lib/` is the UI-less core (protocol/net/audio pulled from `client/src` via `#[path]`) as `staticlib`/`cdylib`. iOS builds need a uniform `IPHONEOS_DEPLOYMENT_TARGET` (script sets 13.0; otherwise linking fails on `___chkstk_darwin`) and link only `AudioToolbox.framework`. Android needs the NDK + `cargo-ndk`; cpal/oboe is C++, so `libc++_shared.so` ships next to the `.so`, and the host must call `tc_android_init(JavaVM*, context)` before the first room join or capture aborts.
 
 **CMake + a C++ compiler + LLVM/libclang are mandatory** for the client: `wxdragon` (wxWidgets) and `opus`/`audiopus_sys` build their C/C++ from source on first build (slow, then cached), and `wxdragon-sys` runs `bindgen` which needs libclang. If `cmake` is missing, `pip install --user cmake` provides a usable binary (`~/.local/bin/cmake`); put it on `PATH`. wxdragon-sys also builds wxWidgets via CMake with the **Ninja** generator, so Ninja must be installed. libclang ships with Xcode CLT (macOS); on Windows install LLVM (`winget install LLVM.LLVM`, set `LIBCLANG_PATH` if bindgen can't find it) and Ninja (`winget install Ninja-build.Ninja`); on Linux `libclang-dev` + `ninja-build` + `libgtk-3-dev` + `libasound2-dev`. `client/.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` so CMake 4.x accepts the vendored Opus build — don't remove it. Windows also embeds an app manifest via `client/build.rs` (`embed-manifest`) — required so wxWidgets finds Common Controls v6 and doesn't warn about a missing manifest.
 
