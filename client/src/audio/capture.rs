@@ -35,10 +35,14 @@ pub fn start_capture(
         buffer_size: cpal::BufferSize::Default,
     };
 
-    // Update state with actual audio config
+    // Gesendet wird immer mit der Pipeline-Rate (48 kHz): das Mikrofon wird
+    // im Sende-Task umgerechnet, falls das Gerät anders läuft (Bluetooth-
+    // Headsets 16 kHz, viele Mobilgeräte 44,1 kHz). Opus nimmt nur 20-ms-Blöcke
+    // passend zu seiner Rate an.
+    let wire_rate = crate::net::udp_client::PIPELINE_RATE;
     {
         let mut inner = state.inner.lock();
-        inner.audio_config.sample_rate = sample_rate;
+        inner.audio_config.sample_rate = wire_rate;
         inner.audio_config.channels = channels as u8;
     }
 
@@ -96,8 +100,8 @@ pub fn start_capture(
         // zu vermeiden. Die Soll-Bitrate kommt vom beigetretenen Raum.
         let mut last_bitrate: i32 = -1;
 
-        // 20ms frame size at 48kHz
-        let frame_samples = (sample_rate / 50) as usize; // 960 frames
+        // 20-ms-Blöcke @ 48 kHz (nach der Umrechnung im Empfang unten).
+        let frame_samples = (wire_rate / 50) as usize; // 960 frames
         let frame_bytes = frame_samples * (channels as usize) * 2; // i16 = 2 bytes
         let mut accumulator: Vec<u8> = Vec::with_capacity(frame_bytes * 2);
 
@@ -113,7 +117,7 @@ pub fn start_capture(
         } else {
             opus::Channels::Stereo
         };
-        let mut encoder = match opus::Encoder::new(48000, opus_channels, opus::Application::Audio) {
+        let mut encoder = match opus::Encoder::new(wire_rate, opus_channels, opus::Application::Audio) {
             Ok(mut enc) => {
                 // High bitrate for transparent quality
                 let bitrate = if wire_channels == 1 { 128_000 } else { 256_000 };
@@ -128,14 +132,15 @@ pub fn start_capture(
         };
         let mut opus_buf = vec![0u8; 4000]; // max Opus frame
 
-        // Lokaler Mithör-Monitor (Loopback): das eigene Mikrofon wird – wenn
-        // aktiviert – direkt in den Empfangs-Mischer eingespeist, ohne Umweg
-        // über den Server. Das vermeidet Latenz und Rückkopplungsverstärkung
-        // und funktioniert auch ohne Gegenüber. Resampler hält Zustand über
-        // Blöcke hinweg (Mikro-Rate → 48 kHz).
-        let mut mon_resampler =
+        // Mikro-Rate → 48 kHz. Der Resampler hält Zustand über Blöcke hinweg,
+        // damit an den Grenzen nichts knackt; bei 48 kHz reicht er durch.
+        let mut mic_resampler =
             crate::audio::file_stream::LinearResampler::new(sample_rate, channels as usize);
-        let mut mon_48k: Vec<i16> = Vec::new();
+        let mut mic_in: Vec<i16> = Vec::new();
+        let mut mic_48k: Vec<i16> = Vec::new();
+        if !mic_resampler.is_passthrough() {
+            tracing::info!("Capture: Mikrofon läuft mit {} Hz — rechne auf {} Hz um", sample_rate, wire_rate);
+        }
 
         loop {
             if *send_shutdown.borrow() {
@@ -144,7 +149,17 @@ pub fn start_capture(
 
             match cb_rx.try_recv() {
                 Ok(data) => {
-                    accumulator.extend_from_slice(&data);
+                    if mic_resampler.is_passthrough() {
+                        accumulator.extend_from_slice(&data);
+                    } else {
+                        mic_in.clear();
+                        mic_in.extend(data.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])));
+                        mic_48k.clear();
+                        mic_resampler.process(&mic_in, &mut mic_48k);
+                        for v in &mic_48k {
+                            accumulator.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
 
                     while accumulator.len() >= frame_bytes {
                         let frame: Vec<u8> = accumulator.drain(..frame_bytes).collect();
@@ -163,32 +178,25 @@ pub fn start_capture(
                         };
 
                         // Lokales Mithören: das eigene, unkomprimierte Mikrofon-
-                        // signal (vor Opus) in den Empfangs-Mischer geben. Nur
-                        // wenn nicht stummgeschaltet (man hört, was man sendet).
+                        // signal (vor Opus, schon 48 kHz) in den Empfangs-Mischer
+                        // geben. Nur wenn nicht stummgeschaltet (man hört, was
+                        // man sendet). Loopback: ohne Umweg über den Server —
+                        // keine Latenz, keine Rückkopplungsverstärkung.
                         if loopback && !muted {
-                            let pcm: Vec<i16> = frame
+                            // Kanäle der Aufnahme → Kanäle des Wiedergabegeräts.
+                            let mon_bytes: std::borrow::Cow<[u8]> = if channels as u16 == playback_ch {
+                                std::borrow::Cow::Borrowed(&frame)
+                            } else {
+                                std::borrow::Cow::Owned(crate::net::udp_client::convert_channels(
+                                    &frame,
+                                    channels as u16,
+                                    playback_ch,
+                                ))
+                            };
+                            let mon_frame: Vec<i16> = mon_bytes
                                 .chunks_exact(2)
                                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                                 .collect();
-                            mon_48k.clear();
-                            mon_resampler.process(&pcm, &mut mon_48k);
-                            // Kanäle der Aufnahme → Kanäle des Wiedergabegeräts.
-                            let mon_frame: Vec<i16> = if channels as u16 == playback_ch {
-                                mon_48k.clone()
-                            } else {
-                                let bytes: Vec<u8> = mon_48k
-                                    .iter()
-                                    .flat_map(|s| s.to_le_bytes())
-                                    .collect();
-                                crate::net::udp_client::convert_channels(
-                                    &bytes,
-                                    channels as u16,
-                                    playback_ch,
-                                )
-                                .chunks_exact(2)
-                                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                                .collect()
-                            };
                             if !mon_frame.is_empty() {
                                 let tx = send_state.local_audio_tx.lock();
                                 if let Some(ref tx) = *tx {
@@ -243,7 +251,7 @@ pub fn start_capture(
                                     token,
                                     seq,
                                     timestamp_ms,
-                                    sample_rate as u16,
+                                    wire_rate as u16,
                                     bit_depth,
                                     wire_channels as u8,
                                     crate::protocol::SOURCE_MIC,
