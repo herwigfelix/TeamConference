@@ -52,6 +52,9 @@ struct Core {
     ring: Arc<Mutex<VecDeque<u8>>>,
     /// Stopp-Signal für den Pump-Thread (er endet, sobald der Sender fällt).
     pump_live: Arc<std::sync::atomic::AtomicBool>,
+    /// Beitritt über `tc_join_group_room`: `audio_config` erst schicken, wenn
+    /// der Server mit `room_joined` den Raum (und damit seine Parameter) nennt.
+    group_join_pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 static CORE: Mutex<Option<Core>> = Mutex::new(None);
@@ -173,6 +176,7 @@ pub extern "C" fn tc_create() -> c_int {
         forward: None,
         ring,
         pump_live,
+        group_join_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     clear_error();
     1
@@ -317,17 +321,25 @@ fn send_audio_config(state: &Arc<AppState>, room_id: i64) {
 }
 
 /// Ereignisse der Verbindung entgegennehmen: ein paar werden hier bearbeitet
-/// (Upload-Stücke, Download-Zusammenbau, Rauswurf), alle
+/// (Upload-Stücke, Download-Zusammenbau, Gruppenbeitritt, Rauswurf), alle
 /// landen als JSON in der Schlange.
 async fn forward_events(
     mut rx: mpsc::UnboundedReceiver<Message>,
     state: Arc<AppState>,
     events: Arc<Mutex<VecDeque<String>>>,
     ev_tx: mpsc::UnboundedSender<Message>,
+    group_join_pending: Arc<std::sync::atomic::AtomicBool>,
 ) {
     while let Some(msg) = rx.recv().await {
         match msg.msg_type.as_str() {
-            "user_kicked" | "user_banned" => {
+            "room_joined" => {
+                let rid = msg.data.get("room_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                if rid != 0 && group_join_pending.swap(false, Ordering::SeqCst) {
+                    state.inner.lock().current_room_id = Some(rid);
+                    send_audio_config(&state, rid);
+                }
+            }
+            "room_kicked" | "room_banned" | "room_closed" | "user_kicked" | "user_banned" => {
                 // Der Server hat uns aus dem Raum genommen — lokal nachziehen.
                 {
                     let mut inner = state.inner.lock();
@@ -476,6 +488,7 @@ pub unsafe extern "C" fn tc_connect(
         let nick = login.get("nickname").and_then(|v| v.as_str()).unwrap_or("").to_string();
         c.state.inner.lock().nickname = nick;
         c.state.connect_gen.fetch_add(1, Ordering::SeqCst);
+        c.group_join_pending.store(false, Ordering::SeqCst);
 
         let (ev_tx, ev_rx) = mpsc::unbounded_channel::<Message>();
         c.ev_tx = Some(ev_tx.clone());
@@ -484,6 +497,7 @@ pub unsafe extern "C" fn tc_connect(
             c.state.clone(),
             c.events.clone(),
             ev_tx.clone(),
+            c.group_join_pending.clone(),
         )));
         let st = c.state.clone();
         c.rt.spawn(establish(st, ev_tx, host, port as u16, udp_port as u16, ssl != 0, login));
@@ -530,6 +544,7 @@ pub extern "C" fn tc_disconnect() {
         h.abort();
     }
     c.ev_tx = None;
+    c.group_join_pending.store(false, Ordering::SeqCst);
     c.ring.lock().clear();
 }
 
@@ -611,6 +626,7 @@ pub unsafe extern "C" fn tc_join_room(room_id: i64, password: *const c_char) -> 
             set_error(e);
             return 0;
         }
+        c.group_join_pending.store(false, Ordering::SeqCst);
         {
             let mut inner = c.state.inner.lock();
             inner.current_room_id = Some(room_id);
@@ -622,6 +638,36 @@ pub unsafe extern "C" fn tc_join_room(room_id: i64, password: *const c_char) -> 
     })
 }
 
+/// Dem Raum beitreten, der an eine externe Gruppen-ID gebunden ist; der
+/// Server legt ihn bei Bedarf an (`name`). Wirkt nur mit einem Server, der
+/// `room_join_group` unterstützt. Asynchron: der Raum steht erst mit dem
+/// Ereignis `room_joined` fest, dann folgt `audio_config` automatisch.
+#[no_mangle]
+pub unsafe extern "C" fn tc_join_group_room(group_id: *const c_char, name: *const c_char) -> c_int {
+    let Some(gid) = cstr_opt(group_id) else {
+        set_error("group_id fehlt");
+        return 0;
+    };
+    let name = cstr_opt(name).unwrap_or_default();
+    with_core!(c, 0, {
+        c.group_join_pending.store(true, Ordering::SeqCst);
+        match c.state.send_ws(Message::new(
+            "room_join_group",
+            serde_json::json!({ "group_id": gid, "name": name }),
+        )) {
+            Ok(()) => {
+                clear_error();
+                1
+            }
+            Err(e) => {
+                c.group_join_pending.store(false, Ordering::SeqCst);
+                set_error(e);
+                0
+            }
+        }
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn tc_leave_room() {
     with_core!(c, (), {
@@ -629,6 +675,7 @@ pub extern "C" fn tc_leave_room() {
         if let Some(rid) = room_id {
             let _ = c.state.send_ws(Message::new("room_leave", serde_json::json!({ "room_id": rid })));
         }
+        c.group_join_pending.store(false, Ordering::SeqCst);
         {
             let mut inner = c.state.inner.lock();
             inner.current_room_id = None;

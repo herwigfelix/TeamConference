@@ -45,6 +45,11 @@ int         tc_poll_event(char* buf, int cap);
 
 /* Räume. password darf NULL sein. */
 int         tc_join_room(int64_t room_id, const char* password);
+/* Tritt dem Raum bei, der an eine externe Gruppen-ID gebunden ist; der Server
+ * legt ihn bei Bedarf an (name). Wirkt nur mit einem Server, der
+ * room_join_group unterstützt. Der Raum steht mit dem Ereignis room_joined
+ * fest. */
+int         tc_join_group_room(const char* group_id, const char* name);
 void        tc_leave_room(void);
 int64_t     tc_current_room(void);               /* 0 = keiner */
 
