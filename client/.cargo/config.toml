@@ -4,3 +4,8 @@
 # Auf älteren CMake-Versionen (< 3.31) wird die Variable ignoriert, also harmlos.
 [env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+# Hinweis: IPHONEOS_DEPLOYMENT_TARGET NICHT hier setzen — [env] gilt auch für den
+# Desktop-Build, und clang baut wxWidgets dann für iOS statt macOS.
+# `cargo mui ios …` setzt das Deployment-Target (iOS 17) selbst; für ein
+# manuelles `cargo check --target aarch64-apple-ios-sim` per Umgebung setzen.

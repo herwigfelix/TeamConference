@@ -2,6 +2,7 @@
 //! wxWidgets liefert native Bedienelemente und damit native Barrierefreiheit
 //! (UI Automation/MSAA unter Windows, NSAccessibility auf macOS, ATK auf Linux).
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use wxdragon::accessible::{AccStatus, AccessibleImpl};
 use wxdragon::prelude::*;
 use wxdragon::widgets::simplebook::SimpleBook;
@@ -10,10 +11,12 @@ use wxdragon::widgets::simplebook::SimpleBook;
 /// einen stabilen Accessible-Namen. wxWidgets' Standard-`GetName` nutzt das
 /// dynamische Label (bei TextCtrl den Inhalt), weshalb leere Felder sonst nur
 /// generisch als „Eingabefeld"/„Kontrollkästchen" angesagt werden.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 struct NamedAccessible {
     name: String,
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 impl AccessibleImpl for NamedAccessible {
     fn get_name(&self, child_id: i32) -> (AccStatus, Option<String>) {
         // child_id 0 = das Control selbst → unser Name. Für Kind-Elemente
@@ -28,9 +31,17 @@ impl AccessibleImpl for NamedAccessible {
 }
 
 /// Setzt Fenster- und Accessible-Namen eines Bedienelements.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn set_a11y_name(widget: &dyn WxWidget, name: &str) {
     widget.set_name(name);
     widget.set_accessible(Accessible::new(widget, NamedAccessible { name: name.to_string() }));
+}
+
+/// iOS/Android (MUi): Label direkt für VoiceOver/TalkBack setzen.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub fn set_a11y_name(widget: &dyn WxWidget, name: &str) {
+    widget.set_name(name);
+    widget.set_accessibility_label(name);
 }
 
 // ── Menü-/Befehls-IDs ──
@@ -377,7 +388,12 @@ impl Ui {
 
         // ── Hauptansicht ──
         let main_panel = Panel::builder(&frame).build();
+        // Telefon (iOS/Android): drei Spalten passen nicht nebeneinander,
+        // daher untereinander (Räume, Chat, Lautstärke/Dateien).
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let mh = BoxSizer::builder(Orientation::Horizontal).build();
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        let mh = BoxSizer::builder(Orientation::Vertical).build();
 
         // Linke Spalte: Räume und Nutzer als nativer Baum.
         let left = BoxSizer::builder(Orientation::Vertical).build();

@@ -145,7 +145,16 @@ fn config_path() -> PathBuf {
     // Einstellungen unter accessyApplications/teamconference im plattformüblichen
     // Konfigverzeichnis (Windows: %APPDATA%\accessyApplications\teamconference,
     // macOS: ~/Library/Application Support/…, Linux: ~/.config/…).
-    let dir = dirs::config_dir()
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let base = dirs::config_dir();
+    // iOS/Android: App-Sandbox. Unter Android liefert `dirs` kein Verzeichnis;
+    // der MUi-Renderer setzt MUI_DATA_DIR auf das files-Verzeichnis der App.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let base = std::env::var_os("MUI_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(dirs::config_dir)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let dir = base
         .unwrap_or_else(|| PathBuf::from("."))
         .join("accessyApplications")
         .join("teamconference");

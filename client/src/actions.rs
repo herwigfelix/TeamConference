@@ -101,6 +101,8 @@ pub fn do_connect(ctx: &Ctx) {
         notify(ctx, "Bereits verbunden — bitte zuerst trennen.", "Verbinden");
         return;
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    prepare_mobile_audio(ctx);
     let host = ctx.ui.host_in.get_value().trim().to_string();
     let port: u16 = match ctx.ui.port_in.get_value().trim().parse() {
         Ok(p) => p,
@@ -451,7 +453,31 @@ pub fn rejoin_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
     join_room(ctx, room_id, password);
 }
 
+/// iOS/Android: Mikrofon-Berechtigung erfragen (Systemdialog, blockiert wie ein
+/// modaler Dialog) und die Audio-Session für Sprachchat aktivieren. Ohne
+/// Session liefert iOS kein Eingabegerät; Android hält mit ihr die Verbindung
+/// über einen Vordergrund-Dienst auch im Hintergrund.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn prepare_mobile_audio(ctx: &Ctx) {
+    use wxdragon::audio_session::{AudioMode, AudioSession};
+    use wxdragon::permissions::{self, Permission};
+    if !permissions::request(Permission::Microphone).is_granted() {
+        ctx.ui.append_chat(
+            "* Kein Mikrofonzugriff: Du kannst zuhören, aber nicht sprechen. Freigabe in den Systemeinstellungen.",
+        );
+    }
+    if let Err(e) = AudioSession::new(AudioMode::VoiceChat)
+        .with_speaker(true)
+        .with_background_notice("TeamConference", "Verbunden")
+        .activate()
+    {
+        tracing::warn!("Audio-Session konnte nicht aktiviert werden: {e}");
+    }
+}
+
 pub fn do_disconnect(ctx: &Ctx) {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    wxdragon::audio_session::deactivate();
     // Gewünschte Sitzung verwerfen → kein automatischer Reconnect mehr; die
     // erhöhte Generation verwaist zudem evtl. noch wartende Reconnect-Tasks.
     ctx.app
@@ -2154,11 +2180,25 @@ fn toggle_loopback(ctx: &Ctx) {
 pub fn volume_changed(ctx: &Ctx) {
     let v = ctx.ui.volume.get_value();
     ctx.app.set_volume(v as f32 / 100.0);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    save_volumes(ctx);
 }
 
 pub fn mic_volume_changed(ctx: &Ctx) {
     let v = ctx.ui.mic_volume.get_value();
     ctx.app.set_mic_volume(v as f32 / 100.0);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    save_volumes(ctx);
+}
+
+/// iOS/Android: Apps werden vom System beendet, ohne dass `main` nach der
+/// Eventloop weiterläuft — Lautstärken daher sofort sichern statt beim Beenden.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn save_volumes(ctx: &Ctx) {
+    let mut cfg = config::load_config();
+    cfg.volume = ctx.app.volume();
+    cfg.mic_volume = ctx.app.mic_volume();
+    let _ = config::save_config(&cfg);
 }
 
 /// Dialog zur Auswahl von Mikrofon und Lautsprecher. Die Audio-Qualität

@@ -95,7 +95,7 @@ pub struct UiState {
     /// Sprachausgabe (Screenreader/TTS). Nur auf dem UI-Thread benutzen — die
     /// Instanz ist plattformbedingt nicht Send (z. B. AVSpeechSynthesizer auf
     /// macOS). `None`, falls keine Sprachausgabe initialisiert werden konnte.
-    pub tts: Option<tts::Tts>,
+    pub tts: Option<crate::tts::Tts>,
     /// Ob Server-Ereignisse (Joins/Verlassen/Abmelden/Raumnachrichten) per
     /// Sprachausgabe angesagt werden. Standardmäßig an (siehe Audio-Einstellungen).
     pub announce_events: bool,

@@ -75,8 +75,26 @@ fn platform_matches(name: &str) -> bool {
 
 /// Auf neue Version prüfen. Bei `manual = true` wird auch „bereits aktuell"
 /// bzw. ein Fehler gemeldet; beim automatischen Start-Check bleibt es still.
+#[cfg_attr(any(target_os = "ios", target_os = "android"), allow(unreachable_code))]
 pub fn check_for_update(ctx: &Ctx, manual: bool) {
     let ev_tx = ctx.ev_tx.clone();
+    // iOS/Android: Aktualisierungen kommen über App Store bzw. Play Store,
+    // der Desktop-Updater (dmg/zip/tar.gz) ist dort nicht anwendbar.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        if manual {
+            let _ = ev_tx.send(Message::new(
+                "client_error",
+                serde_json::json!({
+                    "message": format!(
+                        "TeamConference Version {}. Aktualisierungen erfolgen über den App Store bzw. Play Store.",
+                        current_version()
+                    )
+                }),
+            ));
+        }
+        return;
+    }
     std::thread::spawn(move || match fetch_latest() {
         Ok((tag, asset)) => {
             if is_newer(&tag, current_version()) {

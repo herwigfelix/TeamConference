@@ -5,7 +5,6 @@ edition = "2021"
 description = "TeamConference-Client (wxWidgets/wxDragon) mit Barrierefreiheits-Fokus"
 
 [dependencies]
-wxdragon = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -29,12 +28,34 @@ ureq = { version = "2", features = ["json"] }
 # Sprachausgabe für Barrierefreiheit: routet über den Screenreader, wo möglich
 # (Windows via Tolk → NVDA/JAWS, sonst SAPI; macOS AVFoundation; Linux Speech
 # Dispatcher). Läuft nur auf dem UI-Thread (Instanz ist nicht Send auf macOS).
-tts = "0.26"
+# Nur Desktop (siehe unten); iOS/Android sagen über VoiceOver/TalkBack an.
 
 # Auf Windows zusätzlich das Tolk-Backend aktivieren, damit Ansagen über den
 # aktiven Screenreader (NVDA/JAWS) laufen statt nur über SAPI.
 [target.'cfg(windows)'.dependencies]
 tts = { version = "0.26", features = ["tolk"] }
+
+# Desktop: echtes wxWidgets. iOS/Android: MUi (gleiche wxDragon-API, rendert mit
+# SwiftUI bzw. Jetpack Compose) aus ~/Documents/projekte/RustMUi. main.rs bindet
+# es per `extern crate mui as wxdragon` unter demselben Namen ein.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+wxdragon = "0.9"
+tts = "0.26"
+
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+mui = { path = "../../RustMUi/mui" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+
+[package.metadata.mui]
+app-name = "TeamConference"
+bundle-id = "de.accessyapplications.teamconference"
+permissions = ["microphone", "notifications"]
+background-audio = true
+
+[package.metadata.mui.usage]
+microphone = "Deine Stimme wird an die Personen in deinem Raum übertragen."
 
 [build-dependencies]
 # Bettet unter Windows das Anwendungs-Manifest ein (Common Controls v6, DPI).

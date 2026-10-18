@@ -9,6 +9,30 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// iOS/Android: MUi stellt die wxDragon-API bereit (SwiftUI / Jetpack Compose).
+#[cfg(any(target_os = "ios", target_os = "android"))]
+extern crate mui as wxdragon;
+
+// Sprachausgabe: Desktop über das `tts`-Crate, iOS/Android über den
+// Screenreader selbst (VoiceOver/TalkBack-Ansage via MUi).
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+extern crate tts;
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod tts {
+    /// Minimaler Ersatz für `tts::Tts`: leitet an `mui::accessible::announce` weiter.
+    pub struct Tts;
+    impl Tts {
+        #[allow(clippy::should_implement_trait)]
+        pub fn default() -> Result<Self, ()> {
+            Ok(Tts)
+        }
+        pub fn speak(&mut self, text: &str, interrupt: bool) -> Result<(), ()> {
+            wxdragon::accessible::announce(text, interrupt);
+            Ok(())
+        }
+    }
+}
+
 mod actions;
 mod app;
 mod audio;
@@ -170,7 +194,17 @@ fn main() {
         ui.frame.show(true);
     });
 
+    // Android: mui::main kehrt sofort zurück, weil die Activity die Eventloop
+    // besitzt. Die Tokio-Runtime muss weiterleben (sonst laufen Verbindungs-
+    // Tasks nie an), und „beim Beenden sichern" gibt es hier nicht.
+    #[cfg(target_os = "android")]
+    {
+        std::mem::forget(rt);
+        return;
+    }
+
     // Beim Beenden Lautstärke sichern
+    #[allow(unreachable_code)]
     let mut saved = config::load_config();
     saved.volume = app_state_exit.volume();
     saved.mic_volume = app_state_exit.mic_volume();
