@@ -143,7 +143,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .unwrap_or("Unbekannter Fehler")
                 .to_string();
             ui.append_chat(&text);
-            crate::actions::notify(ctx, &text, "TeamConference");
+            crate::actions::notify_async(ctx, &text, "TeamConference");
         }
 
         // Server-Hub: Ergebnis einer Hub-Aktion (Login/Registrierung/Reset).
@@ -156,7 +156,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .to_string();
             ui.append_hub_log(&text);
             crate::actions::update_hub_view(ctx);
-            crate::actions::notify(ctx, &text, "Server-Hub");
+            crate::actions::notify_async(ctx, &text, "Server-Hub");
         }
 
         // Server-Hub: Verzeichnis neu laden (nach Login/Anlegen/Bearbeiten/Löschen).
@@ -513,6 +513,26 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 };
                 if let Some((path, buf)) = finished {
                     match std::fs::write(&path, &buf) {
+                        // iOS/Android: Der Sandbox-Pfad (…/Containers/Data/Application/<UUID>/…)
+                        // hilft niemandem; sagen, wo die Datei in der Dateien-App liegt.
+                        #[cfg(target_os = "ios")]
+                        Ok(()) => {
+                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let text = format!(
+                                "Datei gespeichert: {} (Dateien-App, Auf meinem iPhone, TeamConference)",
+                                name
+                            );
+                            ui.append_chat(&text);
+                            crate::actions::notify_async(ctx, &text, "Herunterladen");
+                        }
+                        #[cfg(target_os = "android")]
+                        Ok(()) => {
+                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let text = format!("Datei gespeichert: {}", name);
+                            ui.append_chat(&text);
+                            crate::actions::notify_async(ctx, &text, "Herunterladen");
+                        }
+                        #[cfg(not(any(target_os = "ios", target_os = "android")))]
                         Ok(()) => ui.append_chat(&format!("Datei gespeichert: {}", path.display())),
                         Err(e) => {
                             ui.append_chat(&format!("Datei konnte nicht gespeichert werden: {}", e))

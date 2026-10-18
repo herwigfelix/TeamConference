@@ -74,6 +74,26 @@ pub fn notify(ctx: &Ctx, message: &str, caption: &str) {
     dlg.show_modal();
 }
 
+/// Meldung zu einem asynchronen Ereignis (aus Netzwerk-/Audio-Tasks, verarbeitet
+/// im Nachrichten-Timer). Desktop: wie [`notify`] (modaler Dialog).
+/// iOS/Android: nicht-modaler Hinweis, den VoiceOver/TalkBack ansagt. Ein
+/// modaler Alert aus dem Timer heraus hielte unter MUi die Verarbeitung aller
+/// weiteren Server-Nachrichten an, bis er geschlossen wird (der Timer-Handler
+/// läuft nicht verschachtelt) — z. B. blieb die Dateiliste nach einem Upload
+/// leer, solange „Upload abgeschlossen" offen war.
+pub fn notify_async(ctx: &Ctx, message: &str, caption: &str) {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    notify(ctx, message, caption);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = caption;
+        ctx.ui.set_status(message);
+        if let Ok(hint) = NotificationMessage::builder().with_message(message).build() {
+            hint.show(TIMEOUT_AUTO);
+        }
+    }
+}
+
 /// Sprachausgabe einer Meldung über den Screenreader/TTS. `interrupt = true`
 /// unterbricht laufende Ansagen (für direkte Aktionsrückmeldung wie Lautstärke);
 /// `false` reiht ein (für aufeinanderfolgende Server-Ereignisse).
