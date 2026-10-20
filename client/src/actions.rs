@@ -494,8 +494,9 @@ fn prepare_mobile_audio(ctx: &Ctx) {
         tracing::warn!("Audio-Session konnte nicht aktiviert werden: {e}");
     }
     let cfg = config::load_config();
-    apply_mobile_input(cfg.input_device.as_deref());
-    apply_mobile_output(cfg.output_device.as_deref());
+    if let Some(problem) = apply_mobile_route(cfg.input_device.as_deref(), cfg.output_device.as_deref()) {
+        ctx.ui.append_chat(&format!("* {problem}"));
+    }
 }
 
 pub fn do_disconnect(ctx: &Ctx) {
@@ -2355,28 +2356,35 @@ fn output_choices() -> Vec<(Option<String>, String)> {
     }
 }
 
-/// iOS: die gewählte Ausgabe (Lautsprecher, Hörmuschel, Headset …) der Audio-
-/// Session vorgeben. Nach jedem Aktivieren der Session erneut nötig.
+/// iOS: gewählte Ausgabe und gewähltes Mikrofon der Audio-Session vorgeben
+/// (Ausgabe zuerst, damit sie die Mikrofonwahl nicht überschreibt). MUi merkt
+/// sich beides und setzt es nach jedem Aktivieren der Session und bei
+/// Routenänderungen erneut. Gibt eine verständliche Meldung zurück, wenn iOS
+/// das Mikrofon nicht übernommen hat. Anderswo nichts zu tun.
 #[cfg(any(target_os = "ios", target_os = "android"))]
-fn apply_mobile_output(output: Option<&str>) {
+fn apply_mobile_route(input: Option<&str>, output: Option<&str>) -> Option<String> {
     #[cfg(target_os = "ios")]
-    if let Err(e) = wxdragon::audio_session::set_output(output) {
-        tracing::warn!("Ausgabe konnte nicht gewählt werden: {e}");
+    {
+        use wxdragon::audio_session::{set_output, set_preferred_input};
+        if let Err(e) = set_output(output) {
+            tracing::warn!("Ausgabe konnte nicht gewählt werden: {e}");
+        }
+        return match set_preferred_input(input) {
+            Ok(()) => None,
+            Err(e) if e == "input-unavailable" => Some(
+                "Das gewählte Mikrofon ist gerade nicht verfügbar — es wird das Standardmikrofon genutzt.".into(),
+            ),
+            Err(e) => Some(match e.strip_prefix("input-not-applied:") {
+                Some(actual) => format!("iOS hat das gewählte Mikrofon nicht übernommen und nutzt „{actual}\"."),
+                None => format!("Mikrofon konnte nicht gewählt werden: {e}"),
+            }),
+        };
     }
-    #[cfg(not(target_os = "ios"))]
-    let _ = output;
-}
-
-/// iOS: das gewählte Mikrofon der Audio-Session vorgeben (cpal nimmt dann das
-/// Standardgerät, und das ist der bevorzugte Eingang). Anderswo nichts zu tun.
-#[cfg(any(target_os = "ios", target_os = "android"))]
-fn apply_mobile_input(input: Option<&str>) {
-    #[cfg(target_os = "ios")]
-    if let Err(e) = wxdragon::audio_session::set_preferred_input(input) {
-        tracing::warn!("Mikrofon konnte nicht gewählt werden: {e}");
+    #[allow(unreachable_code)]
+    {
+        let _ = (input, output);
+        None
     }
-    #[cfg(not(target_os = "ios"))]
-    let _ = input;
 }
 
 /// Eine Geräteauswahl mit Einträgen füllen und den gespeicherten Wert wählen.
@@ -2516,13 +2524,14 @@ fn audio_settings(ctx: &Ctx) {
 
     let connected = ctx.app.inner.lock().connected;
     if devices_changed && connected {
+        #[allow(unused_mut)]
+        let mut text = "Audio-Einstellungen gespeichert, Geräte übernommen.".to_string();
         #[cfg(any(target_os = "ios", target_os = "android"))]
-        {
-            apply_mobile_input(input.as_deref());
-            apply_mobile_output(output_choice_id.as_deref());
+        if let Some(problem) = apply_mobile_route(input.as_deref(), output_choice_id.as_deref()) {
+            text = format!("Audio-Einstellungen gespeichert. {problem}");
         }
         restart_audio(ctx);
-        notify(ctx, "Audio-Einstellungen gespeichert, Geräte übernommen.", "Audio-Einstellungen");
+        notify(ctx, &text, "Audio-Einstellungen");
     } else if devices_changed {
         notify(ctx, "Audio-Einstellungen gespeichert. Die Geräte gelten ab der nächsten Verbindung.", "Audio-Einstellungen");
     } else {
