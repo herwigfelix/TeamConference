@@ -5,7 +5,9 @@
 //! lädt auf Bestätigung das zur Plattform passende Paket (macOS: .dmg,
 //! Windows: .zip, Linux: .tar.gz) in den Download-Ordner. Anschließend wird die
 //! Datei mit dem Standardprogramm geöffnet (dmg mounten, Archiv öffnen), sodass
-//! der Nutzer die neue Version installieren kann.
+//! der Nutzer die neue Version installieren kann. Android (selbst verteilt):
+//! die .apk des Releases wird im Browser geöffnet — Android lädt sie herunter
+//! und bietet die Installation an. iOS: Updates kommen über App Store/TestFlight.
 //!
 //! Netzwerkzugriffe laufen über `ureq` (rustls/ring, blockierend) in einem
 //! eigenen Thread; Ergebnisse werden als synthetische `Message` über den
@@ -62,7 +64,11 @@ fn platform_matches(name: &str) -> bool {
     {
         return n.ends_with(".zip");
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        return n.ends_with(".apk");
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))]
     {
         return n.ends_with(".tar.gz") || n.ends_with(".tgz");
     }
@@ -75,19 +81,18 @@ fn platform_matches(name: &str) -> bool {
 
 /// Auf neue Version prüfen. Bei `manual = true` wird auch „bereits aktuell"
 /// bzw. ein Fehler gemeldet; beim automatischen Start-Check bleibt es still.
-#[cfg_attr(any(target_os = "ios", target_os = "android"), allow(unreachable_code))]
+#[cfg_attr(target_os = "ios", allow(unreachable_code))]
 pub fn check_for_update(ctx: &Ctx, manual: bool) {
     let ev_tx = ctx.ev_tx.clone();
-    // iOS/Android: Aktualisierungen kommen über App Store bzw. Play Store,
-    // der Desktop-Updater (dmg/zip/tar.gz) ist dort nicht anwendbar.
-    #[cfg(any(target_os = "ios", target_os = "android"))]
+    // iOS: Aktualisierungen kommen über App Store bzw. TestFlight.
+    #[cfg(target_os = "ios")]
     {
         if manual {
             let _ = ev_tx.send(Message::new(
                 "client_error",
                 serde_json::json!({
                     "message": format!(
-                        "TeamConference Version {}. Aktualisierungen erfolgen über den App Store bzw. Play Store.",
+                        "TeamConference Version {}. Aktualisierungen erfolgen über den App Store bzw. TestFlight.",
                         current_version()
                     )
                 }),
@@ -291,8 +296,13 @@ fn find_dir_with(root: &std::path::Path, name: &str) -> Option<std::path::PathBu
 }
 
 /// Datei oder URL mit dem Standardprogramm öffnen
-/// (macOS: `open`, Windows: `explorer`/Browser, Linux: `xdg-open`).
+/// (macOS: `open`, Windows: `explorer`/Browser, Linux: `xdg-open`,
+/// Android: über das System, Links im Browser).
 pub fn open_path(path: &str) {
+    #[cfg(target_os = "android")]
+    {
+        wxdragon::utils::launch_default_application(path);
+    }
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("open").arg(path).spawn();
@@ -301,7 +311,7 @@ pub fn open_path(path: &str) {
     {
         let _ = std::process::Command::new("explorer").arg(path).spawn();
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))]
     {
         let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }

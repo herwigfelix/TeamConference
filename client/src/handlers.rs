@@ -241,6 +241,14 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 if url.is_empty() {
                     // Kein passendes Paket gefunden → Release-Seite öffnen.
                     crate::update::open_path(&crate::update::releases_page());
+                } else if cfg!(target_os = "android") {
+                    // Android: die APK im Browser laden lassen; Android bietet
+                    // danach die Installation an (keine eigene Install-Berechtigung).
+                    let _ = &filename;
+                    crate::update::open_path(&url);
+                    ui.append_chat(
+                        "Download im Browser gestartet. Danach die heruntergeladene Datei öffnen und installieren.",
+                    );
                 } else {
                     ui.append_chat("Lade Aktualisierung herunter…");
                     crate::update::download_update(ctx.ev_tx.clone(), url, filename);

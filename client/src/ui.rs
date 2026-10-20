@@ -889,10 +889,10 @@ fn build_menu_bar(frame: &Frame) {
         .append_item(ID_CHANGE_PW, "Eigenes &Passwort ändern…", "Eigenes Passwort ändern")
         .build();
 
-    // „Nach Aktualisierung suchen" nur am Desktop — auf iOS/Android kommen
-    // Updates über App Store bzw. Play Store.
+    // „Nach Aktualisierung suchen" nicht auf iOS — dort kommen Updates über
+    // App Store/TestFlight. Android wird (vorerst) selbst verteilt.
     let help_menu = Menu::builder();
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(not(target_os = "ios"))]
     let help_menu =
         help_menu.append_item(ID_CHECK_UPDATE, "Nach &Aktualisierung suchen…", "Auf neue Version prüfen");
     let help_menu = help_menu
