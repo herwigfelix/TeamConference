@@ -23,6 +23,9 @@ futures-util = "0.3"
 cpal = "0.15"
 symphonia = { version = "0.5", features = ["all"] }
 opus = "0.3"
+# Sprachverarbeitung (reiner Rust-Port des WebRTC-APM): Echounterdrückung
+# (AEC3), Rauschunterdrückung, Hochpass — ohne C/C++-Toolchain, auch iOS/Android.
+sonora = "0.2"
 crossbeam-channel = "0.5"
 base64 = "0.22"
 tracing = "0.1"

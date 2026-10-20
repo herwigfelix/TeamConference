@@ -177,30 +177,60 @@ pub fn start_capture(
                             )
                         };
 
-                        // Lokales Mithören: das eigene, unkomprimierte Mikrofon-
-                        // signal (vor Opus, schon 48 kHz) in den Empfangs-Mischer
-                        // geben. Nur wenn nicht stummgeschaltet (man hört, was
-                        // man sendet). Loopback: ohne Umweg über den Server —
-                        // keine Latenz, keine Rückkopplungsverstärkung.
+                        // Auf Sende-Kanalzahl (max. Stereo) heruntermischen.
+                        let send_bytes: Vec<u8> = if channels as u16 == wire_channels {
+                            frame
+                        } else {
+                            crate::net::udp_client::convert_channels(&frame, channels as u16, wire_channels)
+                        };
+                        let mut pcm_samples: Vec<i16> = send_bytes
+                            .chunks_exact(2)
+                            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+
+                        // Echo- und Rauschunterdrückung (vor Opus und vor dem
+                        // Mithören — man hört, was die anderen hören). Der
+                        // Prozessor wird lazy angelegt; der Empfangsmischer
+                        // speist dieselbe Instanz mit dem Lautsprechersignal.
+                        let voice = send_state.voice_settings();
+                        if voice.active() && !muted {
+                            // Echo-Laufzeit ≈ Wiedergabepuffer + Geräte-Latenz.
+                            let delay_ms = crate::audio::playback::ADAPTIVE_PRE_BUFFER_MS
+                                .load(Ordering::Relaxed) as i32
+                                + 20;
+                            let mut guard = send_state.voice.lock();
+                            if guard.as_ref().map(|v| v.channels()) != Some(wire_channels as usize) {
+                                *guard = Some(crate::audio::voice::VoiceProcessor::new(
+                                    voice,
+                                    wire_channels as usize,
+                                ));
+                            }
+                            if let Some(vp) = guard.as_mut() {
+                                vp.set_settings(voice);
+                                vp.process_capture(&mut pcm_samples, delay_ms);
+                            }
+                        }
+
+                        // Lokales Mithören: das eigene, unkomprimierte (aber
+                        // schon verarbeitete) Mikrofonsignal in den Empfangs-
+                        // Mischer geben — als eigene Quelle (SOURCE_MIC), damit
+                        // es sich nicht mit einer gleichzeitig gestreamten Datei
+                        // eine Schlange teilt. Nur wenn nicht stummgeschaltet.
+                        // Ohne Umweg über den Server — keine Latenz.
                         if loopback && !muted {
-                            // Kanäle der Aufnahme → Kanäle des Wiedergabegeräts.
-                            let mon_bytes: std::borrow::Cow<[u8]> = if channels as u16 == playback_ch {
-                                std::borrow::Cow::Borrowed(&frame)
+                            let mon_frame: Vec<i16> = if wire_channels == playback_ch {
+                                pcm_samples.clone()
                             } else {
-                                std::borrow::Cow::Owned(crate::net::udp_client::convert_channels(
-                                    &frame,
-                                    channels as u16,
-                                    playback_ch,
-                                ))
+                                let bytes: Vec<u8> = pcm_samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                                crate::net::udp_client::convert_channels(&bytes, wire_channels, playback_ch)
+                                    .chunks_exact(2)
+                                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                    .collect()
                             };
-                            let mon_frame: Vec<i16> = mon_bytes
-                                .chunks_exact(2)
-                                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                                .collect();
                             if !mon_frame.is_empty() {
                                 let tx = send_state.local_audio_tx.lock();
                                 if let Some(ref tx) = *tx {
-                                    let _ = tx.send(mon_frame);
+                                    let _ = tx.send((crate::protocol::SOURCE_MIC, mon_frame));
                                 }
                             }
                         }
@@ -219,17 +249,7 @@ pub fn start_capture(
                         // läuft unabhängig in file_stream.rs).
                         if !muted {
                             if let (Some(ref sock), Some(ref addr)) = (socket, server_addr) {
-                                // Auf Sende-Kanalzahl (max. Stereo) heruntermischen.
-                                let send_bytes: Vec<u8> = if channels as u16 == wire_channels {
-                                    frame.clone()
-                                } else {
-                                    crate::net::udp_client::convert_channels(&frame, channels as u16, wire_channels)
-                                };
-                                let pcm_samples: Vec<i16> = send_bytes
-                                    .chunks_exact(2)
-                                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                                    .collect();
-
+                                let raw = || -> Vec<u8> { pcm_samples.iter().flat_map(|s| s.to_le_bytes()).collect() };
                                 // Opus-kodieren (Fallback: rohes PCM).
                                 let (payload, bit_depth) = if let Some(ref mut enc) = encoder {
                                     match enc.encode(&pcm_samples, &mut opus_buf) {
@@ -238,11 +258,11 @@ pub fn start_capture(
                                             if packets_sent < 3 {
                                                 tracing::warn!("Capture: Opus encode failed: {}, sending raw PCM", e);
                                             }
-                                            (send_bytes.clone(), 16u8)
+                                            (raw(), 16u8)
                                         }
                                     }
                                 } else {
-                                    (send_bytes.clone(), 16u8)
+                                    (raw(), 16u8)
                                 };
 
                                 match send_audio_packet(

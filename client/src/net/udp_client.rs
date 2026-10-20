@@ -42,8 +42,9 @@ pub async fn start_udp_audio(
 
     let (send_shutdown_tx, _) = watch::channel(false);
 
-    // Kanal für lokal eingespeistes Audio (gestreamte Datei zum Mithören).
-    let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+    // Kanal für lokal eingespeistes Audio (Loopback-Mithören und gestreamte
+    // Datei, je mit ihrer Quellen-ID).
+    let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel::<(u8, Vec<i16>)>();
     *state.local_audio_tx.lock() = Some(local_tx);
 
     // -- Recv task: UDP -> Opus decode (pro Quelle) -> mischen -> playback --
@@ -75,7 +76,12 @@ pub async fn start_udp_audio(
         const PRIME_FRAMES: usize = 2; // ~40 ms anpuffern, bevor eine Quelle läuft
         const MAX_QUEUE: usize = 25; // ~500 ms Deckel gegen Drift/Bursts
         const IDLE_RESET_TICKS: u64 = 10; // ~200 ms Stille → Uhr anhalten
-        const LOCAL_KEY: (u32, u8) = (u32::MAX, crate::protocol::SOURCE_FILE);
+        // Lokale Quellen: Loopback (eigenes Mikro) und gestreamte Datei. Sie
+        // brauchen getrennte Schlangen — teilten sie sich eine, kämen bei
+        // gleichzeitigem Loopback + Streaming 100 statt 50 Frames/s hinein:
+        // Überlauf, abwechselnd Mikro- und Datei-Frames, wachsende Verzögerung.
+        const LOCAL_TOKEN: u32 = u32::MAX;
+        const LOOPBACK_KEY: (u32, u8) = (LOCAL_TOKEN, crate::protocol::SOURCE_MIC);
         let mut sources: HashMap<(u32, u8), Source> = HashMap::new();
         let mut clock: Option<tokio::time::Instant> = None;
         let mut emitted: u64 = 0;
@@ -117,6 +123,11 @@ pub async fn start_udp_audio(
                     };
 
                     let mut mix: Vec<i32> = Vec::new();
+                    // Referenz für die Echounterdrückung: alles, was aus den
+                    // Lautsprechern kommt, außer dem eigenen Mithören (das ist
+                    // die eigene Stimme — sie darf nicht „weggefiltert" werden).
+                    let echo = recv_state.voice_echo.load(std::sync::atomic::Ordering::Relaxed);
+                    let mut echo_ref: Vec<i32> = Vec::new();
                     let mut any = false;
                     for (key, src) in sources.iter_mut() {
                         // Quelle erst starten, wenn sie genug angepuffert hat.
@@ -130,16 +141,27 @@ pub async fn start_udp_audio(
                         // Ein Frame entnehmen; ist die Schlange (Jitter) leer,
                         // trägt die Quelle für diesen Tick nichts bei (Stille).
                         if let Some(frame) = src.queue.pop_front() {
-                            let gain = if key.0 == u32::MAX {
+                            let gain = if key.0 == LOCAL_TOKEN {
                                 1.0
                             } else {
                                 gains.get(&key.0).copied().unwrap_or(1.0)
                             };
                             mix_add(&mut mix, &frame, gain);
+                            if echo && *key != LOOPBACK_KEY {
+                                mix_add(&mut echo_ref, &frame, gain);
+                            }
                             any = true;
                         }
                     }
 
+                    if !echo_ref.is_empty() {
+                        let samples: Vec<i16> =
+                            echo_ref.iter().map(|&v| v.clamp(-32768, 32767) as i16).collect();
+                        let dev_ch = recv_state.inner.lock().playback_device_channels.max(1) as usize;
+                        if let Some(vp) = recv_state.voice.lock().as_mut() {
+                            vp.process_render(&samples, dev_ch);
+                        }
+                    }
                     if any {
                         let out = mix_to_bytes(&mix);
                         let tx = recv_state.playback_tx.lock();
@@ -168,8 +190,8 @@ pub async fn start_udp_audio(
 
                 // Lokal eingespeistes Audio (Loopback-Mithören oder gestreamte
                 // Datei, bereits im Wiedergabeformat).
-                Some(frame) = local_rx.recv() => {
-                    enqueue_frame(&mut sources, LOCAL_KEY, frame, MAX_QUEUE);
+                Some((source, frame)) = local_rx.recv() => {
+                    enqueue_frame(&mut sources, (LOCAL_TOKEN, source), frame, MAX_QUEUE);
                     if clock.is_none() {
                         clock = Some(tokio::time::Instant::now());
                         emitted = 0;

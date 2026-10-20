@@ -352,7 +352,7 @@ pub async fn stream_audio_file(
             {
                 let tx = state.local_audio_tx.lock();
                 if let Some(ref tx) = *tx {
-                    let _ = tx.send(bytes_to_samples(&mon_bytes));
+                    let _ = tx.send((SOURCE_FILE, bytes_to_samples(&mon_bytes)));
                 }
             }
 

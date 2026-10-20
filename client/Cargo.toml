@@ -1,6 +1,6 @@
 [package]
 name = "teamconference-client"
-version = "0.5.1"
+version = "0.5.5"
 edition = "2021"
 description = "TeamConference-Client (wxWidgets/wxDragon) mit Barrierefreiheits-Fokus"
 
@@ -15,6 +15,9 @@ futures-util = "0.3"
 cpal = "0.15"
 symphonia = { version = "0.5", features = ["all"] }
 opus = "0.3"
+# Sprachverarbeitung (reiner Rust-Port des WebRTC-APM): Echounterdrückung
+# (AEC3), Rauschunterdrückung, Hochpass — ohne C/C++-Toolchain, auch iOS/Android.
+sonora = "0.2"
 crossbeam-channel = "0.5"
 base64 = "0.22"
 tracing = "0.1"
@@ -42,6 +45,11 @@ tts = { version = "0.26", features = ["tolk"] }
 wxdragon = "0.9"
 tts = "0.26"
 
+# macOS: VoiceOver-Namen direkt an der NSView setzen (wxAccessible wirkt nur
+# unter Windows), siehe ui::set_a11y_name.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 mui = { path = "../../RustMUi/mui" }
 
@@ -56,6 +64,10 @@ background-audio = true
 
 [package.metadata.mui.usage]
 microphone = "Deine Stimme wird an die Personen in deinem Raum übertragen."
+
+# objc 0.2-Makros (macOS) prüfen ein altes `cargo-clippy`-Feature.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [build-dependencies]
 # Bettet unter Windows das Anwendungs-Manifest ein (Common Controls v6, DPI).

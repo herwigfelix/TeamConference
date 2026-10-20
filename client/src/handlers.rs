@@ -76,6 +76,11 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         "auth_response" => match serde_json::from_value::<AuthResponse>(msg.data) {
             Ok(resp) if resp.success => {
                 let server = resp.server_name.unwrap_or_else(|| "Server".into());
+                // Mobil steht der Titel groß in der Navigationsleiste — dort nur
+                // der Servername, sonst wird er abgeschnitten.
+                #[cfg(any(target_os = "ios", target_os = "android"))]
+                ui.frame.set_title(&server);
+                #[cfg(not(any(target_os = "ios", target_os = "android")))]
                 ui.frame.set_title(&format!("TeamConference — {}", server));
                 ui.show_main(true);
                 // War dies eine erfolgreiche Wiederverbindung? Dann Reconnect-

@@ -493,6 +493,7 @@ fn prepare_mobile_audio(ctx: &Ctx) {
     {
         tracing::warn!("Audio-Session konnte nicht aktiviert werden: {e}");
     }
+    apply_mobile_input(config::load_config().input_device.as_deref());
 }
 
 pub fn do_disconnect(ctx: &Ctx) {
@@ -646,12 +647,12 @@ pub fn update_hub_status(ctx: &Ctx) {
             let name = if h.display_name.is_empty() { h.username.clone() } else { h.display_name.clone() };
             if h.status == "active" {
                 let role = if h.role == "hub_admin" { " — Hub-Admin" } else { "" };
-                format!("Status: angemeldet als {}{}.", name, role)
+                format!("Angemeldet als {}{}.", name, role)
             } else {
-                format!("Status: {} — Konto wartet auf Freigabe.", name)
+                format!("Angemeldet als {} — das Konto wartet noch auf Freigabe.", name)
             }
         }
-        None => "Status: nicht angemeldet.".to_string(),
+        None => "Nicht angemeldet. Mit dem zentralen Konto (Telefonnummer) siehst du das Server-Verzeichnis.".to_string(),
     };
     ctx.ui.hub_status.set_label(&label);
 }
@@ -659,19 +660,13 @@ pub fn update_hub_status(ctx: &Ctx) {
 /// Die passende Hub-Seite zeigen: eingeloggt → Konto, sonst je nach Modus
 /// Anmelden/Registrieren/Reset.
 pub fn update_hub_view(ctx: &Ctx) {
-    let logged_in = config::load_config().hub.is_some();
-    let idx: usize = if logged_in {
-        3
-    } else {
-        match ctx.st.borrow().hub_view {
-            crate::app::HubView::Login => 0,
-            crate::app::HubView::Register => 1,
-            crate::app::HubView::Reset => 2,
-        }
-    };
-    ctx.ui.hub_book.set_selection(idx);
-    // Admin-Knöpfe nur für Hub-Admins ein-/ausblenden.
+    let idx = hub_page(ctx);
+    if ctx.ui.hub_book.selection() != idx as i32 {
+        ctx.ui.hub_book.set_selection(idx);
+    }
+    // Verwaltung nur für Hub-Admins ein-/ausblenden (Gruppe samt Knöpfen).
     let admin = hub_is_admin();
+    ctx.ui.hub_admin_box.show(admin);
     ctx.ui.hub_admin_pending_btn.show(admin);
     ctx.ui.hub_admin_user_btn.show(admin);
     ctx.ui.hub_admin_servers_btn.show(admin);
@@ -679,9 +674,38 @@ pub fn update_hub_view(ctx: &Ctx) {
     update_hub_status(ctx);
 }
 
+/// Index der Hub-Seite, die zum aktuellen Zustand gehört.
+fn hub_page(ctx: &Ctx) -> usize {
+    if config::load_config().hub.is_some() {
+        return ui::HUB_PAGE_ACCOUNT;
+    }
+    match ctx.st.borrow().hub_view {
+        crate::app::HubView::Login => ui::HUB_PAGE_LOGIN,
+        crate::app::HubView::Register => ui::HUB_PAGE_REGISTER,
+        crate::app::HubView::Reset => ui::HUB_PAGE_RESET,
+    }
+}
+
+/// Seite wechseln und den Fokus mitnehmen. Ohne das bliebe er auf dem eben
+/// ausgeblendeten Knopf („Passwort vergessen") hängen — Tastatur- und
+/// Screenreader-Nutzer landeten im Nichts und fanden nicht zurück.
 fn set_hub_view(ctx: &Ctx, view: crate::app::HubView) {
-    ctx.st.borrow_mut().hub_view = view;
+    use crate::app::HubView;
+    let previous = std::mem::replace(&mut ctx.st.borrow_mut().hub_view, view);
     update_hub_view(ctx);
+    if hub_page(ctx) == ui::HUB_PAGE_ACCOUNT {
+        return;
+    }
+    match view {
+        HubView::Register => ctx.ui.hub_phone_in.set_focus(),
+        HubView::Reset => ctx.ui.hub_reset_phone_in.set_focus(),
+        // Zurück: auf den Knopf, von dem man kam (gewohntes Verhalten).
+        HubView::Login => match previous {
+            HubView::Register => ctx.ui.hub_show_register_btn.set_focus(),
+            HubView::Reset => ctx.ui.hub_show_reset_btn.set_focus(),
+            HubView::Login => ctx.ui.hub_ident_in.set_focus(),
+        },
+    }
 }
 
 pub fn hub_show_register(ctx: &Ctx) {
@@ -694,6 +718,16 @@ pub fn hub_show_login(ctx: &Ctx) {
     set_hub_view(ctx, crate::app::HubView::Login);
 }
 
+/// Escape auf einer Hub-Unterseite (Registrieren/Reset) führt zur Anmeldung zurück.
+pub fn hub_escape(ctx: &Ctx) -> bool {
+    if matches!(hub_page(ctx), ui::HUB_PAGE_REGISTER | ui::HUB_PAGE_RESET) {
+        hub_show_login(ctx);
+        true
+    } else {
+        false
+    }
+}
+
 /// Modaler Formular-Dialog: mehrere Textfelder + optionales Häkchen, alles auf
 /// einmal. `fields` = (Label, Vorbelegung, Passwortfeld?). Gibt bei OK die
 /// Textwerte und den Häkchen-Zustand zurück.
@@ -703,46 +737,41 @@ fn form_dialog(
     fields: &[(&str, String, bool)],
     checkbox: Option<(&str, bool)>,
 ) -> Option<(Vec<String>, bool)> {
-    let dlg = Dialog::builder(&ctx.ui.frame, title).with_size(480, 360).build();
+    let dlg = Dialog::builder(&ctx.ui.frame, title).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
+    let grid = ui::form_grid();
     let mut inputs: Vec<TextCtrl> = Vec::new();
     for (label, default, pw) in fields {
-        let row = BoxSizer::builder(Orientation::Horizontal).build();
-        let lbl = StaticText::builder(&dlg).with_label(label).build();
         let field = if *pw {
             TextCtrl::builder(&dlg).with_style(TextCtrlStyle::Password).build()
         } else {
             TextCtrl::builder(&dlg).build()
         };
         field.set_value(default);
-        crate::ui::set_a11y_name(&field, label);
-        row.add(&lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 6);
-        row.add(&field, 1, SizerFlag::Expand | SizerFlag::All, 6);
-        v.add_sizer(&row, 0, SizerFlag::Expand, 0);
+        ui::form_row(&dlg, &grid, label, &field, label.trim_end_matches(':'));
         inputs.push(field);
     }
+    if !ui::compact() {
+        // Breite Felder statt gequetschter: Mindestbreite für die Feldspalte.
+        if let Some(f) = inputs.first() {
+            f.set_min_size(Size::new(300, -1));
+        }
+    }
+    v.add_sizer(&grid, 0, SizerFlag::Expand | SizerFlag::All, 12);
     let chk = checkbox.map(|(label, val)| {
         let c = CheckBox::builder(&dlg).with_label(label).build();
         c.set_value(val);
         crate::ui::set_a11y_name(&c, label);
-        v.add(&c, 0, SizerFlag::All, 6);
+        v.add(&c, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 12);
         c
     });
-    let brow = BoxSizer::builder(Orientation::Horizontal).build();
-    let ok = Button::builder(&dlg).with_label("OK").build();
-    let cancel = Button::builder(&dlg).with_label("Abbrechen").build();
-    brow.add(&ok, 0, SizerFlag::All, 6);
-    brow.add(&cancel, 0, SizerFlag::All, 6);
-    v.add_sizer(&brow, 0, SizerFlag::All, 6);
-    {
-        let d = dlg;
-        ok.on_click(move |_| d.end_modal(ID_OK));
-    }
-    {
-        let d = dlg;
-        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
-    }
+    v.add_sizer(&ui::dialog_buttons(&dlg, "OK"), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
     dlg.set_sizer(v, true);
+    dlg.fit();
+    // Fokus ins erste Feld (Screenreader landen sonst auf „Abbrechen").
+    if let Some(f) = inputs.first() {
+        f.set_focus();
+    }
     let result = dlg.show_modal();
     let out = if result == ID_OK {
         Some((
@@ -993,8 +1022,9 @@ pub fn hub_join_selected(ctx: &Ctx) {
         notify(ctx, "Für diesen Server ist keine Adresse hinterlegt.", "Server-Hub");
         return;
     }
-    // Verbindungsformular füllen, zentrales Login wählen, zur Serverliste
-    // wechseln und verbinden.
+    // Verbindungsformular (im Reiter „Serverliste") füllen, zentrales Login
+    // wählen und verbinden. Der Reiter bleibt bewusst auf „Server-Hub": Nach
+    // dem Trennen landet man so wieder im Verzeichnis, aus dem man kam.
     ctx.ui.host_in.set_value(&s.host);
     ctx.ui.port_in.set_value(&s.control_port.to_string());
     ctx.ui.ssl_chk.set_value(true);
@@ -1004,8 +1034,6 @@ pub fn hub_join_selected(ctx: &Ctx) {
     ctx.st.borrow_mut().pending_server_id = Some(s.id.clone());
     let ap = if s.audio_port > 0 { s.audio_port.to_string() } else { String::new() };
     ctx.ui.audio_port_in.set_value(&ap);
-    // Zur „Serverliste" wechseln (Reiter 1; Server-Hub ist jetzt Reiter 0).
-    ctx.ui.notebook.set_selection(1);
     do_connect(ctx);
 }
 
@@ -1222,14 +1250,12 @@ pub fn hub_admin_pending(ctx: &Ctx) {
     let list = ListBox::builder(&dlg).build();
     crate::ui::set_a11y_name(&list, "Wartende Konten");
     v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
-    let brow = BoxSizer::builder(Orientation::Horizontal).build();
     let approve_btn = Button::builder(&dlg).with_label("Freigeben").build();
     let reject_btn = Button::builder(&dlg).with_label("Ablehnen").build();
     let close_btn = Button::builder(&dlg).with_label("Schließen").build();
-    brow.add(&approve_btn, 0, SizerFlag::All, 4);
-    brow.add(&reject_btn, 0, SizerFlag::All, 4);
-    brow.add(&close_btn, 0, SizerFlag::All, 4);
-    v.add_sizer(&brow, 0, SizerFlag::All, 6);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    reject_btn.set_destructive(true);
+    v.add_sizer(&ui::button_row(&[&approve_btn, &reject_btn, &close_btn]), 0, SizerFlag::Expand | SizerFlag::All, 6);
     dlg.set_sizer(v, true);
 
     // Daten + Nachlade-Funktion (Liste füllen). Blockierende Abrufe sind kurz
@@ -1464,14 +1490,10 @@ pub fn hub_admin_servers(ctx: &Ctx) {
     let list = ListBox::builder(&dlg).build();
     crate::ui::set_a11y_name(&list, "Alle Server im Hub");
     v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
-    let brow = BoxSizer::builder(Orientation::Horizontal).build();
     let quota_btn = Button::builder(&dlg).with_label("Datei-Limit setzen…").build();
     let refresh_btn = Button::builder(&dlg).with_label("Aktualisieren").build();
     let close_btn = Button::builder(&dlg).with_label("Schließen").build();
-    brow.add(&quota_btn, 0, SizerFlag::All, 4);
-    brow.add(&refresh_btn, 0, SizerFlag::All, 4);
-    brow.add(&close_btn, 0, SizerFlag::All, 4);
-    v.add_sizer(&brow, 0, SizerFlag::All, 6);
+    v.add_sizer(&ui::button_row(&[&quota_btn, &refresh_btn, &close_btn]), 0, SizerFlag::Expand | SizerFlag::All, 6);
     dlg.set_sizer(v, true);
 
     let data: std::rc::Rc<std::cell::RefCell<Vec<crate::hub::ServerInfo>>> =
@@ -1880,21 +1902,26 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
 
     let dialog = Dialog::builder(&ctx.ui.frame, title).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
+    // Zwei Gruppen: Allgemeines und Audio-Qualität, je ein Formularraster.
+    let general = ui::form_grid();
+    let audio = ui::form_grid();
     // Beschriftete Zeile; gibt das Label zurück, damit erweiterte Zeilen
     // gemeinsam mit ihrem Control aus-/eingeblendet werden können.
-    fn add_row<W: WxWidget>(dialog: &Dialog, v: &BoxSizer, label: &str, ctrl: &W) -> StaticText {
-        let r = BoxSizer::builder(Orientation::Horizontal).build();
+    fn add_row<W: WxWidget>(dialog: &Dialog, grid: &FlexGridSizer, label: &str, ctrl: &W) -> StaticText {
         let lbl = StaticText::builder(dialog).with_label(label).build();
-        r.add(&lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 6);
-        r.add(ctrl, 1, SizerFlag::Expand | SizerFlag::All, 6);
-        v.add_sizer(&r, 0, SizerFlag::Expand, 0);
+        if ui::compact() {
+            grid.add(&lbl, 0, SizerFlag::Top, 6);
+        } else {
+            grid.add(&lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::AlignRight, 0);
+        }
+        grid.add(ctrl, 1, SizerFlag::Expand, 0);
         lbl
     }
 
     let name_in = TextCtrl::builder(&dialog).build();
     name_in.set_value(&name0);
     ui::set_a11y_name(&name_in, "Raumname");
-    add_row(&dialog, &v, "Name:", &name_in);
+    add_row(&dialog, &general, "Name:", &name_in);
 
     // Passwort ohne Checkbox: gilt, sobald etwas drinsteht.
     let pw_in = TextCtrl::builder(&dialog)
@@ -1903,7 +1930,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     ui::set_a11y_name(&pw_in, "Passwort");
     add_row(
         &dialog,
-        &v,
+        &general,
         if edit {
             "Passwort (leer = unverändert):"
         } else {
@@ -1915,7 +1942,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     let max_in = TextCtrl::builder(&dialog).build();
     max_in.set_value(&max0.to_string());
     ui::set_a11y_name(&max_in, "Maximale Nutzerzahl, 0 = unbegrenzt");
-    add_row(&dialog, &v, "Max. Nutzer (0 = ∞):", &max_in);
+    add_row(&dialog, &general, "Max. Nutzer (0 = ∞):", &max_in);
 
     // Vorlagen-Auswahl
     let template_choice = Choice::builder(&dialog).build();
@@ -1924,7 +1951,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     }
     template_choice.append("Erweitert (frei einstellbar)");
     ui::set_a11y_name(&template_choice, "Vorlage für die Audio-Qualität");
-    add_row(&dialog, &v, "Vorlage:", &template_choice);
+    add_row(&dialog, &audio, "Vorlage:", &template_choice);
 
     // Erweiterte Audio-Felder (anfangs ggf. ausgeblendet)
     let rate_choice = Choice::builder(&dialog).build();
@@ -1933,7 +1960,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     }
     rate_choice.set_selection(RATES.iter().position(|&r| r == sr0).unwrap_or(0) as u32);
     ui::set_a11y_name(&rate_choice, "Samplerate in Hertz");
-    let rate_lbl = add_row(&dialog, &v, "Samplerate (Hz):", &rate_choice);
+    let rate_lbl = add_row(&dialog, &audio, "Samplerate (Hz):", &rate_choice);
 
     let depth_choice = Choice::builder(&dialog).build();
     for d in DEPTHS {
@@ -1941,19 +1968,26 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     }
     depth_choice.set_selection(DEPTHS.iter().position(|&d| d == bd0).unwrap_or(0) as u32);
     ui::set_a11y_name(&depth_choice, "Bittiefe");
-    let depth_lbl = add_row(&dialog, &v, "Bittiefe (Bit):", &depth_choice);
+    let depth_lbl = add_row(&dialog, &audio, "Bittiefe (Bit):", &depth_choice);
 
     let ch_choice = Choice::builder(&dialog).build();
     ch_choice.append("Mono");
     ch_choice.append("Stereo");
     ch_choice.set_selection(if ch0 >= 2 { 1 } else { 0 });
     ui::set_a11y_name(&ch_choice, "Kanäle Mono oder Stereo");
-    let ch_lbl = add_row(&dialog, &v, "Kanäle:", &ch_choice);
+    let ch_lbl = add_row(&dialog, &audio, "Kanäle:", &ch_choice);
 
     let bitrate_in = TextCtrl::builder(&dialog).build();
     bitrate_in.set_value(&br0_kbps.to_string());
     ui::set_a11y_name(&bitrate_in, "Bitrate in kbit pro Sekunde, 0 = automatisch");
-    let br_lbl = add_row(&dialog, &v, "Bitrate (kbit/s, 0 = auto):", &bitrate_in);
+    let br_lbl = add_row(&dialog, &audio, "Bitrate (kbit/s, 0 = auto):", &bitrate_in);
+
+    let gbox = ui::group(&dialog, "Allgemein");
+    gbox.add_sizer(&general, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    v.add_sizer(&gbox, 0, SizerFlag::Expand | SizerFlag::All, 10);
+    let abox = ui::group(&dialog, "Audio-Qualität");
+    abox.add_sizer(&audio, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    v.add_sizer(&abox, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 10);
 
     // Ein-/Ausblenden der erweiterten Felder und Vorbelegen aus der Vorlage.
     let toggle: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |idx: usize| {
@@ -1989,20 +2023,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
         });
     }
 
-    let btns = BoxSizer::builder(Orientation::Horizontal).build();
-    let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
-    let ok = Button::builder(&dialog).with_label("Speichern").build();
-    {
-        let d = dialog;
-        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
-    }
-    {
-        let d = dialog;
-        ok.on_click(move |_| d.end_modal(ID_OK));
-    }
-    btns.add(&cancel, 0, SizerFlag::All, 6);
-    btns.add(&ok, 0, SizerFlag::All, 6);
-    v.add_sizer(&btns, 0, SizerFlag::AlignRight, 0);
+    v.add_sizer(&ui::dialog_buttons(&dialog, "Speichern"), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
 
     dialog.set_sizer(v, true);
     dialog.fit();
@@ -2129,9 +2150,16 @@ fn delete_room(ctx: &Ctx) {
 // ── Audio ──
 
 /// Häkchen eines Check-Menüpunkts setzen (zeigt An/Aus-Zustand an).
+/// Häkchen im Audio-Menü setzen — und den passenden Schnellschalter der
+/// Hauptansicht mitziehen, damit beide immer denselben Zustand zeigen.
 pub fn set_menu_check(ctx: &Ctx, id: i32, checked: bool) {
     if let Some(mb) = ctx.ui.frame.get_menu_bar() {
         mb.check_item(id, checked);
+    }
+    match id {
+        ui::ID_TOGGLE_MUTE => ctx.ui.mute_btn.set_value(checked),
+        ui::ID_TOGGLE_DEAFEN => ctx.ui.deafen_btn.set_value(checked),
+        _ => {}
     }
 }
 
@@ -2277,186 +2305,213 @@ fn restart_audio(ctx: &Ctx) {
     });
 }
 
-fn audio_settings(ctx: &Ctx) {
-    let enumerate = || -> (Vec<String>, Vec<String>) {
-        let devices = crate::audio::device::list_devices();
-        let mut inputs: Vec<String> = vec!["Standardgerät".to_string()];
-        let mut outputs: Vec<String> = vec!["Standardgerät".to_string()];
-        for d in &devices {
+/// Mikrofone zur Auswahl: (gespeicherter Wert, Anzeigename); der erste Eintrag
+/// ist immer das Standardgerät (None). iOS: Eingänge der Audio-Session
+/// (eingebautes Mikrofon unten/vorne/hinten, Headset, Bluetooth, USB) — cpal
+/// kennt dort nur „Default Device". Sonst die Geräte von cpal.
+fn input_choices() -> Vec<(Option<String>, String)> {
+    let mut out = vec![(None, "Standardgerät".to_string())];
+    #[cfg(target_os = "ios")]
+    {
+        for i in wxdragon::audio_session::inputs() {
+            out.push((Some(i.id), i.name));
+        }
+        return out;
+    }
+    #[allow(unreachable_code)]
+    {
+        for d in crate::audio::device::list_devices() {
             if d.is_input {
-                inputs.push(d.name.clone());
-            }
-            if d.is_output {
-                outputs.push(d.name.clone());
+                out.push((Some(d.name.clone()), d.name));
             }
         }
-        (inputs, outputs)
-    };
-    let (inputs, outputs) = enumerate();
+        out
+    }
+}
 
+/// Lautsprecher zur Auswahl (wie [`input_choices`]).
+fn output_choices() -> Vec<(Option<String>, String)> {
+    let mut out = vec![(None, "Standardgerät".to_string())];
+    for d in crate::audio::device::list_devices() {
+        if d.is_output {
+            out.push((Some(d.name.clone()), d.name));
+        }
+    }
+    out
+}
+
+/// iOS: das gewählte Mikrofon der Audio-Session vorgeben (cpal nimmt dann das
+/// Standardgerät, und das ist der bevorzugte Eingang). Anderswo nichts zu tun.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn apply_mobile_input(input: Option<&str>) {
+    #[cfg(target_os = "ios")]
+    if let Err(e) = wxdragon::audio_session::set_preferred_input(input) {
+        tracing::warn!("Mikrofon konnte nicht gewählt werden: {e}");
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = input;
+}
+
+/// Eine Geräteauswahl mit Einträgen füllen und den gespeicherten Wert wählen.
+fn fill_device_choice(choice: &Choice, list: &[(Option<String>, String)], current: &Option<String>) {
+    choice.clear();
+    for (_, name) in list {
+        choice.append(name);
+    }
+    let idx = list.iter().position(|(v, _)| v == current).unwrap_or(0);
+    choice.set_selection(idx as u32);
+}
+
+/// Dialog „Audio-Einstellungen": Geräte, Sprachverarbeitung (Rausch- und
+/// Echounterdrückung, Boost) und Ansagen. Die Audio-Qualität (Samplerate,
+/// Mono/Stereo) bestimmt dagegen der Raum (siehe Raum-Dialog).
+fn audio_settings(ctx: &Ctx) {
     let (cur_in, cur_out) = {
         let inner = ctx.app.inner.lock();
         (inner.input_device.clone(), inner.output_device.clone())
     };
-    let in_idx = cur_in
-        .as_ref()
-        .and_then(|n| inputs.iter().position(|d| d == n))
-        .unwrap_or(0);
-    let out_idx = cur_out
-        .as_ref()
-        .and_then(|n| outputs.iter().position(|d| d == n))
-        .unwrap_or(0);
+    let lists = std::rc::Rc::new(std::cell::RefCell::new((input_choices(), output_choices())));
 
-    let dialog = Dialog::builder(&ctx.ui.frame, "Audiogeräte").build();
+    let dialog = Dialog::builder(&ctx.ui.frame, "Audio-Einstellungen").build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
 
-    let row = |label: &str, choice: &Choice| {
-        let r = BoxSizer::builder(Orientation::Horizontal).build();
-        r.add(
+    // ── Geräte ──
+    let dev_box = StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Geräte").build();
+    let grid = FlexGridSizer::builder(0, 2).with_vgap(8).with_hgap(12).build();
+    grid.add_growable_col(1, 1);
+    let in_choice = Choice::builder(&dialog).build();
+    let out_choice = Choice::builder(&dialog).build();
+    fill_device_choice(&in_choice, &lists.borrow().0, &cur_in);
+    fill_device_choice(&out_choice, &lists.borrow().1, &cur_out);
+    ui::set_a11y_name(&in_choice, "Mikrofon");
+    ui::set_a11y_name(&out_choice, "Lautsprecher");
+    for (label, choice) in [("Mikrofon:", &in_choice), ("Lautsprecher:", &out_choice)] {
+        grid.add(
             &StaticText::builder(&dialog).with_label(label).build(),
             0,
-            SizerFlag::AlignCenterVertical | SizerFlag::All,
-            6,
+            SizerFlag::AlignCenterVertical,
+            0,
         );
-        r.add(choice, 1, SizerFlag::Expand | SizerFlag::All, 6);
-        v.add_sizer(&r, 0, SizerFlag::Expand, 0);
-    };
-
-    let in_choice = Choice::builder(&dialog).build();
-    for d in &inputs {
-        in_choice.append(d);
+        grid.add(choice, 1, SizerFlag::Expand, 0);
     }
-    in_choice.set_selection(in_idx as u32);
-    ui::set_a11y_name(&in_choice, "Mikrofon");
-    row("Mikrofon:", &in_choice);
-
-    let out_choice = Choice::builder(&dialog).build();
-    for d in &outputs {
-        out_choice.append(d);
-    }
-    out_choice.set_selection(out_idx as u32);
-    ui::set_a11y_name(&out_choice, "Lautsprecher");
-    row("Lautsprecher:", &out_choice);
-
-    // Aktuelle Gerätelisten (für die Auswahl-Zuordnung). Der „Aktualisieren"-
-    // Knopf füllt die Auswahlfelder neu (z. B. nach Ein-/Ausstöpseln eines Geräts).
-    let lists = std::rc::Rc::new(std::cell::RefCell::new((inputs, outputs)));
+    dev_box.add_sizer(&grid, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    // „Aktualisieren" füllt die Auswahl neu (z. B. nach Ein-/Ausstöpseln) und
+    // behält die aktuelle Wahl, falls das Gerät noch da ist.
     let refresh_btn = Button::builder(&dialog).with_label("Geräte aktualisieren").build();
     ui::set_a11y_name(&refresh_btn, "Geräteliste aktualisieren");
     {
         let lists = lists.clone();
         refresh_btn.on_click(move |_| {
-            let devices = crate::audio::device::list_devices();
-            let mut ins: Vec<String> = vec!["Standardgerät".to_string()];
-            let mut outs: Vec<String> = vec!["Standardgerät".to_string()];
-            for d in &devices {
-                if d.is_input {
-                    ins.push(d.name.clone());
-                }
-                if d.is_output {
-                    outs.push(d.name.clone());
-                }
-            }
-            // Aktuelle Auswahl per Name beibehalten, falls noch vorhanden.
-            let sel_in = in_choice
-                .get_selection()
-                .and_then(|i| lists.borrow().0.get(i as usize).cloned());
-            let sel_out = out_choice
-                .get_selection()
-                .and_then(|i| lists.borrow().1.get(i as usize).cloned());
-            in_choice.clear();
-            for d in &ins {
-                in_choice.append(d);
-            }
-            out_choice.clear();
-            for d in &outs {
-                out_choice.append(d);
-            }
-            let ii = sel_in.and_then(|n| ins.iter().position(|d| *d == n)).unwrap_or(0);
-            let oi = sel_out.and_then(|n| outs.iter().position(|d| *d == n)).unwrap_or(0);
-            in_choice.set_selection(ii as u32);
-            out_choice.set_selection(oi as u32);
-            *lists.borrow_mut() = (ins, outs);
+            let pick = |sel: Option<u32>, list: &[(Option<String>, String)]| {
+                sel.and_then(|i| list.get(i as usize)).and_then(|(v, _)| v.clone())
+            };
+            let (sel_in, sel_out) = {
+                let g = lists.borrow();
+                (pick(in_choice.get_selection(), &g.0), pick(out_choice.get_selection(), &g.1))
+            };
+            let fresh = (input_choices(), output_choices());
+            fill_device_choice(&in_choice, &fresh.0, &sel_in);
+            fill_device_choice(&out_choice, &fresh.1, &sel_out);
+            *lists.borrow_mut() = fresh;
         });
     }
-    v.add(&refresh_btn, 0, SizerFlag::All, 6);
+    dev_box.add(&refresh_btn, 0, SizerFlag::Left | SizerFlag::Bottom | SizerFlag::Right, 8);
+    v.add_sizer(&dev_box, 0, SizerFlag::Expand | SizerFlag::All, 10);
 
-    // Toggle: Server-Ereignisse per Sprachausgabe ansagen (Standard an).
+    // ── Sprachverarbeitung ──
+    let voice = ctx.app.voice_settings();
+    let proc_box =
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Sprachverarbeitung").build();
+    let prow = BoxSizer::builder(Orientation::Horizontal).build();
+    let noise_choice = Choice::builder(&dialog).build();
+    for l in crate::audio::voice::NOISE_LEVELS {
+        noise_choice.append(l);
+    }
+    noise_choice.set_selection(voice.noise as u32);
+    ui::set_a11y_name(&noise_choice, "Rauschunterdrückung");
+    prow.add(
+        &StaticText::builder(&dialog).with_label("Rauschunterdrückung:").build(),
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        12,
+    );
+    prow.add(&noise_choice, 1, SizerFlag::Expand, 0);
+    proc_box.add_sizer(&prow, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    let echo_chk = CheckBox::builder(&dialog)
+        .with_label("Echounterdrückung (wenn du ohne Kopfhörer sprichst)")
+        .build();
+    echo_chk.set_value(voice.echo);
+    ui::set_a11y_name(&echo_chk, "Echounterdrückung");
+    proc_box.add(&echo_chk, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 8);
+    let boost_chk = CheckBox::builder(&dialog)
+        .with_label("Mikrofon-Boost (doppelte Lautstärke)")
+        .build();
+    boost_chk.set_value(ctx.app.mic_boost());
+    ui::set_a11y_name(&boost_chk, "Mikrofon-Boost, verdoppelt die Mikrofon-Lautstärke");
+    proc_box.add(&boost_chk, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 8);
+    v.add_sizer(&proc_box, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 10);
+
+    // ── Ansagen ──
     let announce_chk = CheckBox::builder(&dialog)
-        .with_label("Server-Ereignisse ansagen")
+        .with_label("Server-Ereignisse per Sprachausgabe ansagen")
         .build();
     announce_chk.set_value(ctx.st.borrow().announce_events);
     ui::set_a11y_name(&announce_chk, "Server-Ereignisse per Sprachausgabe ansagen");
-    v.add(&announce_chk, 0, SizerFlag::All, 6);
+    v.add(&announce_chk, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 14);
 
-    // Toggle: Mikrofon-Boost (+100% / 2x Lautstärke).
-    let boost_chk = CheckBox::builder(&dialog)
-        .with_label("Mikrofon-Boost (+100% / 2x Lautstärke)")
-        .build();
-    boost_chk.set_value(ctx.app.mic_boost());
-    ui::set_a11y_name(&boost_chk, "Mikrofon-Boost aktivieren, verdoppelt die Mikrofon-Lautstärke");
-    v.add(&boost_chk, 0, SizerFlag::All, 6);
-
-    let btns = BoxSizer::builder(Orientation::Horizontal).build();
-    let cancel = Button::builder(&dialog).with_label("Abbrechen").build();
-    let ok = Button::builder(&dialog).with_label("Speichern").build();
-    {
-        let d = dialog;
-        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
-    }
-    {
-        let d = dialog;
-        ok.on_click(move |_| d.end_modal(ID_OK));
-    }
-    btns.add(&cancel, 0, SizerFlag::All, 6);
-    btns.add(&ok, 0, SizerFlag::All, 6);
-    v.add_sizer(&btns, 0, SizerFlag::AlignRight, 0);
+    v.add_sizer(&ui::dialog_buttons(&dialog, "Speichern"), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
 
     dialog.set_sizer(v, true);
     dialog.fit();
 
     let result = dialog.show_modal();
-    if result == ID_OK {
-        // Index 0 = Standardgerät = None. Auswahl gegen die AKTUELLEN Listen.
-        let (input, output) = {
-            let g = lists.borrow();
-            let pick = |sel: Option<u32>, list: &[String]| -> Option<String> {
-                match sel {
-                    Some(0) | None => None,
-                    Some(i) => list.get(i as usize).cloned(),
-                }
-            };
-            (
-                pick(in_choice.get_selection(), &g.0),
-                pick(out_choice.get_selection(), &g.1),
-            )
+    if result != ID_OK {
+        dialog.destroy();
+        return;
+    }
+    // Auswahl gegen die AKTUELLEN Listen auflösen (Index 0 = Standardgerät).
+    let (input, output) = {
+        let g = lists.borrow();
+        let pick = |sel: Option<u32>, list: &[(Option<String>, String)]| {
+            sel.and_then(|i| list.get(i as usize)).and_then(|(v, _)| v.clone())
         };
-        let announce_events = announce_chk.is_checked();
-        let mic_boost = boost_chk.is_checked();
-        ctx.app.set_mic_boost(mic_boost);
-        {
-            let mut inner = ctx.app.inner.lock();
-            inner.input_device = input.clone();
-            inner.output_device = output.clone();
-        }
-        ctx.st.borrow_mut().announce_events = announce_events;
-        let mut cfg = config::load_config();
-        cfg.input_device = input;
-        cfg.output_device = output;
-        cfg.announce_events = announce_events;
-        cfg.mic_boost = mic_boost;
-        let _ = config::save_config(&cfg);
-        let connected = ctx.app.inner.lock().connected;
-        dialog.destroy();
-        // Geräte sofort übernehmen (ohne Reconnect), wenn verbunden.
-        if connected {
-            restart_audio(ctx);
-            notify(ctx, "Audiogeräte übernommen.", "Audiogeräte");
-        } else {
-            notify(ctx, "Audiogeräte gespeichert. Gilt ab der nächsten Verbindung.", "Audiogeräte");
-        }
+        (pick(in_choice.get_selection(), &g.0), pick(out_choice.get_selection(), &g.1))
+    };
+    let devices_changed = input != cur_in || output != cur_out;
+    let announce_events = announce_chk.is_checked();
+    let mic_boost = boost_chk.is_checked();
+    let noise = noise_choice.get_selection().unwrap_or(2).min(4) as u8;
+    let echo = echo_chk.is_checked();
+    dialog.destroy();
+
+    // Sprachverarbeitung und Boost wirken sofort (ohne Neustart des Mikrofons).
+    ctx.app.set_mic_boost(mic_boost);
+    ctx.app.set_voice_settings(noise, echo);
+    {
+        let mut inner = ctx.app.inner.lock();
+        inner.input_device = input.clone();
+        inner.output_device = output.clone();
+    }
+    ctx.st.borrow_mut().announce_events = announce_events;
+    let mut cfg = config::load_config();
+    cfg.input_device = input.clone();
+    cfg.output_device = output;
+    cfg.announce_events = announce_events;
+    cfg.mic_boost = mic_boost;
+    cfg.noise_suppression = noise;
+    cfg.echo_cancellation = echo;
+    let _ = config::save_config(&cfg);
+
+    let connected = ctx.app.inner.lock().connected;
+    if devices_changed && connected {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        apply_mobile_input(input.as_deref());
+        restart_audio(ctx);
+        notify(ctx, "Audio-Einstellungen gespeichert, Geräte übernommen.", "Audio-Einstellungen");
+    } else if devices_changed {
+        notify(ctx, "Audio-Einstellungen gespeichert. Die Geräte gelten ab der nächsten Verbindung.", "Audio-Einstellungen");
     } else {
-        dialog.destroy();
+        notify(ctx, "Audio-Einstellungen gespeichert.", "Audio-Einstellungen");
     }
 }
 
@@ -2799,7 +2854,6 @@ fn manage_accounts(ctx: &Ctx) {
     ui::set_a11y_name(&list, "Benutzerkonten");
     v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
 
-    let row = BoxSizer::builder(Orientation::Horizontal).build();
     let btn_new = Button::builder(&dialog).with_label("Konto anlegen…").build();
     let btn_pw = Button::builder(&dialog)
         .with_label("Passwort zurücksetzen…")
@@ -2807,10 +2861,14 @@ fn manage_accounts(ctx: &Ctx) {
     let btn_role = Button::builder(&dialog).with_label("Rolle ändern…").build();
     let btn_del = Button::builder(&dialog).with_label("Konto löschen…").build();
     let btn_refresh = Button::builder(&dialog).with_label("Aktualisieren").build();
-    for b in [&btn_new, &btn_pw, &btn_role, &btn_del, &btn_refresh] {
-        row.add(b, 0, SizerFlag::All, 4);
-    }
-    v.add_sizer(&row, 0, SizerFlag::All, 4);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    btn_del.set_destructive(true);
+    v.add_sizer(
+        &ui::button_row(&[&btn_new, &btn_pw, &btn_role, &btn_del, &btn_refresh]),
+        0,
+        SizerFlag::Expand | SizerFlag::All,
+        4,
+    );
 
     let reg_chk = CheckBox::builder(&dialog)
         .with_label("Selbstregistrierung erlauben")

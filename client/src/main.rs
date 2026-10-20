@@ -99,6 +99,7 @@ fn main() {
     app_state.set_volume(cfg.volume);
     app_state.set_mic_volume(cfg.mic_volume);
     app_state.set_mic_boost(cfg.mic_boost);
+    app_state.set_voice_settings(cfg.noise_suppression, cfg.echo_cancellation);
     // Gespeicherte Audio-Einstellungen übernehmen
     {
         let mut inner = app_state.inner.lock();
@@ -241,10 +242,19 @@ fn wire_events(ctx: &Ctx) {
             .on_selection_changed(move |_| actions::fill_form_from_server(&ctx));
     }
 
+    {
+        let ctx = ctx.clone();
+        ui.pass_in.on_text_enter(move |_| actions::do_connect(&ctx));
+    }
+
     // Reiter „Server-Hub"
     {
         let ctx = ctx.clone();
         ui.hub_login_btn.on_click(move |_| actions::hub_login(&ctx));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.hub_login_pass_in.on_text_enter(move |_| actions::hub_login(&ctx));
     }
     {
         let ctx = ctx.clone();
@@ -344,6 +354,16 @@ fn wire_events(ctx: &Ctx) {
         let ctx = ctx.clone();
         ui.send_btn.on_click(move |_| actions::send_chat(&ctx));
     }
+    // Schnellschalter: wie die Menüpunkte (die das Häkchen und den Schalter
+    // gemeinsam setzen, siehe actions::set_menu_check).
+    {
+        let ctx = ctx.clone();
+        ui.mute_btn.on_toggle(move |_| actions::handle_menu(&ctx, ui::ID_TOGGLE_MUTE));
+    }
+    {
+        let ctx = ctx.clone();
+        ui.deafen_btn.on_toggle(move |_| actions::handle_menu(&ctx, ui::ID_TOGGLE_DEAFEN));
+    }
     {
         let ctx = ctx.clone();
         ui.chat_in.on_text_enter(move |_| actions::send_chat(&ctx));
@@ -403,4 +423,45 @@ fn wire_audio_hotkeys(ctx: &Ctx) {
     bind(&ctx.ui.rooms_tree, ctx);
     bind(&ctx.ui.chat_log, ctx);
     bind(&ctx.ui.files, ctx);
+
+    // Escape auf den Hub-Unterseiten (Registrieren, Passwort vergessen) führt
+    // zur Anmeldung zurück — wie bei einem Dialog.
+    const WXK_ESCAPE: i32 = 27;
+    fn bind_escape<W: WindowEvents>(w: &W, ctx: &Ctx) {
+        let ctx = ctx.clone();
+        w.on_key_down(move |ev| {
+            let mut handled = false;
+            if let WindowEventData::Keyboard(k) = &ev {
+                if k.get_key_code() == Some(WXK_ESCAPE) {
+                    handled = actions::hub_escape(&ctx);
+                }
+            }
+            if !handled {
+                ev.skip(true);
+            }
+        });
+    }
+    let u = &ctx.ui;
+    for t in [
+        &u.hub_phone_in,
+        &u.hub_reg_user_in,
+        &u.hub_reg_display_in,
+        &u.hub_reg_pass_in,
+        &u.hub_code_in,
+        &u.hub_reset_phone_in,
+        &u.hub_reset_code_in,
+        &u.hub_reset_pass_in,
+    ] {
+        bind_escape(t, ctx);
+    }
+    for b in [
+        &u.hub_back_register_btn,
+        &u.hub_register_btn,
+        &u.hub_verify_btn,
+        &u.hub_back_reset_btn,
+        &u.hub_reset_btn,
+        &u.hub_reset_confirm_btn,
+    ] {
+        bind_escape(b, ctx);
+    }
 }

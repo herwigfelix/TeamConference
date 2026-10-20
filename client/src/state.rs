@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -221,7 +221,16 @@ pub struct AppState {
     /// Datei-Stream → Empfangs-Mischer: 20-ms-Blöcke (i16, Wiedergabeformat) zum
     /// lokalen Mithören der gestreamten Datei (der Server schickt sie nicht
     /// zurück). Wird im UDP-Empfangs-/Mischtakt mit eingehendem Audio gemischt.
-    pub local_audio_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<i16>>>>,
+    /// Quelle je Block: `SOURCE_MIC` (Loopback-Mithören) oder `SOURCE_FILE`
+    /// (gestreamte Datei) — beide bekommen im Mischer eine eigene Schlange.
+    pub local_audio_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u8, Vec<i16>)>>>,
+    /// Rauschunterdrückung 0 (aus) – 4 (sehr stark); lock-frei in der Aufnahme gelesen.
+    pub voice_noise: AtomicU8,
+    /// Echounterdrückung an/aus.
+    pub voice_echo: AtomicBool,
+    /// Sprachprozessor der laufenden Aufnahme. Aufnahme (Mikrofon) und
+    /// Empfangsmischer (Lautsprecher-Referenz fürs Echo) nutzen dieselbe Instanz.
+    pub voice: Mutex<Option<crate::audio::voice::VoiceProcessor>>,
     /// Generationszähler der „gewünschten Verbindung". Jedes Verbinden und jedes
     /// (manuelle wie endgültige) Trennen erhöht ihn. Ein im Backoff wartender
     /// Wiederverbindungs-Task vergleicht den beim Planen gemerkten Wert und
@@ -248,6 +257,9 @@ impl AppState {
             stream_volume_bits: AtomicU32::new(1.0f32.to_bits()),
             stream_seek_secs: AtomicI32::new(0),
             local_audio_tx: Mutex::new(None),
+            voice_noise: AtomicU8::new(2),
+            voice_echo: AtomicBool::new(true),
+            voice: Mutex::new(None),
             connect_gen: AtomicU64::new(0),
         }
     }
@@ -308,6 +320,19 @@ impl AppState {
     /// Ausstehendes Spulen abholen und zurücksetzen (von der Streaming-Schleife).
     pub fn take_stream_seek(&self) -> i32 {
         self.stream_seek_secs.swap(0, Ordering::Relaxed)
+    }
+
+    /// Aktuelle Einstellungen der Sprachverarbeitung.
+    pub fn voice_settings(&self) -> crate::audio::voice::VoiceSettings {
+        crate::audio::voice::VoiceSettings {
+            noise: self.voice_noise.load(Ordering::Relaxed).min(4),
+            echo: self.voice_echo.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn set_voice_settings(&self, noise: u8, echo: bool) {
+        self.voice_noise.store(noise.min(4), Ordering::Relaxed);
+        self.voice_echo.store(echo, Ordering::Relaxed);
     }
 
     /// Send a protocol message to the server via WebSocket.
