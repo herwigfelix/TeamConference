@@ -99,6 +99,9 @@ pub struct ClientConfig {
     /// Echounterdrückung (Standard: aus).
     #[serde(default)]
     pub echo_cancellation: bool,
+    /// iOS: in Stereo aufnehmen, wenn das Mikrofon es kann (Standard: an).
+    #[serde(default = "default_true")]
+    pub stereo_input: bool,
 }
 
 fn default_port() -> u16 {
@@ -136,6 +139,7 @@ impl Default for ClientConfig {
             announce_events: true,
             noise_suppression: 0,
             echo_cancellation: false,
+            stereo_input: true,
         }
     }
 }

@@ -486,6 +486,11 @@ fn prepare_mobile_audio(ctx: &Ctx) {
             "* Kein Mikrofonzugriff: Du kannst zuhören, aber nicht sprechen. Freigabe in den Systemeinstellungen.",
         );
     }
+    // Stereo vor dem Aktivieren mitteilen: es bestimmt den Session-Modus.
+    #[cfg(target_os = "ios")]
+    if let Err(e) = wxdragon::audio_session::set_stereo_input(config::load_config().stereo_input) {
+        tracing::warn!("Stereo-Aufnahme konnte nicht eingestellt werden: {e}");
+    }
     if let Err(e) = AudioSession::new(AudioMode::VoiceChat)
         .with_speaker(true)
         .with_background_notice("TeamConference", "Verbunden")
@@ -2441,6 +2446,18 @@ fn audio_settings(ctx: &Ctx) {
         });
     }
     dev_box.add(&refresh_btn, 0, SizerFlag::Left | SizerFlag::Bottom | SizerFlag::Right, 8);
+    // iOS: Stereo-Aufnahme (eingebautes Stereo-Mikrofon neuerer iPhones, USB-
+    // Mikrofone/-Interfaces). Bluetooth-Headsets bleiben Mono.
+    #[cfg(target_os = "ios")]
+    let stereo_chk = {
+        let c = CheckBox::builder(&dialog)
+            .with_label("In Stereo aufnehmen, wenn das Mikrofon es kann")
+            .build();
+        c.set_value(config::load_config().stereo_input);
+        ui::set_a11y_name(&c, "In Stereo aufnehmen, wenn das Mikrofon es kann");
+        dev_box.add(&c, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 8);
+        c
+    };
     v.add_sizer(&dev_box, 0, SizerFlag::Expand | SizerFlag::All, 10);
 
     // ── Sprachverarbeitung ──
@@ -2495,7 +2512,14 @@ fn audio_settings(ctx: &Ctx) {
         };
         (pick(in_choice.get_selection(), &g.0), pick(out_choice.get_selection(), &g.1))
     };
-    let devices_changed = input != cur_in || output != cur_out;
+    #[allow(unused_mut)]
+    let mut devices_changed = input != cur_in || output != cur_out;
+    #[cfg(target_os = "ios")]
+    let stereo = stereo_chk.is_checked();
+    #[cfg(target_os = "ios")]
+    {
+        devices_changed |= stereo != config::load_config().stereo_input;
+    }
     let announce_events = announce_chk.is_checked();
     let mic_boost = boost_chk.is_checked();
     let noise = noise_choice.get_selection().unwrap_or(0).min(4) as u8;
@@ -2520,12 +2544,20 @@ fn audio_settings(ctx: &Ctx) {
     cfg.mic_boost = mic_boost;
     cfg.noise_suppression = noise;
     cfg.echo_cancellation = echo;
+    #[cfg(target_os = "ios")]
+    {
+        cfg.stereo_input = stereo;
+    }
     let _ = config::save_config(&cfg);
 
     let connected = ctx.app.inner.lock().connected;
     if devices_changed && connected {
         #[allow(unused_mut)]
         let mut text = "Audio-Einstellungen gespeichert, Geräte übernommen.".to_string();
+        #[cfg(target_os = "ios")]
+        if let Err(e) = wxdragon::audio_session::set_stereo_input(stereo) {
+            tracing::warn!("Stereo-Aufnahme konnte nicht eingestellt werden: {e}");
+        }
         #[cfg(any(target_os = "ios", target_os = "android"))]
         if let Some(problem) = apply_mobile_route(input.as_deref(), output_choice_id.as_deref()) {
             text = format!("Audio-Einstellungen gespeichert. {problem}");

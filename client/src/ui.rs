@@ -889,8 +889,13 @@ fn build_menu_bar(frame: &Frame) {
         .append_item(ID_CHANGE_PW, "Eigenes &Passwort ändern…", "Eigenes Passwort ändern")
         .build();
 
-    let help_menu = Menu::builder()
-        .append_item(ID_CHECK_UPDATE, "Nach &Aktualisierung suchen…", "Auf neue Version prüfen")
+    // „Nach Aktualisierung suchen" nur am Desktop — auf iOS/Android kommen
+    // Updates über App Store bzw. Play Store.
+    let help_menu = Menu::builder();
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let help_menu =
+        help_menu.append_item(ID_CHECK_UPDATE, "Nach &Aktualisierung suchen…", "Auf neue Version prüfen");
+    let help_menu = help_menu
         .append_item(ID_HELP_KEYS, "&Kurztasten\tF1", "Kurztasten anzeigen")
         .append_item(ID_ABOUT, "&Über…", "Über TeamConference")
         .build();
