@@ -389,11 +389,13 @@ impl Ui {
         // ── Hauptansicht ──
         let main_panel = Panel::builder(&frame).build();
         // Telefon (iOS/Android): drei Spalten passen nicht nebeneinander,
-        // daher untereinander (Räume, Chat, Lautstärke/Dateien).
+        // daher untereinander (Räume, Chat, Lautstärke/Dateien). Tablets
+        // (iPad, kürzere Bildschirmseite ≥ 600 pt) nutzen wie der Desktop drei
+        // Spalten — sonst bleibt für den Chatverlauf nur ein schmaler Streifen.
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let mh = BoxSizer::builder(Orientation::Horizontal).build();
         #[cfg(any(target_os = "ios", target_os = "android"))]
-        let mh = BoxSizer::builder(Orientation::Vertical).build();
+        let mh = BoxSizer::builder(if is_tablet() { Orientation::Horizontal } else { Orientation::Vertical }).build();
 
         // Linke Spalte: Räume und Nutzer als nativer Baum.
         let left = BoxSizer::builder(Orientation::Vertical).build();
@@ -621,6 +623,15 @@ impl Ui {
         let ts = chrono::Local::now().format("%H:%M").to_string();
         self.chat_log.append_text(&format!("[{}] {}\n", ts, line));
     }
+}
+
+/// Tablet-Erkennung beim Start: kürzere Seite der App-Fläche ≥ 600 pt
+/// (iPad in beiden Ausrichtungen; Telefone auch quer darunter).
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn is_tablet() -> bool {
+    let w = SystemSettings::get_metric(SystemMetric::ScreenX, None);
+    let h = SystemSettings::get_metric(SystemMetric::ScreenY, None);
+    w > 0 && h > 0 && w.min(h) >= 600
 }
 
 /// Hilfsfunktion: eine beschriftete Eingabezeile in den vertikalen Sizer einfügen.
