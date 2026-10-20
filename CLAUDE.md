@@ -23,6 +23,10 @@ compile.bat           # Windows
 # Server in Docker (config entirely via TC_* env vars in docker-compose.yml):
 docker compose up -d --build
 
+# iOS/iPadOS client (MUi) → TestFlight: device build + Xcode shell (xcodegen) + upload.
+# `cargo mui ios` only builds for the simulator. Build number auto-increments (packaging/ios/build-number).
+packaging/ios/build-appstore.sh [build] [--no-upload]
+
 # Core library (lib/, C-API in lib/include/teamconference_core.h) for iOS/Android → dist/mobile/:
 lib/build-mobile.sh [ios|android]
 ```
