@@ -93,11 +93,11 @@ pub struct ClientConfig {
     /// Server-Ereignisse per Sprachausgabe ansagen (Standard: an).
     #[serde(default = "default_true")]
     pub announce_events: bool,
-    /// Rauschunterdrückung 0 (aus) – 4 (sehr stark); Standard 2 (mittel).
-    #[serde(default = "default_noise")]
+    /// Rauschunterdrückung 0 (aus) – 4 (sehr stark); Standard aus.
+    #[serde(default)]
     pub noise_suppression: u8,
-    /// Echounterdrückung (Standard: an).
-    #[serde(default = "default_true")]
+    /// Echounterdrückung (Standard: aus).
+    #[serde(default)]
     pub echo_cancellation: bool,
 }
 
@@ -115,9 +115,6 @@ fn default_bit_depth() -> u8 {
 }
 fn default_channels() -> u8 {
     1
-}
-fn default_noise() -> u8 {
-    2
 }
 fn default_volume() -> f32 {
     1.0
@@ -137,8 +134,8 @@ impl Default for ClientConfig {
             mic_volume: default_volume(),
             mic_boost: false,
             announce_events: true,
-            noise_suppression: default_noise(),
-            echo_cancellation: true,
+            noise_suppression: 0,
+            echo_cancellation: false,
         }
     }
 }

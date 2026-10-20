@@ -32,6 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # RustMUi (iOS/Android) liegt nicht im Repo; Cargo braucht für die
+      # Pfad-Abhängigkeit trotzdem ein Manifest → Platzhalter anlegen.
+      - name: MUi-Platzhalter
+        shell: bash
+        run: bash packaging/ci/mui-placeholder.sh
+
       # Stable Rust mit plattformüblichem Host (auf Windows automatisch MSVC).
       - name: Rust einrichten
         uses: dtolnay/rust-toolchain@stable
@@ -129,6 +135,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # RustMUi (iOS/Android) liegt nicht im Repo; Cargo braucht für die
+      # Pfad-Abhängigkeit trotzdem ein Manifest → Platzhalter anlegen.
+      - name: MUi-Platzhalter
+        shell: bash
+        run: bash packaging/ci/mui-placeholder.sh
+
       - name: Rust einrichten
         uses: dtolnay/rust-toolchain@stable
 
@@ -182,6 +194,12 @@ jobs:
             base-devel rust cmake ninja clang gtk3 alsa-lib speech-dispatcher git
 
       - uses: actions/checkout@v4
+
+      # RustMUi (iOS/Android) liegt nicht im Repo; Cargo braucht für die
+      # Pfad-Abhängigkeit trotzdem ein Manifest → Platzhalter anlegen.
+      - name: MUi-Platzhalter
+        shell: bash
+        run: bash packaging/ci/mui-placeholder.sh
 
       # makepkg verweigert den Lauf als root → eigenen Build-Nutzer anlegen.
       - name: Paketieren (makepkg)

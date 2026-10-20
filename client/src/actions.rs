@@ -493,7 +493,9 @@ fn prepare_mobile_audio(ctx: &Ctx) {
     {
         tracing::warn!("Audio-Session konnte nicht aktiviert werden: {e}");
     }
-    apply_mobile_input(config::load_config().input_device.as_deref());
+    let cfg = config::load_config();
+    apply_mobile_input(cfg.input_device.as_deref());
+    apply_mobile_output(cfg.output_device.as_deref());
 }
 
 pub fn do_disconnect(ctx: &Ctx) {
@@ -2329,15 +2331,40 @@ fn input_choices() -> Vec<(Option<String>, String)> {
     }
 }
 
-/// Lautsprecher zur Auswahl (wie [`input_choices`]).
+/// Lautsprecher zur Auswahl (wie [`input_choices`]). iOS: Lautsprecher,
+/// Hörmuschel und alles, was gerade angeschlossen ist (Kopfhörer, Bluetooth,
+/// AirPlay …) — ohne diese Wahl bliebe es z. B. dauerhaft bei der Hörmuschel.
 fn output_choices() -> Vec<(Option<String>, String)> {
-    let mut out = vec![(None, "Standardgerät".to_string())];
-    for d in crate::audio::device::list_devices() {
-        if d.is_output {
-            out.push((Some(d.name.clone()), d.name));
+    #[cfg(target_os = "ios")]
+    {
+        let mut out = vec![(None, "Automatisch".to_string())];
+        for o in wxdragon::audio_session::outputs() {
+            out.push((Some(o.id), o.name));
         }
+        return out;
     }
-    out
+    #[allow(unreachable_code)]
+    {
+        let mut out = vec![(None, "Standardgerät".to_string())];
+        for d in crate::audio::device::list_devices() {
+            if d.is_output {
+                out.push((Some(d.name.clone()), d.name));
+            }
+        }
+        out
+    }
+}
+
+/// iOS: die gewählte Ausgabe (Lautsprecher, Hörmuschel, Headset …) der Audio-
+/// Session vorgeben. Nach jedem Aktivieren der Session erneut nötig.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn apply_mobile_output(output: Option<&str>) {
+    #[cfg(target_os = "ios")]
+    if let Err(e) = wxdragon::audio_session::set_output(output) {
+        tracing::warn!("Ausgabe konnte nicht gewählt werden: {e}");
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = output;
 }
 
 /// iOS: das gewählte Mikrofon der Audio-Session vorgeben (cpal nimmt dann das
@@ -2377,23 +2404,13 @@ fn audio_settings(ctx: &Ctx) {
 
     // ── Geräte ──
     let dev_box = StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Geräte").build();
-    let grid = FlexGridSizer::builder(0, 2).with_vgap(8).with_hgap(12).build();
-    grid.add_growable_col(1, 1);
+    let grid = ui::form_grid();
     let in_choice = Choice::builder(&dialog).build();
     let out_choice = Choice::builder(&dialog).build();
     fill_device_choice(&in_choice, &lists.borrow().0, &cur_in);
     fill_device_choice(&out_choice, &lists.borrow().1, &cur_out);
-    ui::set_a11y_name(&in_choice, "Mikrofon");
-    ui::set_a11y_name(&out_choice, "Lautsprecher");
-    for (label, choice) in [("Mikrofon:", &in_choice), ("Lautsprecher:", &out_choice)] {
-        grid.add(
-            &StaticText::builder(&dialog).with_label(label).build(),
-            0,
-            SizerFlag::AlignCenterVertical,
-            0,
-        );
-        grid.add(choice, 1, SizerFlag::Expand, 0);
-    }
+    ui::form_row(&dialog, &grid, "Mikrofon:", &in_choice, "Mikrofon");
+    ui::form_row(&dialog, &grid, "Lautsprecher:", &out_choice, "Lautsprecher");
     dev_box.add_sizer(&grid, 0, SizerFlag::Expand | SizerFlag::All, 8);
     // „Aktualisieren" füllt die Auswahl neu (z. B. nach Ein-/Ausstöpseln) und
     // behält die aktuelle Wahl, falls das Gerät noch da ist.
@@ -2422,20 +2439,13 @@ fn audio_settings(ctx: &Ctx) {
     let voice = ctx.app.voice_settings();
     let proc_box =
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Sprachverarbeitung").build();
-    let prow = BoxSizer::builder(Orientation::Horizontal).build();
+    let prow = ui::form_grid();
     let noise_choice = Choice::builder(&dialog).build();
     for l in crate::audio::voice::NOISE_LEVELS {
         noise_choice.append(l);
     }
     noise_choice.set_selection(voice.noise as u32);
-    ui::set_a11y_name(&noise_choice, "Rauschunterdrückung");
-    prow.add(
-        &StaticText::builder(&dialog).with_label("Rauschunterdrückung:").build(),
-        0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        12,
-    );
-    prow.add(&noise_choice, 1, SizerFlag::Expand, 0);
+    ui::form_row(&dialog, &prow, "Rauschunterdrückung:", &noise_choice, "Rauschunterdrückung");
     proc_box.add_sizer(&prow, 0, SizerFlag::Expand | SizerFlag::All, 8);
     let echo_chk = CheckBox::builder(&dialog)
         .with_label("Echounterdrückung (wenn du ohne Kopfhörer sprichst)")
@@ -2480,7 +2490,7 @@ fn audio_settings(ctx: &Ctx) {
     let devices_changed = input != cur_in || output != cur_out;
     let announce_events = announce_chk.is_checked();
     let mic_boost = boost_chk.is_checked();
-    let noise = noise_choice.get_selection().unwrap_or(2).min(4) as u8;
+    let noise = noise_choice.get_selection().unwrap_or(0).min(4) as u8;
     let echo = echo_chk.is_checked();
     dialog.destroy();
 
@@ -2495,6 +2505,8 @@ fn audio_settings(ctx: &Ctx) {
     ctx.st.borrow_mut().announce_events = announce_events;
     let mut cfg = config::load_config();
     cfg.input_device = input.clone();
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let output_choice_id = output.clone();
     cfg.output_device = output;
     cfg.announce_events = announce_events;
     cfg.mic_boost = mic_boost;
@@ -2505,7 +2517,10 @@ fn audio_settings(ctx: &Ctx) {
     let connected = ctx.app.inner.lock().connected;
     if devices_changed && connected {
         #[cfg(any(target_os = "ios", target_os = "android"))]
-        apply_mobile_input(input.as_deref());
+        {
+            apply_mobile_input(input.as_deref());
+            apply_mobile_output(output_choice_id.as_deref());
+        }
         restart_audio(ctx);
         notify(ctx, "Audio-Einstellungen gespeichert, Geräte übernommen.", "Audio-Einstellungen");
     } else if devices_changed {

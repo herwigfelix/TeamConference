@@ -257,8 +257,9 @@ impl AppState {
             stream_volume_bits: AtomicU32::new(1.0f32.to_bits()),
             stream_seek_secs: AtomicI32::new(0),
             local_audio_tx: Mutex::new(None),
-            voice_noise: AtomicU8::new(2),
-            voice_echo: AtomicBool::new(true),
+            // Standard: keine Sprachverarbeitung (in den Audio-Einstellungen einschaltbar).
+            voice_noise: AtomicU8::new(0),
+            voice_echo: AtomicBool::new(false),
             voice: Mutex::new(None),
             connect_gen: AtomicU64::new(0),
         }
