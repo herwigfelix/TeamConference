@@ -101,6 +101,23 @@ PLIST
             || echo "WARNUNG: codesign nicht verfügbar — Mikrofon-Prompt evtl. unzuverlässig."
     fi
 
+    # Angeheftetes Ticket prüfen. `stapler validate` fragt Apples CloudKit-
+    # Server ab und scheitert auf manchen CI-Runnern an Netzwerkabbrüchen
+    # („The network connection was lost", Error 68), obwohl `staple` (das das
+    # Ticket von demselben Dienst holt) gerade geklappt hat. Deshalb mehrere
+    # Versuche; bleibt das Netz weg, nur warnen — das Ticket hängt bereits an.
+    validate_staple() {
+        local try
+        for try in 1 2 3; do
+            if xcrun stapler validate "$1"; then
+                return 0
+            fi
+            echo "stapler validate fehlgeschlagen (Versuch $try/3), neuer Versuch in 20 s…"
+            sleep 20
+        done
+        echo "WARNUNG: stapler validate für $1 nicht bestätigt (Netzwerk) — Ticket wurde angeheftet."
+    }
+
     # Notarisierung ist möglich, wenn echt signiert wurde und alle App-Store-
     # Connect-API-Key-Variablen vorliegen.
     DO_NOTARIZE=0
@@ -124,7 +141,7 @@ PLIST
             --issuer "$AC_API_ISSUER_ID" \
             --wait
         xcrun stapler staple "$APP"
-        xcrun stapler validate "$APP"
+        validate_staple "$APP"
         rm -f "$APP_ZIP"
         echo "App notarisiert und gestapelt."
     fi
@@ -151,7 +168,7 @@ PLIST
             --issuer "$AC_API_ISSUER_ID" \
             --wait
         xcrun stapler staple "$DMG"
-        xcrun stapler validate "$DMG"
+        validate_staple "$DMG"
         echo "DMG signiert, notarisiert und gestapelt."
     else
         echo "Notarisierung übersprungen (keine Apple-Credentials/Signatur)."
