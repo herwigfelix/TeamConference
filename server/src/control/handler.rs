@@ -68,9 +68,10 @@ pub struct SharedState {
     pub rooms: Arc<RoomManager>,
     pub files: Arc<FileHandler>,
     pub udp_server: Option<Arc<UdpAudioServer>>,
-    /// Prüfer für zentrale Access-Tokens; `Some`, wenn `central_login` aktiv ist
-    /// und der Public Key des Identity Providers geladen werden konnte.
-    pub central: Option<crate::control::central::CentralVerifier>,
+    /// Prüfer für zentrale Access-Tokens; gesetzt, sobald (bei aktivem
+    /// `central_login`) der Public Key des Identity Providers geladen ist. War
+    /// der Hub beim Start nicht erreichbar, setzt ihn ein Hintergrund-Task nach.
+    pub central: Arc<std::sync::OnceLock<crate::control::central::CentralVerifier>>,
     /// S8: Login-Fehlversuche pro IP (Fenster-Start, Zähler) fürs Rate-Limiting.
     pub login_throttle: std::sync::Mutex<
         std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>,
@@ -176,7 +177,7 @@ pub async fn handle_connection<S>(
                     &state.db,
                     &state.users,
                     &state.rooms,
-                    state.central.as_ref(),
+                    state.central.get(),
                     tx.clone(),
                 ).await;
 

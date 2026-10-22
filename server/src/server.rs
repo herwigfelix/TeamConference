@@ -61,32 +61,45 @@ pub async fn run(config: Config, create_admin: bool) -> anyhow::Result<()> {
     let udp_server = UdpAudioServer::start(&config, users.clone()).await?;
 
     // Zentrales Login: Public Key des Identity Providers laden (Override oder
-    // /v2/keys). Schlägt es fehl, läuft der Server ohne zentrales Login weiter.
-    let central = if config.server.central_login {
-        match crate::control::central::CentralVerifier::load(
-            &config.server.central_login_url,
-            &config.server.central_login_pubkey,
-        )
-        .await
-        {
+    // /v2/keys). Ist der Hub noch nicht erreichbar (z. B. startet er nach einem
+    // Neustart des Rechners erst nach diesem Server), versucht es ein
+    // Hintergrund-Task weiter, bis es klappt — statt dauerhaft ohne zentrales
+    // Login zu laufen.
+    let central = Arc::new(std::sync::OnceLock::new());
+    if config.server.central_login {
+        let url = config.server.central_login_url.clone();
+        let pubkey = config.server.central_login_pubkey.clone();
+        match crate::control::central::CentralVerifier::load(&url, &pubkey).await {
             Ok(v) => {
-                tracing::info!(
-                    "Zentrales Login aktiv (Identity Provider: {})",
-                    config.server.central_login_url
-                );
-                Some(v)
+                tracing::info!("Zentrales Login aktiv (Identity Provider: {})", url);
+                let _ = central.set(v);
             }
             Err(e) => {
-                tracing::error!(
-                    "Zentrales Login konnte nicht initialisiert werden ({}). Läuft ohne.",
+                tracing::warn!(
+                    "Zentrales Login noch nicht verfügbar ({}) — neuer Versuch im Hintergrund.",
                     e
                 );
-                None
+                let central = central.clone();
+                tokio::spawn(async move {
+                    let mut delay = std::time::Duration::from_secs(5);
+                    loop {
+                        tokio::time::sleep(delay).await;
+                        match crate::control::central::CentralVerifier::load(&url, &pubkey).await {
+                            Ok(v) => {
+                                let _ = central.set(v);
+                                tracing::info!("Zentrales Login aktiv (Identity Provider: {})", url);
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Zentrales Login weiterhin nicht erreichbar ({})", e);
+                                delay = (delay * 2).min(std::time::Duration::from_secs(60));
+                            }
+                        }
+                    }
+                });
             }
         }
-    } else {
-        None
-    };
+    }
 
     // Setup TLS if enabled
     let tls_acceptor = if config.tls.enabled {

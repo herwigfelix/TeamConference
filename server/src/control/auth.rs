@@ -48,7 +48,9 @@ pub async fn handle_login(
             return reject("Dieser Server unterstützt kein zentrales Login");
         }
         let Some(verifier) = central else {
-            return reject("Zentrales Login auf diesem Server nicht verfügbar");
+            // Public Key des Hubs (noch) nicht geladen — der Hintergrund-Task
+            // versucht es weiter (z. B. Hub nach einem Neustart noch nicht oben).
+            return reject("Zentrales Login ist gerade nicht erreichbar — bitte gleich noch einmal versuchen");
         };
         let claims = match verifier.verify(token) {
             Ok(c) => c,
