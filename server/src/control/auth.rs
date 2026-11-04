@@ -19,48 +19,32 @@ pub async fn handle_login(
 ) -> AuthResponse {
     // Check max users
     if users.user_count().await >= config.server.max_users as usize {
-        return AuthResponse {
-            success: false,
-            user_id: None,
-            token: None,
-            server_name: None,
-            rooms: None,
-            role: None,
-            error: Some("Server is full".to_string()),
-        };
+        return AuthResponse::rejected("auth.server_full", serde_json::Value::Null, "Server is full");
     }
 
-    let reject = |msg: &str| AuthResponse {
-        success: false,
-        user_id: None,
-        token: None,
-        server_name: None,
-        rooms: None,
-        role: None,
-        error: Some(msg.to_string()),
-    };
+    let reject = |code: &str, msg: &str| AuthResponse::rejected(code, serde_json::Value::Null, msg);
 
     // ── Anmeldung: zentrales Token ODER lokaler Benutzer/Passwort ──
     // Ergebnis: (Account, Tenant/Unterserver, Rolle für diese Sitzung).
     let (db_user, tenant, session_role) = if let Some(token) = login.central_token.as_deref() {
         // Client will zentrales Login.
         if !config.server.central_login {
-            return reject("Dieser Server unterstützt kein zentrales Login");
+            return reject("auth.central_unsupported", "Dieser Server unterstützt kein zentrales Login");
         }
         let Some(verifier) = central else {
             // Public Key des Hubs (noch) nicht geladen — der Hintergrund-Task
             // versucht es weiter (z. B. Hub nach einem Neustart noch nicht oben).
-            return reject("Zentrales Login ist gerade nicht erreichbar — bitte gleich noch einmal versuchen");
+            return reject("auth.central_unavailable", "Zentrales Login ist gerade nicht erreichbar — bitte gleich noch einmal versuchen");
         };
         let claims = match verifier.verify(token) {
             Ok(c) => c,
             Err(e) => {
                 tracing::info!("Zentrales Token abgelehnt: {}", e);
-                return reject("Zentrales Token ungültig — bitte neu anmelden");
+                return reject("auth.central_token_invalid", "Zentrales Token ungültig — bitte neu anmelden");
             }
         };
         if !claims.apr {
-            return reject("Konto noch nicht freigegeben — bitte auf die Freigabe warten");
+            return reject("auth.not_approved", "Konto noch nicht freigegeben — bitte auf die Freigabe warten");
         }
         // Lokalen Account zur zentralen Identität finden oder anlegen.
         let db_user = match queries::find_user_by_central_uid(db, claims.sub.clone()).await {
@@ -74,20 +58,20 @@ pub async fn handle_login(
                     }
                     Err(e) => {
                         tracing::error!("Anlegen des zentralen Accounts fehlgeschlagen: {}", e);
-                        return reject("Konto konnte nicht angelegt werden");
+                        return reject("auth.account_create_failed", "Konto konnte nicht angelegt werden");
                     }
                 }
             }
             Err(e) => {
                 tracing::error!("central_uid-Lookup fehlgeschlagen: {}", e);
-                return reject("Internal server error");
+                return reject("auth.internal_error", "Internal server error");
             }
         };
 
         // Tenant (Unterserver) bestimmen.
         if config.server.multi_tenant {
             let Some(server_id) = login.server_id.as_deref().filter(|s| !s.is_empty()) else {
-                return reject("Bitte einen Server wählen (server_id fehlt)");
+                return reject("auth.server_id_missing", "Bitte einen Server wählen (server_id fehlt)");
             };
             // Zugriff über das Hub-Verzeichnis prüfen (öffentlich oder Mitglied).
             match crate::control::hubdir::lookup(&config.server.central_login_url, token, server_id).await {
@@ -102,7 +86,13 @@ pub async fn handle_login(
                     let role = if dir.owner_uid == claims.sub { "admin".to_string() } else { db_user.role.clone() };
                     (db_user, server_id.to_string(), role)
                 }
-                Err(e) => return reject(&format!("Kein Zugriff auf diesen Server: {}", e)),
+                Err(e) => {
+                    return AuthResponse::rejected(
+                        "auth.server_access_denied",
+                        serde_json::json!({ "error": e.to_string() }),
+                        &format!("Kein Zugriff auf diesen Server: {}", e),
+                    )
+                }
             }
         } else {
             let role = db_user.role.clone();
@@ -111,7 +101,7 @@ pub async fn handle_login(
     } else {
         // Klassischer Pfad (Benutzername/Passwort).
         if config.server.multi_tenant {
-            return reject("Dieser Hub erfordert zentrales Login");
+            return reject("auth.central_required", "Dieser Hub erfordert zentrales Login");
         }
         let username = login.username.clone();
         let password = login.password.clone();
@@ -124,11 +114,11 @@ pub async fn handle_login(
                     .flatten()
                     .is_some();
                 if exists {
-                    return reject("Invalid username or password");
+                    return reject("auth.invalid_credentials", "Invalid username or password");
                 }
                 // Selbstregistrierung ist bei zentralem Login deaktiviert.
                 if config.server.central_login || !queries::is_registration_open(db).await {
-                    return reject("Invalid username or password");
+                    return reject("auth.invalid_credentials", "Invalid username or password");
                 }
                 match queries::create_user(db, username.clone(), password, "user".to_string()).await {
                     Ok(id) => {
@@ -141,13 +131,13 @@ pub async fn handle_login(
                     }
                     Err(e) => {
                         tracing::error!("Registrierung fehlgeschlagen: {}", e);
-                        return reject("Konto konnte nicht angelegt werden");
+                        return reject("auth.account_create_failed", "Konto konnte nicht angelegt werden");
                     }
                 }
             }
             Err(e) => {
                 tracing::error!("Auth error: {}", e);
-                return reject("Internal server error");
+                return reject("auth.internal_error", "Internal server error");
             }
         };
         let role = db_user.role.clone();
@@ -162,15 +152,11 @@ pub async fn handle_login(
         .map(|s| s.ip().to_string())
         .unwrap_or_else(|_| peer_ip.clone());
     if let Ok(Some(ban)) = queries::is_user_banned(db, db_user.id, ban_ip).await {
-        return AuthResponse {
-            success: false,
-            user_id: None,
-            token: None,
-            server_name: None,
-            rooms: None,
-            role: None,
-            error: Some(format!("You are banned: {}", ban.reason)),
-        };
+        return AuthResponse::rejected(
+            "auth.banned",
+            serde_json::json!({ "reason": ban.reason }),
+            &format!("You are banned: {}", ban.reason),
+        );
     }
 
     let nickname = login
@@ -212,6 +198,8 @@ pub async fn handle_login(
         rooms: Some(room_list),
         role: Some(session_role),
         error: None,
+        error_code: None,
+        error_params: None,
     }
 }
 

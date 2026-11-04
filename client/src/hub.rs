@@ -4,6 +4,7 @@
 //! nie auf dem UI-Thread. Die Basis-URL kommt aus `SRVHUB_BASE_URL` (für lokales
 //! Debuggen, siehe start.sh --hub), sonst die Produktiv-URL.
 
+use rust_i18n::t;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -54,6 +55,12 @@ pub struct TokenBundle {
 }
 
 fn post(path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    post_status(path, body).map_err(|(_, e)| e)
+}
+
+/// Wie `post`, liefert im Fehlerfall zusätzlich den HTTP-Status (None =
+/// Netzwerk-/Lesefehler, keine Antwort des Hubs).
+fn post_status(path: &str, body: serde_json::Value) -> Result<serde_json::Value, (Option<u16>, String)> {
     let url = format!("{}{}", base_url(), path);
     match agent().post(&url)
         .set("Content-Type", "application/json")
@@ -61,23 +68,25 @@ fn post(path: &str, body: serde_json::Value) -> Result<serde_json::Value, String
     {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()
-            .map_err(|e| format!("Antwort unlesbar: {}", e)),
-        Err(ureq::Error::Status(_code, resp)) => {
+            .map_err(|e| (None, t!("hub_api.unreadable", error = e).to_string())),
+        Err(ureq::Error::Status(code, resp)) => {
             let v = resp
                 .into_json::<serde_json::Value>()
                 .unwrap_or_else(|_| json!({}));
-            Err(v
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or("Serverfehler")
-                .to_string())
+            Err((
+                Some(code),
+                v.get("error")
+                    .and_then(|e| e.as_str())
+                    .map(crate::i18n::hub_error)
+                    .unwrap_or_else(|| t!("hub_api.server_error").to_string()),
+            ))
         }
-        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+        Err(e) => Err((None, t!("hub_api.network_error", error = e).to_string())),
     }
 }
 
 fn bundle(v: serde_json::Value) -> Result<TokenBundle, String> {
-    serde_json::from_value(v).map_err(|e| format!("Antwort unlesbar: {}", e))
+    serde_json::from_value(v).map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 fn get_auth(path: &str, token: &str) -> Result<serde_json::Value, String> {
@@ -88,13 +97,13 @@ fn get_auth(path: &str, token: &str) -> Result<serde_json::Value, String> {
     {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()
-            .map_err(|e| format!("Antwort unlesbar: {}", e)),
+            .map_err(|e| t!("hub_api.unreadable", error = e).to_string()),
         Err(ureq::Error::Status(_c, resp)) => Err(resp
             .into_json::<serde_json::Value>()
             .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| "Serverfehler".into())),
-        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(crate::i18n::hub_error))
+            .unwrap_or_else(|| t!("hub_api.server_error").to_string())),
+        Err(e) => Err(t!("hub_api.network_error", error = e).to_string()),
     }
 }
 
@@ -107,13 +116,13 @@ fn post_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_j
     {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()
-            .map_err(|e| format!("Antwort unlesbar: {}", e)),
+            .map_err(|e| t!("hub_api.unreadable", error = e).to_string()),
         Err(ureq::Error::Status(_c, resp)) => Err(resp
             .into_json::<serde_json::Value>()
             .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| "Serverfehler".into())),
-        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(crate::i18n::hub_error))
+            .unwrap_or_else(|| t!("hub_api.server_error").to_string())),
+        Err(e) => Err(t!("hub_api.network_error", error = e).to_string()),
     }
 }
 
@@ -190,7 +199,7 @@ pub struct Profile {
 pub fn get_my_profile(access_token: &str) -> Result<Profile, String> {
     let v = get_auth("/profile", access_token)?;
     serde_json::from_value(v.get("profile").cloned().unwrap_or_default())
-        .map_err(|e| format!("Antwort unlesbar: {}", e))
+        .map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 /// Knapper Nutzereintrag (Admin-Listen / Suche).
@@ -209,13 +218,13 @@ pub struct UserSummary {
 pub fn admin_pending(access_token: &str) -> Result<Vec<UserSummary>, String> {
     let v = get_auth("/admin/pending", access_token)?;
     serde_json::from_value(v.get("pending").cloned().unwrap_or_default())
-        .map_err(|e| format!("Antwort unlesbar: {}", e))
+        .map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 pub fn search_users(access_token: &str, q: &str) -> Result<Vec<UserSummary>, String> {
     let v = get_auth(&format!("/users/search?q={}", urlencode(q)), access_token)?;
     serde_json::from_value(v.get("results").cloned().unwrap_or_default())
-        .map_err(|e| format!("Antwort unlesbar: {}", e))
+        .map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 pub fn admin_approve(access_token: &str, uid: &str) -> Result<(), String> {
@@ -247,7 +256,7 @@ pub fn list_servers(access_token: &str, q: &str) -> Result<Vec<ServerInfo>, Stri
     };
     let v = get_auth(&path, access_token)?;
     let arr = v.get("servers").cloned().unwrap_or_default();
-    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+    serde_json::from_value(arr).map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 /// Eigene Server + Server, bei denen man Mitglied ist — inklusive der privaten,
@@ -255,7 +264,7 @@ pub fn list_servers(access_token: &str, q: &str) -> Result<Vec<ServerInfo>, Stri
 pub fn list_my_servers(access_token: &str) -> Result<Vec<ServerInfo>, String> {
     let v = get_auth("/servers/mine", access_token)?;
     let arr = v.get("servers").cloned().unwrap_or_default();
-    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+    serde_json::from_value(arr).map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 /// Nutzer zu einem Server einladen (Mitglieder und Eigentümer dürfen das).
@@ -272,14 +281,14 @@ pub fn create_invite(access_token: &str, server_id: &str, invitee_uid: &str) -> 
 pub fn get_user_profile(access_token: &str, uid: &str) -> Result<Profile, String> {
     let v = get_auth(&format!("/users/{}/profile", urlencode(uid)), access_token)?;
     serde_json::from_value(v.get("profile").cloned().unwrap_or_default())
-        .map_err(|e| format!("Antwort unlesbar: {}", e))
+        .map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 /// Admin: alle Server des Hubs (private nur mit Name).
 pub fn admin_list_servers(access_token: &str) -> Result<Vec<ServerInfo>, String> {
     let v = get_auth("/admin/servers", access_token)?;
     let arr = v.get("servers").cloned().unwrap_or_default();
-    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+    serde_json::from_value(arr).map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 /// Admin: Datei-Limit eines Servers setzen (Bytes).
@@ -322,13 +331,13 @@ fn put_auth(path: &str, token: &str, body: serde_json::Value) -> Result<serde_js
     {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()
-            .map_err(|e| format!("Antwort unlesbar: {}", e)),
+            .map_err(|e| t!("hub_api.unreadable", error = e).to_string()),
         Err(ureq::Error::Status(_c, resp)) => Err(resp
             .into_json::<serde_json::Value>()
             .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| "Serverfehler".into())),
-        Err(e) => Err(format!("Netzwerkfehler: {}", e)),
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(crate::i18n::hub_error))
+            .unwrap_or_else(|| t!("hub_api.server_error").to_string())),
+        Err(e) => Err(t!("hub_api.network_error", error = e).to_string()),
     }
 }
 
@@ -346,7 +355,7 @@ pub struct InviteInfo {
 pub fn list_invites(access_token: &str) -> Result<Vec<InviteInfo>, String> {
     let v = get_auth("/invites/mine", access_token)?;
     let arr = v.get("invites").cloned().unwrap_or_default();
-    serde_json::from_value(arr).map_err(|e| format!("Antwort unlesbar: {}", e))
+    serde_json::from_value(arr).map_err(|e| t!("hub_api.unreadable", error = e).to_string())
 }
 
 pub fn respond_invite(access_token: &str, invite_id: &str, accept: bool) -> Result<(), String> {
@@ -416,13 +425,27 @@ pub fn login(identifier: &str, password: &str) -> Result<TokenBundle, String> {
     .and_then(bundle)
 }
 
-/// Refresh-Token gegen ein frisches Paar tauschen (Rotation).
-pub fn refresh(refresh_token: &str) -> Result<TokenBundle, String> {
-    post(
+/// Fehler beim Erneuern der Sitzung.
+#[derive(Debug)]
+pub enum RefreshError {
+    /// Der Hub lehnt das Refresh-Token ab (abgelaufen, widerrufen oder als
+    /// kompromittiert gesperrt) — die Sitzung ist endgültig ungültig.
+    Rejected(String),
+    /// Netzwerk-/Serverproblem; die Sitzung kann weiter gültig sein.
+    Failed(String),
+}
+
+/// Refresh-Token gegen ein frisches Paar tauschen (Rotation). Nur über
+/// `hubsession` aufrufen, das die Rotation serialisiert.
+pub fn refresh(refresh_token: &str) -> Result<TokenBundle, RefreshError> {
+    match post_status(
         "/auth/refresh",
         json!({ "refresh_token": refresh_token, "device_label": DEVICE_LABEL }),
-    )
-    .and_then(bundle)
+    ) {
+        Ok(v) => bundle(v).map_err(RefreshError::Failed),
+        Err((Some(400 | 401 | 403), e)) => Err(RefreshError::Rejected(e)),
+        Err((_, e)) => Err(RefreshError::Failed(e)),
+    }
 }
 
 pub fn logout(refresh_token: &str) -> Result<(), String> {

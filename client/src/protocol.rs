@@ -41,6 +41,13 @@ pub struct AuthResponse {
     pub role: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Sprachneutraler Fehlercode (z. B. "auth.invalid_credentials"); der
+    /// Client übersetzt ihn, `error` bleibt Klartext-Fallback für alte Clients.
+    #[serde(default)]
+    pub error_code: Option<String>,
+    /// Platzhalterwerte zum Fehlercode.
+    #[serde(default)]
+    pub error_params: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // ── Rooms ──

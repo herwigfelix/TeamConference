@@ -11,6 +11,7 @@ use crate::protocol::Message;
 use crate::state::{AppState, PendingUpload};
 use crate::ui;
 
+use rust_i18n::t;
 use tokio::sync::mpsc::UnboundedSender;
 
 // ── kleine Helfer ──
@@ -23,7 +24,14 @@ fn send_or_status(ctx: &Ctx, msg: Message) -> bool {
     match ctx.app.send_ws(msg) {
         Ok(()) => true,
         Err(e) => {
-            status(ctx, &e);
+            // state.rs wird auch von lib/ genutzt und liefert daher keinen
+            // übersetzten Text; ohne Verbindung die eigene Meldung zeigen.
+            let text = if ctx.app.inner.lock().ws_tx.is_none() {
+                t!("status.not_connected_dot").to_string()
+            } else {
+                e
+            };
+            status(ctx, &text);
             false
         }
     }
@@ -118,7 +126,7 @@ pub fn announce_event(ctx: &Ctx, text: &str) {
 
 pub fn do_connect(ctx: &Ctx) {
     if ctx.app.inner.lock().connected {
-        notify(ctx, "Bereits verbunden — bitte zuerst trennen.", "Verbinden");
+        notify(ctx, &t!("connect.already_connected"), &t!("connect.caption"));
         return;
     }
     #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -127,7 +135,7 @@ pub fn do_connect(ctx: &Ctx) {
     let port: u16 = match ctx.ui.port_in.get_value().trim().parse() {
         Ok(p) => p,
         Err(_) => {
-            notify(ctx, "Ungültiger Port.", "Verbinden");
+            notify(ctx, &t!("connect.invalid_port"), &t!("connect.caption"));
             return;
         }
     };
@@ -151,7 +159,7 @@ pub fn do_connect(ctx: &Ctx) {
     let mut nickname = ctx.ui.nick_in.get_value().trim().to_string();
 
     if host.is_empty() {
-        notify(ctx, "Host ist erforderlich.", "Verbinden");
+        notify(ctx, &t!("connect.host_required"), &t!("connect.caption"));
         return;
     }
 
@@ -171,8 +179,8 @@ pub fn do_connect(ctx: &Ctx) {
             _ => {
                 notify(
                     ctx,
-                    "Für zentrales Login bitte zuerst im Reiter „Server-Hub\" anmelden.",
-                    "Verbinden",
+                    &t!("connect.central_needs_hub_login"),
+                    &t!("connect.caption"),
                 );
                 return;
             }
@@ -181,8 +189,8 @@ pub fn do_connect(ctx: &Ctx) {
         if username.is_empty() || password.is_empty() {
             notify(
                 ctx,
-                "Host, Benutzername und Passwort sind erforderlich.",
-                "Verbinden",
+                &t!("connect.credentials_required"),
+                &t!("connect.caption"),
             );
             return;
         }
@@ -221,7 +229,7 @@ pub fn do_connect(ctx: &Ctx) {
         st.reconnect = None;
     }
 
-    status(ctx, "Verbinde…");
+    status(ctx, &t!("connect.connecting"));
 
     // Neue Verbindungsgeneration → verwaist etwaige noch wartende Reconnect-Tasks.
     let gen = ctx
@@ -274,34 +282,21 @@ async fn establish_session(
             serde_json::json!({ "username": username, "password": password, "nickname": nickname })
         }
         AuthSpec::Central { server_id } => {
-            let refresh_token = match config::load_config().hub {
-                Some(h) if !h.refresh_token.is_empty() => h.refresh_token,
-                _ => {
-                    fail("Zentrale Sitzung nicht mehr vorhanden.".into());
-                    return;
-                }
-            };
-            let res = tokio::task::spawn_blocking(move || crate::hub::refresh(&refresh_token)).await;
+            if config::load_config().hub.map_or(true, |h| h.refresh_token.is_empty()) {
+                fail(t!("connect.central_session_gone").into());
+                return;
+            }
+            let res = tokio::task::spawn_blocking(crate::hubsession::access_token).await;
             match res {
-                Ok(Ok(bundle)) => {
-                    let mut cfg = config::load_config();
-                    cfg.hub = Some(crate::config::HubSession {
-                        central_uid: bundle.central_uid.clone(),
-                        username: bundle.username.clone(),
-                        display_name: bundle.display_name.clone(),
-                        role: bundle.role.clone(),
-                        refresh_token: bundle.refresh_token.clone(),
-                        status: bundle.status.clone(),
-                    });
-                    let _ = config::save_config(&cfg);
-                    serde_json::json!({ "central_token": bundle.access_token, "nickname": nickname, "server_id": server_id })
+                Ok(Ok(access_token)) => {
+                    serde_json::json!({ "central_token": access_token, "nickname": nickname, "server_id": server_id })
                 }
                 Ok(Err(e)) => {
-                    fail(format!("Zentrales Login fehlgeschlagen: {}", e));
+                    fail(t!("connect.central_login_failed", error = e).into());
                     return;
                 }
                 Err(e) => {
-                    fail(format!("Zentrales Login fehlgeschlagen: {}", e));
+                    fail(t!("connect.central_login_failed", error = e).into());
                     return;
                 }
             }
@@ -313,7 +308,7 @@ async fn establish_session(
         crate::net::ws_client::connect(&params.host, params.port, params.ssl, app.clone(), ev_tx.clone())
             .await
     {
-        fail(format!("Verbindung fehlgeschlagen: {}", e));
+        fail(t!("connect.failed_with", error = e).into());
         return;
     }
 
@@ -324,7 +319,7 @@ async fn establish_session(
             inner.capture_shutdown = Some(send_shutdown);
             inner.playback_shutdown = Some(recv_shutdown);
         }
-        Err(e) => warn(format!("UDP-Audio fehlgeschlagen: {}", e)),
+        Err(e) => warn(t!("connect.udp_failed", error = e).into()),
     }
 
     // 4) Wiedergabe-Thread — nur bei Erstverbindung; bei Wiederverbindung läuft
@@ -349,7 +344,7 @@ async fn establish_session(
 
     // 5) Anmelden.
     if let Err(e) = app.send_ws(Message::new("auth_login", login_data)) {
-        warn(format!("Anmeldung fehlgeschlagen: {}", e));
+        warn(t!("connect.login_failed", error = e).into());
     }
 }
 
@@ -441,19 +436,12 @@ pub fn schedule_reconnect(ctx: &Ctx) {
         // Versuche erschöpft (oder keine Sitzung) → endgültig trennen.
         do_disconnect(ctx);
         ctx.ui
-            .append_chat("Wiederverbindung fehlgeschlagen. Verbindung getrennt.");
-        notify(
-            ctx,
-            "Wiederverbindung fehlgeschlagen. Verbindung zum Server verloren.",
-            "Verbindung",
-        );
+            .append_chat(&t!("reconnect.gave_up_chat"));
+        notify(ctx, &t!("reconnect.gave_up"), &t!("reconnect.caption"));
         return;
     };
 
-    let text = format!(
-        "Verbindung verloren – Wiederverbindung… (Versuch {}/{})",
-        attempt, max
-    );
+    let text = t!("reconnect.attempt", attempt = attempt, max = max).to_string();
     status(ctx, &text);
     ctx.ui.append_chat(&text);
 
@@ -483,7 +471,7 @@ fn prepare_mobile_audio(ctx: &Ctx) {
     use wxdragon::permissions::{self, Permission};
     if !permissions::request(Permission::Microphone).is_granted() {
         ctx.ui.append_chat(
-            "* Kein Mikrofonzugriff: Du kannst zuhören, aber nicht sprechen. Freigabe in den Systemeinstellungen.",
+            &t!("devices.no_mic_permission"),
         );
     }
     // Stereo vor dem Aktivieren mitteilen: es bestimmt den Session-Modus.
@@ -493,7 +481,7 @@ fn prepare_mobile_audio(ctx: &Ctx) {
     }
     if let Err(e) = AudioSession::new(AudioMode::VoiceChat)
         .with_speaker(true)
-        .with_background_notice("TeamConference", "Verbunden")
+        .with_background_notice("TeamConference", &t!("devices.background_connected"))
         .activate()
     {
         tracing::warn!("Audio-Session konnte nicht aktiviert werden: {e}");
@@ -574,7 +562,7 @@ pub fn do_disconnect(ctx: &Ctx) {
     // Admin-Menü zurücksetzen (kein angemeldeter Admin mehr).
     ctx.st.borrow_mut().account_dialog = None;
     update_account_menu(ctx);
-    status(ctx, "Nicht verbunden");
+    status(ctx, &t!("status.not_connected"));
 }
 
 // ── Serverliste ──
@@ -602,7 +590,7 @@ pub fn fill_form_from_server(ctx: &Ctx) {
 pub fn save_bookmark(ctx: &Ctx) {
     let host = ctx.ui.host_in.get_value().trim().to_string();
     if host.is_empty() {
-        status(ctx, "Host darf nicht leer sein.");
+        status(ctx, &t!("bookmark.host_empty"));
         return;
     }
     let port: u16 = ctx.ui.port_in.get_value().trim().parse().unwrap_or(9500);
@@ -621,12 +609,12 @@ pub fn save_bookmark(ctx: &Ctx) {
     ctx.st.borrow_mut().servers.push(entry);
     persist_servers(ctx);
     rebuild_server_list(ctx);
-    status(ctx, "Server als Lesezeichen gespeichert.");
+    status(ctx, &t!("bookmark.saved"));
 }
 
 pub fn remove_server(ctx: &Ctx) {
     let Some(idx) = ctx.ui.server_list.get_selection() else {
-        status(ctx, "Bitte zuerst einen Server auswählen.");
+        status(ctx, &t!("bookmark.select_first"));
         return;
     };
     {
@@ -637,7 +625,7 @@ pub fn remove_server(ctx: &Ctx) {
     }
     persist_servers(ctx);
     rebuild_server_list(ctx);
-    status(ctx, "Server entfernt.");
+    status(ctx, &t!("bookmark.removed"));
 }
 
 fn persist_servers(ctx: &Ctx) {
@@ -654,13 +642,16 @@ pub fn update_hub_status(ctx: &Ctx) {
         Some(h) => {
             let name = if h.display_name.is_empty() { h.username.clone() } else { h.display_name.clone() };
             if h.status == "active" {
-                let role = if h.role == "hub_admin" { " — Hub-Admin" } else { "" };
-                format!("Angemeldet als {}{}.", name, role)
+                if h.role == "hub_admin" {
+                    t!("hub_status.logged_in_admin", name = name).to_string()
+                } else {
+                    t!("hub_status.logged_in", name = name).to_string()
+                }
             } else {
-                format!("Angemeldet als {} — das Konto wartet noch auf Freigabe.", name)
+                t!("hub_status.pending", name = name).to_string()
             }
         }
-        None => "Nicht angemeldet. Mit dem zentralen Konto (Telefonnummer) siehst du das Server-Verzeichnis.".to_string(),
+        None => t!("hub_status.logged_out").to_string(),
     };
     ctx.ui.hub_status.set_label(&label);
 }
@@ -773,7 +764,7 @@ fn form_dialog(
         v.add(&c, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 12);
         c
     });
-    v.add_sizer(&ui::dialog_buttons(&dlg, "OK"), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
+    v.add_sizer(&ui::dialog_buttons(&dlg, &t!("common.ok")), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
     dlg.set_sizer(v, true);
     dlg.fit();
     // Fokus ins erste Feld (Screenreader landen sonst auf „Abbrechen").
@@ -805,16 +796,7 @@ fn hub_is_admin() -> bool {
 
 /// Token-Bündel als lokale Hub-Sitzung speichern (vom Hintergrund-Thread aus).
 fn store_session(b: &crate::hub::TokenBundle) {
-    let mut cfg = config::load_config();
-    cfg.hub = Some(config::HubSession {
-        central_uid: b.central_uid.clone(),
-        username: b.username.clone(),
-        display_name: b.display_name.clone(),
-        role: b.role.clone(),
-        refresh_token: b.refresh_token.clone(),
-        status: b.status.clone(),
-    });
-    let _ = config::save_config(&cfg);
+    crate::hubsession::store(b);
 }
 
 fn hub_msg(ev_tx: &tokio::sync::mpsc::UnboundedSender<Message>, message: String) {
@@ -827,17 +809,17 @@ pub fn hub_register(ctx: &Ctx) {
     let display = ctx.ui.hub_reg_display_in.get_value().trim().to_string();
     let pass = ctx.ui.hub_reg_pass_in.get_value();
     if phone.is_empty() || user.is_empty() || pass.is_empty() {
-        notify(ctx, "Telefon, Benutzername und Passwort sind erforderlich.", "Server-Hub");
+        notify(ctx, &t!("hub.register_fields_required"), &t!("hub.caption"));
         return;
     }
-    ctx.ui.append_hub_log("Fordere Bestätigungscode an…");
+    ctx.ui.append_hub_log(&t!("hub.requesting_code"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || crate::hub::register(&phone, &user, &pass, &display)).await;
         let m = match r {
-            Ok(Ok(())) => "Code gesendet. Bitte Code eingeben und „Code bestätigen & anmelden\" wählen.".to_string(),
-            Ok(Err(e)) => format!("Registrierung fehlgeschlagen: {}", e),
-            Err(e) => format!("Fehler: {}", e),
+            Ok(Ok(())) => t!("hub.code_sent").to_string(),
+            Ok(Err(e)) => t!("hub.register_failed", error = e).to_string(),
+            Err(e) => t!("common.error", error = e).to_string(),
         };
         hub_msg(&ev_tx, m);
     });
@@ -847,10 +829,10 @@ pub fn hub_verify(ctx: &Ctx) {
     let phone = ctx.ui.hub_phone_in.get_value().trim().to_string();
     let code = ctx.ui.hub_code_in.get_value().trim().to_string();
     if phone.is_empty() || code.is_empty() {
-        notify(ctx, "Telefon und Bestätigungscode sind erforderlich.", "Server-Hub");
+        notify(ctx, &t!("hub.verify_fields_required"), &t!("hub.caption"));
         return;
     }
-    ctx.ui.append_hub_log("Bestätige Code…");
+    ctx.ui.append_hub_log(&t!("hub.verifying_code"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || crate::hub::verify(&phone, &code)).await;
@@ -859,16 +841,13 @@ pub fn hub_verify(ctx: &Ctx) {
                 store_session(&b);
                 if b.approved {
                     request_dir_reload(&ev_tx);
-                    format!("Angemeldet als {}.", b.username)
+                    t!("hub.logged_in_as", name = b.username).to_string()
                 } else {
-                    format!(
-                        "Registriert als {}. Das Konto muss noch freigegeben werden. Bei Fragen: {} (Telefon/WhatsApp).",
-                        b.username, b.team_contact
-                    )
+                    t!("hub.registered_pending", name = b.username, contact = b.team_contact).to_string()
                 }
             }
-            Ok(Err(e)) => format!("Bestätigung fehlgeschlagen: {}", e),
-            Err(e) => format!("Fehler: {}", e),
+            Ok(Err(e)) => t!("hub.verify_failed", error = e).to_string(),
+            Err(e) => t!("common.error", error = e).to_string(),
         };
         hub_msg(&ev_tx, m);
     });
@@ -878,10 +857,10 @@ pub fn hub_login(ctx: &Ctx) {
     let ident = ctx.ui.hub_ident_in.get_value().trim().to_string();
     let pass = ctx.ui.hub_login_pass_in.get_value();
     if ident.is_empty() || pass.is_empty() {
-        notify(ctx, "Benutzername/Telefon und Passwort sind erforderlich.", "Server-Hub");
+        notify(ctx, &t!("hub.login_fields_required"), &t!("hub.caption"));
         return;
     }
-    ctx.ui.append_hub_log("Melde am Hub an…");
+    ctx.ui.append_hub_log(&t!("hub.logging_in"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || crate::hub::login(&ident, &pass)).await;
@@ -890,19 +869,19 @@ pub fn hub_login(ctx: &Ctx) {
                 store_session(&b);
                 if b.approved {
                     request_dir_reload(&ev_tx);
-                    format!("Angemeldet als {}.", b.username)
+                    t!("hub.logged_in_as", name = b.username).to_string()
                 } else {
-                    format!("Angemeldet als {}. Konto wartet noch auf Freigabe.", b.username)
+                    t!("hub.logged_in_pending", name = b.username).to_string()
                 }
             }
             Ok(Err(e)) => {
                 if e.contains("phone_not_verified") {
-                    "Telefonnummer noch nicht bestätigt — bitte zuerst registrieren/bestätigen.".to_string()
+                    t!("hub.phone_not_verified").to_string()
                 } else {
-                    format!("Anmeldung fehlgeschlagen: {}", e)
+                    t!("hub.login_failed", error = e).to_string()
                 }
             }
-            Err(e) => format!("Fehler: {}", e),
+            Err(e) => t!("common.error", error = e).to_string(),
         };
         hub_msg(&ev_tx, m);
     });
@@ -911,13 +890,14 @@ pub fn hub_login(ctx: &Ctx) {
 pub fn hub_logout(ctx: &Ctx) {
     let session = config::load_config().hub;
     let Some(h) = session else {
-        notify(ctx, "Nicht angemeldet.", "Server-Hub");
+        notify(ctx, &t!("hub.not_logged_in"), &t!("hub.caption"));
         return;
     };
     // Sitzung lokal entfernen und sofort zur Anmelden-Seite wechseln.
     let mut cfg = config::load_config();
     cfg.hub = None;
     let _ = config::save_config(&cfg);
+    crate::hubsession::forget();
     ctx.st.borrow_mut().hub_view = crate::app::HubView::Login;
     // Verzeichnis-Liste leeren, damit die nächste Anmeldung frisch lädt.
     ctx.st.borrow_mut().hub_servers.clear();
@@ -927,41 +907,52 @@ pub fn hub_logout(ctx: &Ctx) {
     let refresh = h.refresh_token.clone();
     ctx.rt.spawn(async move {
         let _ = tokio::task::spawn_blocking(move || crate::hub::logout(&refresh)).await;
-        hub_msg(&ev_tx, "Abgemeldet.".to_string());
+        hub_msg(&ev_tx, t!("hub.logged_out").to_string());
     });
 }
 
 pub fn hub_reset_start(ctx: &Ctx) {
     let phone = ctx.ui.hub_reset_phone_in.get_value().trim().to_string();
     if phone.is_empty() {
-        notify(ctx, "Bitte Telefonnummer eingeben.", "Server-Hub");
+        notify(ctx, &t!("hub.enter_phone"), &t!("hub.caption"));
         return;
     }
-    ctx.ui.append_hub_log("Fordere Code für Passwort-Reset an…");
+    ctx.ui.append_hub_log(&t!("hub.requesting_reset_code"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || crate::hub::reset_start(&phone)).await;
         let m = match r {
-            Ok(Ok(())) => "Falls die Nummer registriert ist, wurde ein Code gesendet. Neues Passwort eintragen und „Neues Passwort setzen\" wählen.".to_string(),
-            Ok(Err(e)) => format!("Anfrage fehlgeschlagen: {}", e),
-            Err(e) => format!("Fehler: {}", e),
+            Ok(Ok(())) => t!("hub.reset_code_sent").to_string(),
+            Ok(Err(e)) => t!("hub.request_failed", error = e).to_string(),
+            Err(e) => t!("common.error", error = e).to_string(),
         };
         hub_msg(&ev_tx, m);
     });
 }
 
-/// Frisches Access-Token aus der gespeicherten Sitzung holen (Refresh-Rotation,
-/// neue Token werden gespeichert). Nur vom Hintergrund-Thread aus aufrufen.
+/// Gültiges Access-Token der gespeicherten Sitzung (erneuert sie bei Bedarf,
+/// serialisiert über alle Instanzen, siehe hubsession). Nur vom
+/// Hintergrund-Thread aus aufrufen.
 fn fresh_access_token() -> Result<String, String> {
-    let session = config::load_config().hub.ok_or_else(|| "Nicht im Hub angemeldet".to_string())?;
-    let bundle = crate::hub::refresh(&session.refresh_token)?;
-    store_session(&bundle);
-    Ok(bundle.access_token)
+    crate::hubsession::access_token()
+}
+
+/// Der Hub hat die Sitzung abgelehnt (abgelaufen/gesperrt); sie ist lokal
+/// bereits gelöscht. Oberfläche auf die Anmeldeseite umstellen. Kein eigener
+/// Dialog — die auslösende Aktion meldet ihren Fehler (mit Grund) selbst.
+pub fn hub_session_lost(ctx: &Ctx, reason: &str) {
+    ctx.st.borrow_mut().hub_view = crate::app::HubView::Login;
+    ctx.st.borrow_mut().hub_servers.clear();
+    ctx.ui.hub_servers.clear();
+    update_hub_view(ctx);
+    let text = t!("hub.session_lost", reason = reason);
+    ctx.ui.append_hub_log(&text);
+    status(ctx, &text);
 }
 
 pub fn hub_load_directory(ctx: &Ctx) {
     if config::load_config().hub.is_none() {
-        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        notify(ctx, &t!("hub.login_first"), &t!("hub.caption"));
         return;
     }
     let q = ctx.ui.hub_search_in.get_value().trim().to_string();
@@ -969,7 +960,7 @@ pub fn hub_load_directory(ctx: &Ctx) {
     // Server mit Mitgliedschaft, öffentlich wie privat. Das öffentliche
     // Verzeichnis (/servers) zeigt private Server grundsätzlich nicht.
     let mine = hub_scope_is_mine(ctx);
-    ctx.ui.append_hub_log(if mine { "Lade meine Server…" } else { "Lade Verzeichnis…" });
+    ctx.ui.append_hub_log(&if mine { t!("hub.loading_mine") } else { t!("hub.loading_directory") });
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || -> Result<Vec<crate::hub::ServerInfo>, String> {
@@ -1001,8 +992,8 @@ pub fn hub_load_directory(ctx: &Ctx) {
                     }),
                 ));
             }
-            Ok(Err(e)) => hub_msg(&ev_tx, format!("Serverliste konnte nicht geladen werden: {}", e)),
-            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+            Ok(Err(e)) => hub_msg(&ev_tx, t!("hub.list_failed", error = e).to_string()),
+            Err(e) => hub_msg(&ev_tx, t!("common.error", error = e).to_string()),
         }
     });
 }
@@ -1021,13 +1012,13 @@ pub fn hub_show_my_servers(ctx: &Ctx) {
 
 pub fn hub_join_selected(ctx: &Ctx) {
     let Some(idx) = ctx.ui.hub_servers.get_selection() else {
-        notify(ctx, "Bitte zuerst einen Server im Verzeichnis auswählen.", "Server-Hub");
+        notify(ctx, &t!("hub.select_directory_server"), &t!("hub.caption"));
         return;
     };
     let server = ctx.st.borrow().hub_servers.get(idx as usize).cloned();
     let Some(s) = server else { return };
     if s.host.trim().is_empty() {
-        notify(ctx, "Für diesen Server ist keine Adresse hinterlegt.", "Server-Hub");
+        notify(ctx, &t!("hub.no_address"), &t!("hub.caption"));
         return;
     }
     // Verbindungsformular (im Reiter „Serverliste") füllen, zentrales Login
@@ -1047,24 +1038,24 @@ pub fn hub_join_selected(ctx: &Ctx) {
 
 pub fn hub_create_server(ctx: &Ctx) {
     if config::load_config().hub.is_none() {
-        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        notify(ctx, &t!("hub.login_first"), &t!("hub.caption"));
         return;
     }
     let Some((vals, is_public)) = form_dialog(
         ctx,
-        "Server anlegen",
+        &t!("hub_server.create_title"),
         &[
-            ("Name:", String::new(), false),
-            ("Beschreibung:", String::new(), false),
-            ("Adresse (leer = vom Hub gehostet):", String::new(), false),
-            ("Steuerport (leer = 9500):", String::new(), false),
-            ("Audio-Port (leer = Steuerport+1):", String::new(), false),
+            (&*t!("hub_server.name"), String::new(), false),
+            (&*t!("hub_server.description"), String::new(), false),
+            (&*t!("hub_server.address_create"), String::new(), false),
+            (&*t!("hub_server.control_port_create"), String::new(), false),
+            (&*t!("hub_server.audio_port_create"), String::new(), false),
         ],
-        Some(("Öffentlich im Verzeichnis", true)),
+        Some((&*t!("hub_server.public"), true)),
     ) else { return };
     let name = vals[0].trim().to_string();
     if name.is_empty() {
-        notify(ctx, "Name ist erforderlich.", "Server anlegen");
+        notify(ctx, &t!("hub_server.name_required"), &t!("hub_server.create_title"));
         return;
     }
     let description = vals[1].clone();
@@ -1075,13 +1066,13 @@ pub fn hub_create_server(ctx: &Ctx) {
     let (control_port, audio_port) = match parse_ports(&vals[3], &vals[4], 9500) {
         Ok(p) => p,
         Err(e) => {
-            notify(ctx, &e, "Server anlegen");
+            notify(ctx, &e, &t!("hub_server.create_title"));
             return;
         }
     };
     let (control_port, audio_port) = if host.is_empty() { (0, 0) } else { (control_port, audio_port) };
     let private_hint = !is_public;
-    ctx.ui.append_hub_log("Lege Server an…");
+    ctx.ui.append_hub_log(&*t!("hub_server.creating"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || {
@@ -1094,10 +1085,9 @@ pub fn hub_create_server(ctx: &Ctx) {
                 hub_msg(
                     &ev_tx,
                     if private_hint {
-                        "Server angelegt (privat) — sichtbar unter „Meine Server\"."
-                            .to_string()
+                        t!("hub_server.created_private").to_string()
                     } else {
-                        "Server angelegt.".to_string()
+                        t!("hub_server.created").to_string()
                     },
                 );
                 // Private Server tauchen im öffentlichen Verzeichnis nicht auf,
@@ -1107,8 +1097,8 @@ pub fn hub_create_server(ctx: &Ctx) {
                     serde_json::json!({ "mine": private_hint }),
                 ));
             }
-            Ok(Err(e)) => hub_msg(&ev_tx, format!("Server konnte nicht angelegt werden: {}", e)),
-            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+            Ok(Err(e)) => hub_msg(&ev_tx, t!("hub_server.create_failed", error = e).to_string()),
+            Err(e) => hub_msg(&ev_tx, t!("common.error", error = e).to_string()),
         }
     });
 }
@@ -1126,15 +1116,15 @@ fn parse_ports(control: &str, audio: &str, default_control: i64) -> Result<(i64,
     let cp = if c.is_empty() {
         default_control
     } else {
-        c.parse::<i64>().map_err(|_| "Steuerport ist keine Zahl.".to_string())?
+        c.parse::<i64>().map_err(|_| t!("hub_server.control_port_nan").to_string())?
     };
     let ap = if a.is_empty() {
         cp + 1
     } else {
-        a.parse::<i64>().map_err(|_| "Audio-Port ist keine Zahl.".to_string())?
+        a.parse::<i64>().map_err(|_| t!("hub_server.audio_port_nan").to_string())?
     };
     if !(1..=65535).contains(&cp) || !(1..=65535).contains(&ap) {
-        return Err("Ports müssen zwischen 1 und 65535 liegen.".into());
+        return Err(t!("hub_server.port_range").into());
     }
     Ok((cp, ap))
 }
@@ -1146,24 +1136,24 @@ fn selected_hub_server(ctx: &Ctx) -> Option<crate::hub::ServerInfo> {
 
 pub fn hub_edit_server(ctx: &Ctx) {
     let Some(s) = selected_hub_server(ctx) else {
-        notify(ctx, "Bitte zuerst einen Server in der Liste auswählen.", "Server-Hub");
+        notify(ctx, &t!("hub.select_list_server"), &t!("hub.caption"));
         return;
     };
     let Some((vals, is_public)) = form_dialog(
         ctx,
-        "Server bearbeiten",
+        &t!("hub_server.edit_title"),
         &[
-            ("Name:", s.name.clone(), false),
-            ("Beschreibung:", s.description.clone(), false),
-            ("Adresse (leer = unverändert):", s.host.clone(), false),
-            ("Steuerport:", if s.control_port > 0 { s.control_port.to_string() } else { String::new() }, false),
-            ("Audio-Port:", if s.audio_port > 0 { s.audio_port.to_string() } else { String::new() }, false),
+            (&*t!("hub_server.name"), s.name.clone(), false),
+            (&*t!("hub_server.description"), s.description.clone(), false),
+            (&*t!("hub_server.address_edit"), s.host.clone(), false),
+            (&*t!("hub_server.control_port"), if s.control_port > 0 { s.control_port.to_string() } else { String::new() }, false),
+            (&*t!("hub_server.audio_port"), if s.audio_port > 0 { s.audio_port.to_string() } else { String::new() }, false),
         ],
-        Some(("Öffentlich im Verzeichnis", s.is_public)),
+        Some((&*t!("hub_server.public"), s.is_public)),
     ) else { return };
     let name = vals[0].trim().to_string();
     if name.is_empty() {
-        notify(ctx, "Name ist erforderlich.", "Server bearbeiten");
+        notify(ctx, &t!("hub_server.name_required"), &t!("hub_server.edit_title"));
         return;
     }
     let description = vals[1].clone();
@@ -1177,12 +1167,12 @@ pub fn hub_edit_server(ctx: &Ctx) {
         match parse_ports(&vals[3], &vals[4], default_control) {
             Ok(p) => p,
             Err(e) => {
-                notify(ctx, &e, "Server bearbeiten");
+                notify(ctx, &e, &t!("hub_server.edit_title"));
                 return;
             }
         }
     };
-    ctx.ui.append_hub_log("Speichere Server…");
+    ctx.ui.append_hub_log(&*t!("hub_server.saving"));
     let ev_tx = ctx.ev_tx.clone();
     let (sid, host, cp, ap) = (
         s.id.clone(),
@@ -1197,23 +1187,23 @@ pub fn hub_edit_server(ctx: &Ctx) {
         })
         .await;
         match r {
-            Ok(Ok(())) => { hub_msg(&ev_tx, "Server gespeichert.".to_string()); request_dir_reload(&ev_tx); }
-            Ok(Err(e)) => hub_msg(&ev_tx, format!("Speichern fehlgeschlagen: {}", e)),
-            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+            Ok(Ok(())) => { hub_msg(&ev_tx, t!("hub_server.saved").to_string()); request_dir_reload(&ev_tx); }
+            Ok(Err(e)) => hub_msg(&ev_tx, t!("hub_server.save_failed", error = e).to_string()),
+            Err(e) => hub_msg(&ev_tx, t!("common.error", error = e).to_string()),
         }
     });
 }
 
 pub fn hub_delete_server(ctx: &Ctx) {
     let Some(s) = selected_hub_server(ctx) else {
-        notify(ctx, "Bitte zuerst einen Server in der Liste auswählen.", "Server-Hub");
+        notify(ctx, &t!("hub.select_list_server"), &t!("hub.caption"));
         return;
     };
     let confirm = {
         let dlg = MessageDialog::builder(
             &ctx.ui.frame,
-            &format!("Server „{}\" wirklich löschen?", s.name),
-            "Server löschen",
+            &t!("hub_server.delete_confirm", name = s.name),
+            &t!("hub_server.delete_title"),
         )
         .with_style(MessageDialogStyle::YesNo)
         .build();
@@ -1222,7 +1212,7 @@ pub fn hub_delete_server(ctx: &Ctx) {
     if !confirm {
         return;
     }
-    ctx.ui.append_hub_log("Lösche Server…");
+    ctx.ui.append_hub_log(&*t!("hub_server.deleting"));
     let ev_tx = ctx.ev_tx.clone();
     let sid = s.id.clone();
     ctx.rt.spawn(async move {
@@ -1232,9 +1222,9 @@ pub fn hub_delete_server(ctx: &Ctx) {
         })
         .await;
         match r {
-            Ok(Ok(())) => { hub_msg(&ev_tx, "Server gelöscht.".to_string()); request_dir_reload(&ev_tx); }
-            Ok(Err(e)) => hub_msg(&ev_tx, format!("Löschen fehlgeschlagen: {}", e)),
-            Err(e) => hub_msg(&ev_tx, format!("Fehler: {}", e)),
+            Ok(Ok(())) => { hub_msg(&ev_tx, t!("hub_server.deleted").to_string()); request_dir_reload(&ev_tx); }
+            Ok(Err(e)) => hub_msg(&ev_tx, t!("hub_server.delete_failed", error = e).to_string()),
+            Err(e) => hub_msg(&ev_tx, t!("common.error", error = e).to_string()),
         }
     });
 }
@@ -1242,25 +1232,25 @@ pub fn hub_delete_server(ctx: &Ctx) {
 /// Admin: Liste der wartenden Konten als Dialog mit „Freigeben"/„Ablehnen".
 pub fn hub_admin_pending(ctx: &Ctx) {
     if !hub_is_admin() {
-        notify(ctx, "Nur für Hub-Admins.", "Admin");
+        notify(ctx, &t!("hub_admin.only_admins"), &t!("hub_admin.caption"));
         return;
     }
-    let dlg = Dialog::builder(&ctx.ui.frame, "Wartende Freigaben").with_size(480, 420).build();
+    let dlg = Dialog::builder(&ctx.ui.frame, &t!("hub_admin.pending_title")).with_size(480, 420).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
     v.add(
         &StaticText::builder(&dlg)
-            .with_label("Konto auswählen und freigeben oder ablehnen:")
+            .with_label(&t!("hub_admin.pending_hint"))
             .build(),
         0,
         SizerFlag::All,
         6,
     );
     let list = ListBox::builder(&dlg).build();
-    crate::ui::set_a11y_name(&list, "Wartende Konten");
+    crate::ui::set_a11y_name(&list, &t!("hub_admin.pending_list"));
     v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
-    let approve_btn = Button::builder(&dlg).with_label("Freigeben").build();
-    let reject_btn = Button::builder(&dlg).with_label("Ablehnen").build();
-    let close_btn = Button::builder(&dlg).with_label("Schließen").build();
+    let approve_btn = Button::builder(&dlg).with_label(&t!("hub_admin.approve")).build();
+    let reject_btn = Button::builder(&dlg).with_label(&t!("hub_admin.reject")).build();
+    let close_btn = Button::builder(&dlg).with_label(&t!("common.close")).build();
     #[cfg(any(target_os = "ios", target_os = "android"))]
     reject_btn.set_destructive(true);
     v.add_sizer(&ui::button_row(&[&approve_btn, &reject_btn, &close_btn]), 0, SizerFlag::Expand | SizerFlag::All, 6);
@@ -1309,8 +1299,8 @@ pub fn hub_admin_pending(ctx: &Ctx) {
             if let Some(u) = sel {
                 let ok = MessageDialog::builder(
                     &frame,
-                    &format!("Registrierung von „{}\" ({}) ablehnen und löschen?", u.display_name, u.username),
-                    "Ablehnen",
+                    &t!("hub_admin.reject_confirm", name = u.display_name, user = u.username),
+                    &t!("hub_admin.reject"),
                 )
                 .with_style(MessageDialogStyle::YesNo)
                 .build()
@@ -1334,25 +1324,25 @@ pub fn hub_admin_pending(ctx: &Ctx) {
 /// Admin: Nutzer suchen und verwalten (bannen/entsperren/Passwort/Admin).
 pub fn hub_admin_user(ctx: &Ctx) {
     if !hub_is_admin() {
-        notify(ctx, "Nur für Hub-Admins.", "Admin");
+        notify(ctx, &t!("hub_admin.only_admins"), &t!("hub_admin.caption"));
         return;
     }
-    let Some(q) = ask_text(ctx, "Benutzer suchen (Name, mind. 3 Zeichen):", "Admin — Nutzer", "") else { return };
+    let Some(q) = ask_text(ctx, &t!("hub_admin.search_prompt"), &t!("hub_admin.user_title"), "") else { return };
     let results = match fresh_access_token().and_then(|t| crate::hub::search_users(&t, q.trim())) {
         Ok(v) => v,
         Err(e) => {
-            notify(ctx, &format!("Suche fehlgeschlagen: {}", e), "Admin");
+            notify(ctx, &t!("hub.search_failed", error = e), &t!("hub_admin.caption"));
             return;
         }
     };
     if results.is_empty() {
-        notify(ctx, "Kein Nutzer gefunden.", "Admin");
+        notify(ctx, &t!("hub.no_user_found"), &t!("hub_admin.caption"));
         return;
     }
     // Treffer auswählen.
     let labels: Vec<String> = results.iter().map(|u| format!("{} ({})", u.display_name, u.username)).collect();
     let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let pick = SingleChoiceDialog::builder(&ctx.ui.frame, "Nutzer wählen:", "Admin — Nutzer", &label_refs).build();
+    let pick = SingleChoiceDialog::builder(&ctx.ui.frame, &t!("hub_admin.pick_user"), &t!("hub_admin.user_title"), &label_refs).build();
     if pick.show_modal() != ID_OK {
         return;
     }
@@ -1362,8 +1352,12 @@ pub fn hub_admin_user(ctx: &Ctx) {
     }
     let u = results[sel as usize].clone();
     // Aktion wählen.
-    let action_refs: Vec<&str> = vec!["Bannen", "Entsperren", "Passwort zurücksetzen", "Zum Admin machen"];
-    let adlg = SingleChoiceDialog::builder(&ctx.ui.frame, &format!("Aktion für {}:", u.username), "Admin — Aktion", &action_refs).build();
+    let actions: Vec<String> = ["hub_admin.action_ban", "hub_admin.action_unban", "hub_admin.action_reset_pw", "hub_admin.action_promote"]
+        .iter()
+        .map(|k| t!(*k).to_string())
+        .collect();
+    let action_refs: Vec<&str> = actions.iter().map(|s| s.as_str()).collect();
+    let adlg = SingleChoiceDialog::builder(&ctx.ui.frame, &t!("hub_admin.action_for", user = u.username), &t!("hub_admin.action_title"), &action_refs).build();
     if adlg.show_modal() != ID_OK {
         return;
     }
@@ -1374,20 +1368,20 @@ pub fn hub_admin_user(ctx: &Ctx) {
     let uid = u.central_uid.clone();
     let res = match ai {
         0 => {
-            let reason = ask_text(ctx, "Grund (optional):", "Bannen", "").unwrap_or_default();
+            let reason = ask_text(ctx, &t!("hub_admin.reason_prompt"), &t!("hub_admin.action_ban"), "").unwrap_or_default();
             fresh_access_token().and_then(|t| crate::hub::admin_ban(&t, &uid, &reason))
         }
         1 => fresh_access_token().and_then(|t| crate::hub::admin_unban(&t, &uid)),
         2 => {
-            let Some(pw) = ask_text(ctx, "Neues Passwort (mind. 8 Zeichen):", "Passwort zurücksetzen", "") else { return };
+            let Some(pw) = ask_text(ctx, &t!("hub_admin.new_pw_prompt"), &t!("hub_admin.action_reset_pw"), "") else { return };
             fresh_access_token().and_then(|t| crate::hub::admin_reset_password(&t, &uid, &pw))
         }
         3 => fresh_access_token().and_then(|t| crate::hub::admin_promote(&t, &uid)),
         _ => return,
     };
     match res {
-        Ok(()) => notify(ctx, &format!("Aktion für {} ausgeführt.", u.username), "Admin"),
-        Err(e) => notify(ctx, &format!("Aktion fehlgeschlagen: {}", e), "Admin"),
+        Ok(()) => notify(ctx, &t!("hub_admin.action_done", user = u.username), &t!("hub_admin.caption")),
+        Err(e) => notify(ctx, &t!("hub_admin.action_failed", error = e), &t!("hub_admin.caption")),
     }
 }
 
@@ -1396,33 +1390,33 @@ pub fn hub_admin_user(ctx: &Ctx) {
 /// darf, wer Mitglied oder Eigentümer des Servers ist.
 pub fn hub_invite_user(ctx: &Ctx) {
     if config::load_config().hub.is_none() {
-        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        notify(ctx, &t!("hub.login_first"), &t!("hub.caption"));
         return;
     }
     let Some(server) = selected_hub_server(ctx) else {
         notify(
             ctx,
-            "Bitte zuerst den Server in der Liste auswählen, auf den eingeladen werden soll. Eigene private Server stehen unter „Meine Server\".",
-            "Nutzer einladen",
+            &t!("invite.select_server"),
+            &t!("invite.caption"),
         );
         return;
     };
     let Some(q) = ask_text(
         ctx,
-        &format!("Wen auf „{}\" einladen? Name (mind. 3 Zeichen):", server.name),
-        "Nutzer einladen",
+        &t!("invite.search_prompt", server = server.name),
+        &t!("invite.caption"),
         "",
     ) else { return };
     // Kurze blockierende Aufrufe wie in den anderen Hub-Dialogen.
     let results = match fresh_access_token().and_then(|t| crate::hub::search_users(&t, q.trim())) {
         Ok(v) => v,
         Err(e) => {
-            notify(ctx, &format!("Suche fehlgeschlagen: {}", e), "Nutzer einladen");
+            notify(ctx, &t!("hub.search_failed", error = e), &t!("invite.caption"));
             return;
         }
     };
     if results.is_empty() {
-        notify(ctx, "Kein Nutzer gefunden.", "Nutzer einladen");
+        notify(ctx, &t!("hub.no_user_found"), &t!("invite.caption"));
         return;
     }
     let labels: Vec<String> = results
@@ -1430,7 +1424,7 @@ pub fn hub_invite_user(ctx: &Ctx) {
         .map(|u| format!("{} ({})", u.display_name, u.username))
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let pick = SingleChoiceDialog::builder(&ctx.ui.frame, "Nutzer wählen:", "Nutzer einladen", &label_refs).build();
+    let pick = SingleChoiceDialog::builder(&ctx.ui.frame, &t!("hub_admin.pick_user"), &t!("invite.caption"), &label_refs).build();
     if pick.show_modal() != ID_OK {
         return;
     }
@@ -1445,14 +1439,11 @@ pub fn hub_invite_user(ctx: &Ctx) {
         .map(|p| p.bio)
         .unwrap_or_default();
     let question = if bio.trim().is_empty() {
-        format!("{} ({}) zu „{}\" einladen?", u.display_name, u.username, server.name)
+        t!("invite.confirm", name = u.display_name, user = u.username, server = server.name).to_string()
     } else {
-        format!(
-            "{} ({}) zu „{}\" einladen?\n\nÜber die Person: {}",
-            u.display_name, u.username, server.name, bio
-        )
+        t!("invite.confirm_bio", name = u.display_name, user = u.username, server = server.name, bio = bio).to_string()
     };
-    let ok = MessageDialog::builder(&ctx.ui.frame, &question, "Nutzer einladen")
+    let ok = MessageDialog::builder(&ctx.ui.frame, &question, &t!("invite.caption"))
         .with_style(MessageDialogStyle::YesNo)
         .build()
         .show_modal()
@@ -1462,45 +1453,35 @@ pub fn hub_invite_user(ctx: &Ctx) {
     }
     match fresh_access_token().and_then(|t| crate::hub::create_invite(&t, &server.id, &u.central_uid)) {
         Ok(_) => {
-            ctx.ui.append_hub_log(&format!(
-                "{} ({}) zu „{}\" eingeladen.",
-                u.display_name, u.username, server.name
-            ));
-            notify(
-                ctx,
-                &format!(
-                    "{} wurde eingeladen. Die Einladung erscheint dort unter „Einladungen…\" und muss angenommen werden.",
-                    u.display_name
-                ),
-                "Nutzer einladen",
-            );
+            ctx.ui.append_hub_log(&t!("invite.sent_log", name = u.display_name, user = u.username, server = server.name));
+            notify(ctx, &t!("invite.sent", name = u.display_name), &t!("invite.caption"));
         }
-        Err(e) => notify(ctx, &format!("Einladung fehlgeschlagen: {}", e), "Nutzer einladen"),
+        Err(e) => notify(ctx, &t!("invite.failed", error = e), &t!("invite.caption")),
     }
 }
 
 /// Admin: alle Server des Hubs ansehen und das Datei-Limit setzen.
 pub fn hub_admin_servers(ctx: &Ctx) {
     if !hub_is_admin() {
-        notify(ctx, "Nur für Hub-Admins.", "Admin");
+        notify(ctx, &t!("hub_admin.only_admins"), &t!("hub_admin.caption"));
         return;
     }
-    let dlg = Dialog::builder(&ctx.ui.frame, "Admin — Server").with_size(560, 440).build();
+    let dlg = Dialog::builder(&ctx.ui.frame, &t!("hub_admin.servers_title")).with_size(560, 440).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
     v.add(
         &StaticText::builder(&dlg)
-            .with_label("Server auswählen und Datei-Limit setzen (private Server zeigen nur den Namen):")
+            .with_label(&t!("hub_admin.servers_hint"))
             .build(),
         0,
         SizerFlag::All,
         6,
     );
     let list = ListBox::builder(&dlg).build();
-    crate::ui::set_a11y_name(&list, "Alle Server im Hub");
+    crate::ui::set_a11y_name(&list, &t!("hub_admin.servers_list"));
     v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
-    let quota_btn = Button::builder(&dlg).with_label("Datei-Limit setzen…").build();
-    let refresh_btn = Button::builder(&dlg).with_label("Aktualisieren").build();
-    let close_btn = Button::builder(&dlg).with_label("Schließen").build();
+    let quota_btn = Button::builder(&dlg).with_label(&t!("hub_admin.set_quota")).build();
+    let refresh_btn = Button::builder(&dlg).with_label(&t!("common.refresh")).build();
+    let close_btn = Button::builder(&dlg).with_label(&t!("common.close")).build();
     v.add_sizer(&ui::button_row(&[&quota_btn, &refresh_btn, &close_btn]), 0, SizerFlag::Expand | SizerFlag::All, 6);
     dlg.set_sizer(v, true);
 
@@ -1537,12 +1518,12 @@ pub fn hub_admin_servers(ctx: &Ctx) {
             };
             let Some(txt) = ask_text_on(
                 &frame,
-                &format!("Datei-Limit für „{}\" in MB (0 = kein Limit):", s.name),
-                "Datei-Limit",
+                &t!("hub_admin.quota_prompt", name = s.name),
+                &t!("hub_admin.quota_title"),
                 &current_mb,
             ) else { return };
             let Ok(mb) = txt.trim().parse::<i64>() else {
-                MessageDialog::builder(&frame, "Bitte eine Zahl eingeben.", "Datei-Limit").build().show_modal();
+                MessageDialog::builder(&frame, &t!("common.enter_number"), &t!("hub_admin.quota_title")).build().show_modal();
                 return;
             };
             match fresh_access_token()
@@ -1550,7 +1531,7 @@ pub fn hub_admin_servers(ctx: &Ctx) {
             {
                 Ok(()) => fill(),
                 Err(e) => {
-                    MessageDialog::builder(&frame, &format!("Limit setzen fehlgeschlagen: {}", e), "Datei-Limit")
+                    MessageDialog::builder(&frame, &t!("hub_admin.quota_failed", error = e), &t!("hub_admin.quota_title"))
                         .build()
                         .show_modal();
                 }
@@ -1572,27 +1553,28 @@ pub fn hub_admin_servers(ctx: &Ctx) {
 /// Listeneintrag für die Admin-Serverliste (privat = ohne Details).
 fn admin_server_label(s: &crate::hub::ServerInfo) -> String {
     if s.private || !s.is_public {
-        return format!("{} — privat (Details verborgen)", s.name);
+        return t!("hub_admin.server_private", name = s.name).to_string();
     }
     let limit = if s.file_limit_bytes > 0 {
         format!("{} MB", s.file_limit_bytes / (1024 * 1024))
     } else {
-        "kein Limit".to_string()
+        t!("hub_admin.no_limit").to_string()
     };
-    format!(
-        "{} — öffentlich · {}:{} · belegt {} MB von {}",
-        s.name,
-        s.host,
-        s.control_port,
-        s.storage_used_bytes / (1024 * 1024),
-        limit
+    t!(
+        "hub_admin.server_public",
+        name = s.name,
+        host = s.host,
+        port = s.control_port,
+        used = s.storage_used_bytes / (1024 * 1024),
+        limit = limit
     )
+    .to_string()
 }
 
 /// Offene Einladungen laden und einzeln zum Annehmen/Ablehnen anbieten.
 pub fn hub_invites(ctx: &Ctx) {
     if config::load_config().hub.is_none() {
-        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        notify(ctx, &t!("hub.login_first"), &t!("hub.caption"));
         return;
     }
     // Kurzer blockierender Aufruf; die Ja/Nein-Dialoge laufen ohnehin auf dem
@@ -1600,30 +1582,30 @@ pub fn hub_invites(ctx: &Ctx) {
     let invites = match fresh_access_token().and_then(|t| crate::hub::list_invites(&t)) {
         Ok(v) => v,
         Err(e) => {
-            notify(ctx, &format!("Einladungen konnten nicht geladen werden: {}", e), "Server-Hub");
+            notify(ctx, &t!("invites.load_failed", error = e), &t!("hub.caption"));
             return;
         }
     };
     if invites.is_empty() {
-        notify(ctx, "Keine offenen Einladungen.", "Server-Hub");
+        notify(ctx, &t!("invites.none"), &t!("hub.caption"));
         return;
     }
     for inv in invites {
         let dlg = MessageDialog::builder(
             &ctx.ui.frame,
-            &format!("Einladung zu „{}\" annehmen?", inv.server_name),
-            "Einladungen",
+            &t!("invites.accept_prompt", server = inv.server_name),
+            &t!("invites.caption"),
         )
         .with_style(MessageDialogStyle::YesNo)
         .build();
         let accept = dlg.show_modal() == ID_YES;
         match fresh_access_token().and_then(|t| crate::hub::respond_invite(&t, &inv.id, accept)) {
-            Ok(()) => ctx.ui.append_hub_log(&format!(
-                "Einladung zu „{}\" {}.",
-                inv.server_name,
-                if accept { "angenommen" } else { "abgelehnt" }
-            )),
-            Err(e) => ctx.ui.append_hub_log(&format!("Fehler bei Einladung: {}", e)),
+            Ok(()) => ctx.ui.append_hub_log(&if accept {
+                t!("invites.accepted", server = inv.server_name)
+            } else {
+                t!("invites.declined", server = inv.server_name)
+            }),
+            Err(e) => ctx.ui.append_hub_log(&t!("invites.error", error = e)),
         }
     }
     // Neue Mitgliedschaften stehen unter „Meine Server" — dorthin wechseln und
@@ -1634,26 +1616,26 @@ pub fn hub_invites(ctx: &Ctx) {
 /// Anzeigename und Bio bearbeiten.
 pub fn hub_edit_profile(ctx: &Ctx) {
     if config::load_config().hub.is_none() {
-        notify(ctx, "Bitte zuerst im Server-Hub anmelden.", "Server-Hub");
+        notify(ctx, &t!("hub.login_first"), &t!("hub.caption"));
         return;
     }
     // Aktuelles Profil laden (kurzer blockierender Aufruf) und vorausfüllen.
     let prof = match fresh_access_token().and_then(|t| crate::hub::get_my_profile(&t)) {
         Ok(p) => p,
         Err(e) => {
-            notify(ctx, &format!("Profil konnte nicht geladen werden: {}", e), "Server-Hub");
+            notify(ctx, &t!("profile.load_failed", error = e), &t!("hub.caption"));
             return;
         }
     };
     let Some((vals, _)) = form_dialog(
         ctx,
-        "Profil bearbeiten",
-        &[("Anzeigename:", prof.display_name, false), ("Über mich (Bio):", prof.bio, false)],
+        &t!("profile.title"),
+        &[(&*t!("profile.display_name"), prof.display_name, false), (&*t!("profile.bio"), prof.bio, false)],
         None,
     ) else { return };
     let display = vals[0].clone();
     let bio = vals[1].clone();
-    ctx.ui.append_hub_log("Speichere Profil…");
+    ctx.ui.append_hub_log(&t!("profile.saving"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || {
@@ -1662,9 +1644,9 @@ pub fn hub_edit_profile(ctx: &Ctx) {
         })
         .await;
         let m = match r {
-            Ok(Ok(())) => "Profil gespeichert.".to_string(),
-            Ok(Err(e)) => format!("Profil konnte nicht gespeichert werden: {}", e),
-            Err(e) => format!("Fehler: {}", e),
+            Ok(Ok(())) => t!("profile.saved").to_string(),
+            Ok(Err(e)) => t!("profile.save_failed", error = e).to_string(),
+            Err(e) => t!("common.error", error = e).to_string(),
         };
         hub_msg(&ev_tx, m);
     });
@@ -1675,17 +1657,17 @@ pub fn hub_reset_confirm(ctx: &Ctx) {
     let code = ctx.ui.hub_reset_code_in.get_value().trim().to_string();
     let new_pass = ctx.ui.hub_reset_pass_in.get_value();
     if phone.is_empty() || code.is_empty() || new_pass.is_empty() {
-        notify(ctx, "Telefon, Code und neues Passwort sind erforderlich.", "Server-Hub");
+        notify(ctx, &t!("hub.reset_fields_required"), &t!("hub.caption"));
         return;
     }
-    ctx.ui.append_hub_log("Setze neues Passwort…");
+    ctx.ui.append_hub_log(&t!("hub.setting_password"));
     let ev_tx = ctx.ev_tx.clone();
     ctx.rt.spawn(async move {
         let r = tokio::task::spawn_blocking(move || crate::hub::reset_confirm(&phone, &code, &new_pass)).await;
         let m = match r {
-            Ok(Ok(())) => "Passwort geändert. Bitte neu anmelden.".to_string(),
-            Ok(Err(e)) => format!("Passwort-Reset fehlgeschlagen: {}", e),
-            Err(e) => format!("Fehler: {}", e),
+            Ok(Ok(())) => t!("hub.password_changed").to_string(),
+            Ok(Err(e)) => t!("hub.reset_failed", error = e).to_string(),
+            Err(e) => t!("common.error", error = e).to_string(),
         };
         hub_msg(&ev_tx, m);
     });
@@ -1704,7 +1686,7 @@ pub fn send_chat(ctx: &Ctx) {
         (inner.current_room_id, inner.nickname.clone())
     };
     let Some(room_id) = room_id else {
-        status(ctx, "Bitte zuerst einem Raum beitreten.");
+        status(ctx, &t!("chat.join_room_first"));
         return;
     };
     let msg = Message::new(
@@ -1720,12 +1702,12 @@ pub fn send_chat(ctx: &Ctx) {
 
 fn private_message(ctx: &Ctx) {
     let Some(user_id) = selected_user(ctx) else {
-        status(ctx, "Bitte zuerst einen Nutzer im Baum auswählen.");
+        status(ctx, &t!("chat.select_user_first"));
         return;
     };
     let text = ctx.ui.chat_in.get_value().trim().to_string();
     if text.is_empty() {
-        status(ctx, "Privatnachricht: Text zuerst ins Eingabefeld schreiben, dann Strg+P.");
+        status(ctx, &t!("chat.pm_hint"));
         return;
     }
     let msg = Message::new(
@@ -1734,7 +1716,7 @@ fn private_message(ctx: &Ctx) {
     );
     if send_or_status(ctx, msg) {
         let nick = ctx.app.inner.lock().nickname_of(user_id);
-        ctx.ui.append_chat(&format!("[Privat an {}] {}", nick, text));
+        ctx.ui.append_chat(&t!("chat.private_to", name = nick, text = text));
         ctx.ui.chat_in.clear();
     }
 }
@@ -1786,7 +1768,7 @@ fn join_room(ctx: &Ctx, room_id: i64, password: Option<String>) {
         .send_ws(Message::new("file_list", serde_json::json!({ "room_id": room_id })));
 
     let room = ctx.app.inner.lock().room_name(room_id);
-    ctx.ui.append_chat(&format!("* Raum {} beigetreten.", room));
+    ctx.ui.append_chat(&t!("room.joined", room = room));
     rebuild_tree(ctx);
     refresh_status(ctx);
 }
@@ -1802,7 +1784,7 @@ fn join_room_checked(ctx: &Ctx, room_id: i64) {
         .map(|r| r.has_password)
         .unwrap_or(false);
     if has_password {
-        if let Some(pw) = ask_text(ctx, "Passwort für diesen Raum:", "Raum-Passwort", "") {
+        if let Some(pw) = ask_text(ctx, &t!("room.password_prompt"), &t!("room.password_title"), "") {
             join_room(ctx, room_id, Some(pw));
         }
     } else {
@@ -1814,13 +1796,13 @@ fn join_room_checked(ctx: &Ctx, room_id: i64) {
 pub fn join_selected(ctx: &Ctx) {
     match selected_room(ctx) {
         Some(room_id) => join_room_checked(ctx, room_id),
-        None => notify(ctx, "Bitte zuerst einen Raum auswählen.", "Beitreten"),
+        None => notify(ctx, &t!("room.select_first"), &t!("room.join_caption")),
     }
 }
 
 fn leave_room(ctx: &Ctx) {
     let Some(room_id) = ctx.app.inner.lock().current_room_id else {
-        status(ctx, "Du bist in keinem Raum.");
+        status(ctx, &t!("room.not_in_room"));
         return;
     };
     if send_or_status(
@@ -1834,7 +1816,7 @@ fn leave_room(ctx: &Ctx) {
             inner.current_room_password = None;
             inner.current_files.clear();
         }
-        ctx.ui.append_chat(&format!("* Raum {} verlassen.", room));
+        ctx.ui.append_chat(&t!("room.left", room = room));
         rebuild_tree(ctx);
         rebuild_files(ctx);
         refresh_status(ctx);
@@ -1846,7 +1828,8 @@ const DEPTHS: [i64; 3] = [16, 24, 32];
 
 /// Raum-Vorlage: typische Audio-Einstellungen für einen Anwendungsfall.
 struct RoomTemplate {
-    label: &'static str,
+    /// Übersetzungsschlüssel des Vorlagennamens
+    label_key: &'static str,
     sample_rate: i64,
     bit_depth: i64,
     channels: i64,
@@ -1858,11 +1841,11 @@ struct RoomTemplate {
 /// zur freien Konfiguration ein.
 const TEMPLATES: [RoomTemplate; 3] = [
     // Sprachchat in guter Qualität (wie ein Discord-Sprachkanal)
-    RoomTemplate { label: "Discord-Raum (Sprache)", sample_rate: 48000, bit_depth: 16, channels: 1, bitrate_kbps: 64 },
+    RoomTemplate { label_key: "room.template_voice", sample_rate: 48000, bit_depth: 16, channels: 1, bitrate_kbps: 64 },
     // Schmalbandige Sprache wie ein klassisches Telefonat
-    RoomTemplate { label: "Klassisches Telefonat", sample_rate: 8000, bit_depth: 16, channels: 1, bitrate_kbps: 16 },
+    RoomTemplate { label_key: "room.template_phone", sample_rate: 8000, bit_depth: 16, channels: 1, bitrate_kbps: 16 },
     // Musik/Übertragung in Stereo, hohe Qualität
-    RoomTemplate { label: "Radio-Übertragung (Musik)", sample_rate: 48000, bit_depth: 16, channels: 2, bitrate_kbps: 256 },
+    RoomTemplate { label_key: "room.template_radio", sample_rate: 48000, bit_depth: 16, channels: 2, bitrate_kbps: 256 },
 ];
 /// Index der „Erweitert"-Auswahl (nach allen Vorlagen).
 const ADVANCED_IDX: usize = TEMPLATES.len();
@@ -1884,9 +1867,9 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     let (title, name0, max0, sr0, bd0, ch0, br0_kbps, edit) = match &mode {
         RoomMode::Create { parent } => {
             let t = if parent.is_some() {
-                "Unterraum erstellen"
+                t!("room.create_sub_title")
             } else {
-                "Raum erstellen"
+                t!("room.create_title")
             };
             (t, String::new(), 0i64, 48000i64, 16i64, 1i64, 0i64, false)
         }
@@ -1894,7 +1877,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
             let inner = ctx.app.inner.lock();
             match inner.rooms.iter().find(|r| r.id == *room_id) {
                 Some(r) => (
-                    "Raum bearbeiten",
+                    t!("room.edit_title"),
                     r.name.clone(),
                     r.max_users,
                     if r.sample_rate > 0 { r.sample_rate } else { 48000 },
@@ -1903,12 +1886,12 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
                     if r.bitrate > 0 { r.bitrate / 1000 } else { 0 },
                     true,
                 ),
-                None => ("Raum bearbeiten", String::new(), 0, 48000, 16, 1, 0, true),
+                None => (t!("room.edit_title"), String::new(), 0, 48000, 16, 1, 0, true),
             }
         }
     };
 
-    let dialog = Dialog::builder(&ctx.ui.frame, title).build();
+    let dialog = Dialog::builder(&ctx.ui.frame, &title).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
     // Zwei Gruppen: Allgemeines und Audio-Qualität, je ein Formularraster.
     let general = ui::form_grid();
@@ -1928,72 +1911,76 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
 
     let name_in = TextCtrl::builder(&dialog).build();
     name_in.set_value(&name0);
-    ui::set_a11y_name(&name_in, "Raumname");
-    add_row(&dialog, &general, "Name:", &name_in);
+    ui::set_a11y_name(&name_in, &t!("room.name_a11y"));
+    add_row(&dialog, &general, &t!("room.name"), &name_in);
 
     // Passwort ohne Checkbox: gilt, sobald etwas drinsteht.
     let pw_in = TextCtrl::builder(&dialog)
         .with_style(TextCtrlStyle::Password)
         .build();
-    ui::set_a11y_name(&pw_in, "Passwort");
+    ui::set_a11y_name(&pw_in, &t!("room.password_a11y"));
     add_row(
         &dialog,
         &general,
-        if edit {
-            "Passwort (leer = unverändert):"
+        &if edit {
+            t!("room.password_edit")
         } else {
-            "Passwort (leer = keines):"
+            t!("room.password_create")
         },
         &pw_in,
     );
 
     let max_in = TextCtrl::builder(&dialog).build();
     max_in.set_value(&max0.to_string());
-    ui::set_a11y_name(&max_in, "Maximale Nutzerzahl, 0 = unbegrenzt");
-    add_row(&dialog, &general, "Max. Nutzer (0 = ∞):", &max_in);
+    ui::set_a11y_name(&max_in, &t!("room.max_users_a11y"));
+    add_row(&dialog, &general, &t!("room.max_users"), &max_in);
 
     // Vorlagen-Auswahl
     let template_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&template_choice);
     for t in &TEMPLATES {
-        template_choice.append(t.label);
+        template_choice.append(&t!(t.label_key));
     }
-    template_choice.append("Erweitert (frei einstellbar)");
-    ui::set_a11y_name(&template_choice, "Vorlage für die Audio-Qualität");
-    add_row(&dialog, &audio, "Vorlage:", &template_choice);
+    template_choice.append(&t!("room.template_advanced"));
+    ui::set_a11y_name(&template_choice, &t!("room.template_a11y"));
+    add_row(&dialog, &audio, &t!("room.template"), &template_choice);
 
     // Erweiterte Audio-Felder (anfangs ggf. ausgeblendet)
     let rate_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&rate_choice);
     for r in RATES {
         rate_choice.append(&r.to_string());
     }
     rate_choice.set_selection(RATES.iter().position(|&r| r == sr0).unwrap_or(0) as u32);
-    ui::set_a11y_name(&rate_choice, "Samplerate in Hertz");
-    let rate_lbl = add_row(&dialog, &audio, "Samplerate (Hz):", &rate_choice);
+    ui::set_a11y_name(&rate_choice, &t!("audio.sample_rate_a11y"));
+    let rate_lbl = add_row(&dialog, &audio, &t!("audio.sample_rate"), &rate_choice);
 
     let depth_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&depth_choice);
     for d in DEPTHS {
         depth_choice.append(&d.to_string());
     }
     depth_choice.set_selection(DEPTHS.iter().position(|&d| d == bd0).unwrap_or(0) as u32);
-    ui::set_a11y_name(&depth_choice, "Bittiefe");
-    let depth_lbl = add_row(&dialog, &audio, "Bittiefe (Bit):", &depth_choice);
+    ui::set_a11y_name(&depth_choice, &t!("audio.bit_depth_a11y"));
+    let depth_lbl = add_row(&dialog, &audio, &t!("audio.bit_depth"), &depth_choice);
 
     let ch_choice = Choice::builder(&dialog).build();
-    ch_choice.append("Mono");
-    ch_choice.append("Stereo");
+    ui::ignore_mouse_wheel(&ch_choice);
+    ch_choice.append(&t!("audio.mono"));
+    ch_choice.append(&t!("audio.stereo"));
     ch_choice.set_selection(if ch0 >= 2 { 1 } else { 0 });
-    ui::set_a11y_name(&ch_choice, "Kanäle Mono oder Stereo");
-    let ch_lbl = add_row(&dialog, &audio, "Kanäle:", &ch_choice);
+    ui::set_a11y_name(&ch_choice, &t!("audio.channels_a11y"));
+    let ch_lbl = add_row(&dialog, &audio, &t!("audio.channels"), &ch_choice);
 
     let bitrate_in = TextCtrl::builder(&dialog).build();
     bitrate_in.set_value(&br0_kbps.to_string());
-    ui::set_a11y_name(&bitrate_in, "Bitrate in kbit pro Sekunde, 0 = automatisch");
-    let br_lbl = add_row(&dialog, &audio, "Bitrate (kbit/s, 0 = auto):", &bitrate_in);
+    ui::set_a11y_name(&bitrate_in, &t!("audio.bitrate_a11y"));
+    let br_lbl = add_row(&dialog, &audio, &t!("audio.bitrate"), &bitrate_in);
 
-    let gbox = ui::group(&dialog, "Allgemein");
+    let gbox = ui::group(&dialog, &t!("room.group_general"));
     gbox.add_sizer(&general, 0, SizerFlag::Expand | SizerFlag::All, 8);
     v.add_sizer(&gbox, 0, SizerFlag::Expand | SizerFlag::All, 10);
-    let abox = ui::group(&dialog, "Audio-Qualität");
+    let abox = ui::group(&dialog, &t!("room.group_audio"));
     abox.add_sizer(&audio, 0, SizerFlag::Expand | SizerFlag::All, 8);
     v.add_sizer(&abox, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 10);
 
@@ -2031,7 +2018,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
         });
     }
 
-    v.add_sizer(&ui::dialog_buttons(&dialog, "Speichern"), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
+    v.add_sizer(&ui::dialog_buttons(&dialog, &t!("common.save")), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
 
     dialog.set_sizer(v, true);
     dialog.fit();
@@ -2054,7 +2041,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     dialog.destroy();
 
     if name.is_empty() {
-        notify(ctx, "Raumname darf nicht leer sein.", "Raum");
+        notify(ctx, &t!("room.name_empty"), &t!("room.caption"));
         return;
     }
 
@@ -2117,8 +2104,8 @@ fn create_room_at_cursor(ctx: &Ctx) {
             if parent_is_subroom {
                 notify(
                     ctx,
-                    "Hier nicht möglich: Räume dürfen nur eine Ebene unter der Lobby liegen. Unter einem Unterraum lässt sich kein weiterer Raum erstellen.",
-                    "Raum erstellen",
+                    &t!("room.too_deep"),
+                    &t!("room.create_title"),
                 );
                 return;
             }
@@ -2130,20 +2117,20 @@ fn create_room_at_cursor(ctx: &Ctx) {
 fn edit_selected_room(ctx: &Ctx) {
     match selected_room(ctx) {
         Some(room_id) => room_dialog(ctx, RoomMode::Edit { room_id }),
-        None => notify(ctx, "Bitte zuerst einen Raum auswählen.", "Raum bearbeiten"),
+        None => notify(ctx, &t!("room.select_first"), &t!("room.edit_title")),
     }
 }
 
 fn delete_room(ctx: &Ctx) {
     let Some(room_id) = selected_room(ctx) else {
-        status(ctx, "Bitte zuerst einen Raum auswählen.");
+        status(ctx, &t!("room.select_first"));
         return;
     };
     let name = ctx.app.inner.lock().room_name(room_id);
     let dlg = MessageDialog::builder(
         &ctx.ui.frame,
-        &format!("Raum „{}“ wirklich löschen?", name),
-        "Raum löschen",
+        &t!("room.delete_confirm", name = name),
+        &t!("room.delete_title"),
     )
     .with_style(MessageDialogStyle::YesNo)
     .build();
@@ -2181,10 +2168,10 @@ fn toggle_mute(ctx: &Ctx) {
         .app
         .send_ws(Message::new("audio_mute", serde_json::json!({ "muted": muted })));
     set_menu_check(ctx, ui::ID_TOGGLE_MUTE, muted);
-    ctx.ui.append_chat(if muted {
-        "* Mikrofon stummgeschaltet."
+    ctx.ui.append_chat(&if muted {
+        t!("audio_state.mic_muted")
     } else {
-        "* Mikrofon eingeschaltet."
+        t!("audio_state.mic_on")
     });
     refresh_status(ctx);
 }
@@ -2200,10 +2187,10 @@ fn toggle_deafen(ctx: &Ctx) {
         serde_json::json!({ "deafened": deafened }),
     ));
     set_menu_check(ctx, ui::ID_TOGGLE_DEAFEN, deafened);
-    ctx.ui.append_chat(if deafened {
-        "* Ton ausgeschaltet (taub)."
+    ctx.ui.append_chat(&if deafened {
+        t!("audio_state.deafened")
     } else {
-        "* Ton eingeschaltet."
+        t!("audio_state.sound_on")
     });
     refresh_status(ctx);
 }
@@ -2225,10 +2212,10 @@ fn toggle_loopback(ctx: &Ctx) {
         serde_json::json!({ "enabled": false }),
     ));
     set_menu_check(ctx, ui::ID_TOGGLE_LOOPBACK, loopback);
-    ctx.ui.append_chat(if loopback {
-        "* Loopback (Mithören) eingeschaltet."
+    ctx.ui.append_chat(&if loopback {
+        t!("audio_state.loopback_on")
     } else {
-        "* Loopback (Mithören) ausgeschaltet."
+        t!("audio_state.loopback_off")
     });
     refresh_status(ctx);
 }
@@ -2318,7 +2305,7 @@ fn restart_audio(ctx: &Ctx) {
 /// (eingebautes Mikrofon unten/vorne/hinten, Headset, Bluetooth, USB) — cpal
 /// kennt dort nur „Default Device". Sonst die Geräte von cpal.
 fn input_choices() -> Vec<(Option<String>, String)> {
-    let mut out = vec![(None, "Standardgerät".to_string())];
+    let mut out = vec![(None, t!("devices.default").to_string())];
     #[cfg(target_os = "ios")]
     {
         for i in wxdragon::audio_session::inputs() {
@@ -2343,7 +2330,7 @@ fn input_choices() -> Vec<(Option<String>, String)> {
 fn output_choices() -> Vec<(Option<String>, String)> {
     #[cfg(target_os = "ios")]
     {
-        let mut out = vec![(None, "Automatisch".to_string())];
+        let mut out = vec![(None, t!("devices.automatic").to_string())];
         for o in wxdragon::audio_session::outputs() {
             out.push((Some(o.id), o.name));
         }
@@ -2351,7 +2338,7 @@ fn output_choices() -> Vec<(Option<String>, String)> {
     }
     #[allow(unreachable_code)]
     {
-        let mut out = vec![(None, "Standardgerät".to_string())];
+        let mut out = vec![(None, t!("devices.default").to_string())];
         for d in crate::audio::device::list_devices() {
             if d.is_output {
                 out.push((Some(d.name.clone()), d.name));
@@ -2376,12 +2363,10 @@ fn apply_mobile_route(input: Option<&str>, output: Option<&str>) -> Option<Strin
         }
         return match set_preferred_input(input) {
             Ok(()) => None,
-            Err(e) if e == "input-unavailable" => Some(
-                "Das gewählte Mikrofon ist gerade nicht verfügbar — es wird das Standardmikrofon genutzt.".into(),
-            ),
+            Err(e) if e == "input-unavailable" => Some(t!("devices.mic_unavailable").to_string()),
             Err(e) => Some(match e.strip_prefix("input-not-applied:") {
-                Some(actual) => format!("iOS hat das gewählte Mikrofon nicht übernommen und nutzt „{actual}\"."),
-                None => format!("Mikrofon konnte nicht gewählt werden: {e}"),
+                Some(actual) => t!("devices.mic_not_applied", device = actual).to_string(),
+                None => t!("devices.mic_select_failed", error = e).to_string(),
             }),
         };
     }
@@ -2412,23 +2397,25 @@ fn audio_settings(ctx: &Ctx) {
     };
     let lists = std::rc::Rc::new(std::cell::RefCell::new((input_choices(), output_choices())));
 
-    let dialog = Dialog::builder(&ctx.ui.frame, "Audio-Einstellungen").build();
+    let dialog = Dialog::builder(&ctx.ui.frame, &t!("devices.title")).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
 
     // ── Geräte ──
-    let dev_box = StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Geräte").build();
+    let dev_box = StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, &t!("devices.group_devices")).build();
     let grid = ui::form_grid();
     let in_choice = Choice::builder(&dialog).build();
     let out_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&in_choice);
+    ui::ignore_mouse_wheel(&out_choice);
     fill_device_choice(&in_choice, &lists.borrow().0, &cur_in);
     fill_device_choice(&out_choice, &lists.borrow().1, &cur_out);
-    ui::form_row(&dialog, &grid, "Mikrofon:", &in_choice, "Mikrofon");
-    ui::form_row(&dialog, &grid, "Lautsprecher:", &out_choice, "Lautsprecher");
+    ui::form_row(&dialog, &grid, &t!("devices.mic"), &in_choice, &t!("devices.mic_a11y"));
+    ui::form_row(&dialog, &grid, &t!("devices.speaker"), &out_choice, &t!("devices.speaker_a11y"));
     dev_box.add_sizer(&grid, 0, SizerFlag::Expand | SizerFlag::All, 8);
     // „Aktualisieren" füllt die Auswahl neu (z. B. nach Ein-/Ausstöpseln) und
     // behält die aktuelle Wahl, falls das Gerät noch da ist.
-    let refresh_btn = Button::builder(&dialog).with_label("Geräte aktualisieren").build();
-    ui::set_a11y_name(&refresh_btn, "Geräteliste aktualisieren");
+    let refresh_btn = Button::builder(&dialog).with_label(&t!("devices.refresh")).build();
+    ui::set_a11y_name(&refresh_btn, &t!("devices.refresh_a11y"));
     {
         let lists = lists.clone();
         refresh_btn.on_click(move |_| {
@@ -2451,10 +2438,10 @@ fn audio_settings(ctx: &Ctx) {
     #[cfg(target_os = "ios")]
     let stereo_chk = {
         let c = CheckBox::builder(&dialog)
-            .with_label("In Stereo aufnehmen, wenn das Mikrofon es kann")
+            .with_label(&t!("devices.stereo"))
             .build();
         c.set_value(config::load_config().stereo_input);
-        ui::set_a11y_name(&c, "In Stereo aufnehmen, wenn das Mikrofon es kann");
+        ui::set_a11y_name(&c, &t!("devices.stereo"));
         dev_box.add(&c, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 8);
         c
     };
@@ -2463,38 +2450,41 @@ fn audio_settings(ctx: &Ctx) {
     // ── Sprachverarbeitung ──
     let voice = ctx.app.voice_settings();
     let proc_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Sprachverarbeitung").build();
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, &t!("devices.group_processing")).build();
     let prow = ui::form_grid();
     let noise_choice = Choice::builder(&dialog).build();
-    for l in crate::audio::voice::NOISE_LEVELS {
-        noise_choice.append(l);
+    ui::ignore_mouse_wheel(&noise_choice);
+    // Stufen 0–4 wie crate::audio::voice::NOISE_LEVELS (dort ohne i18n).
+    for i in 0..crate::audio::voice::NOISE_LEVELS.len() {
+        let key = format!("devices.noise_{i}");
+        noise_choice.append(&t!(&key));
     }
     noise_choice.set_selection(voice.noise as u32);
-    ui::form_row(&dialog, &prow, "Rauschunterdrückung:", &noise_choice, "Rauschunterdrückung");
+    ui::form_row(&dialog, &prow, &t!("devices.noise"), &noise_choice, &t!("devices.noise_a11y"));
     proc_box.add_sizer(&prow, 0, SizerFlag::Expand | SizerFlag::All, 8);
     let echo_chk = CheckBox::builder(&dialog)
-        .with_label("Echounterdrückung (wenn du ohne Kopfhörer sprichst)")
+        .with_label(&t!("devices.echo"))
         .build();
     echo_chk.set_value(voice.echo);
-    ui::set_a11y_name(&echo_chk, "Echounterdrückung");
+    ui::set_a11y_name(&echo_chk, &t!("devices.echo_a11y"));
     proc_box.add(&echo_chk, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 8);
     let boost_chk = CheckBox::builder(&dialog)
-        .with_label("Mikrofon-Boost (doppelte Lautstärke)")
+        .with_label(&t!("devices.boost"))
         .build();
     boost_chk.set_value(ctx.app.mic_boost());
-    ui::set_a11y_name(&boost_chk, "Mikrofon-Boost, verdoppelt die Mikrofon-Lautstärke");
+    ui::set_a11y_name(&boost_chk, &t!("devices.boost_a11y"));
     proc_box.add(&boost_chk, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 8);
     v.add_sizer(&proc_box, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 10);
 
     // ── Ansagen ──
     let announce_chk = CheckBox::builder(&dialog)
-        .with_label("Server-Ereignisse per Sprachausgabe ansagen")
+        .with_label(&t!("devices.announce"))
         .build();
     announce_chk.set_value(ctx.st.borrow().announce_events);
-    ui::set_a11y_name(&announce_chk, "Server-Ereignisse per Sprachausgabe ansagen");
+    ui::set_a11y_name(&announce_chk, &t!("devices.announce_a11y"));
     v.add(&announce_chk, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 14);
 
-    v.add_sizer(&ui::dialog_buttons(&dialog, "Speichern"), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
+    v.add_sizer(&ui::dialog_buttons(&dialog, &t!("common.save")), 0, SizerFlag::AlignRight | SizerFlag::Right | SizerFlag::Bottom, 6);
 
     dialog.set_sizer(v, true);
     dialog.fit();
@@ -2553,21 +2543,21 @@ fn audio_settings(ctx: &Ctx) {
     let connected = ctx.app.inner.lock().connected;
     if devices_changed && connected {
         #[allow(unused_mut)]
-        let mut text = "Audio-Einstellungen gespeichert, Geräte übernommen.".to_string();
+        let mut text = t!("devices.applied").to_string();
         #[cfg(target_os = "ios")]
         if let Err(e) = wxdragon::audio_session::set_stereo_input(stereo) {
             tracing::warn!("Stereo-Aufnahme konnte nicht eingestellt werden: {e}");
         }
         #[cfg(any(target_os = "ios", target_os = "android"))]
         if let Some(problem) = apply_mobile_route(input.as_deref(), output_choice_id.as_deref()) {
-            text = format!("Audio-Einstellungen gespeichert. {problem}");
+            text = format!("{} {problem}", t!("devices.saved_short"));
         }
         restart_audio(ctx);
-        notify(ctx, &text, "Audio-Einstellungen");
+        notify(ctx, &text, &t!("devices.title"));
     } else if devices_changed {
-        notify(ctx, "Audio-Einstellungen gespeichert. Die Geräte gelten ab der nächsten Verbindung.", "Audio-Einstellungen");
+        notify(ctx, &t!("devices.saved"), &t!("devices.title"));
     } else {
-        notify(ctx, "Audio-Einstellungen gespeichert.", "Audio-Einstellungen");
+        notify(ctx, &t!("devices.saved_short"), &t!("devices.title"));
     }
 }
 
@@ -2582,12 +2572,16 @@ pub fn save_volume(ctx: &Ctx) {
 
 fn stream_file(ctx: &Ctx) {
     if !ctx.app.inner.lock().connected {
-        status(ctx, "Nicht verbunden.");
+        status(ctx, &t!("status.not_connected_dot"));
         return;
     }
     let dlg = FileDialog::builder(&ctx.ui.frame)
-        .with_message("Audiodatei zum Streamen wählen")
-        .with_wildcard("Audiodateien|*.mp3;*.wav;*.flac;*.ogg;*.m4a;*.aac;*.opus;*.aiff|Alle Dateien|*.*")
+        .with_message(&t!("stream.choose_file"))
+        .with_wildcard(&format!(
+            "{}|*.mp3;*.wav;*.flac;*.ogg;*.m4a;*.aac;*.opus;*.aiff|{}|*.*",
+            t!("stream.audio_files"),
+            t!("files.all_files")
+        ))
         .with_style(FileDialogStyle::Open)
         .build();
     if dlg.show_modal() != ID_OK {
@@ -2624,7 +2618,7 @@ fn stream_file(ctx: &Ctx) {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    ctx.ui.append_chat(&format!("* Streame Datei: {}", filename));
+    ctx.ui.append_chat(&t!("stream.streaming", file = filename));
     refresh_status(ctx);
 
     let app = ctx.app.clone();
@@ -2636,7 +2630,7 @@ fn stream_file(ctx: &Ctx) {
             tracing::error!("Audio file stream error: {}", e);
             let _ = ev_tx.send(Message::new(
                 "client_error",
-                serde_json::json!({ "message": format!("Streaming-Fehler: {}", e) }),
+                serde_json::json!({ "message": t!("stream.error", error = e) }),
             ));
         }
         app.inner.lock().stream_shutdown = None;
@@ -2660,7 +2654,7 @@ fn stop_stream(ctx: &Ctx) {
         .store(false, std::sync::atomic::Ordering::Relaxed);
     set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
     if !was {
-        status(ctx, "Es läuft kein Streaming.");
+        status(ctx, &t!("stream.none_running"));
     }
 }
 
@@ -2669,30 +2663,30 @@ fn toggle_pause_stream(ctx: &Ctx) {
     let streaming = ctx.app.inner.lock().stream_shutdown.is_some();
     if !streaming {
         set_menu_check(ctx, ui::ID_PAUSE_STREAM, false);
-        status(ctx, "Es läuft kein Streaming.");
+        status(ctx, &t!("stream.none_running"));
         return;
     }
     use std::sync::atomic::Ordering;
     let paused = !ctx.app.stream_paused.load(Ordering::Relaxed);
     ctx.app.stream_paused.store(paused, Ordering::Relaxed);
     set_menu_check(ctx, ui::ID_PAUSE_STREAM, paused);
-    ctx.ui.append_chat(if paused {
-        "* Streaming pausiert."
+    ctx.ui.append_chat(&if paused {
+        t!("stream.paused_chat")
     } else {
-        "* Streaming fortgesetzt."
+        t!("stream.resumed_chat")
     });
-    status(ctx, if paused { "Streaming pausiert" } else { "Streaming fortgesetzt" });
+    status(ctx, &if paused { t!("stream.paused") } else { t!("stream.resumed") });
 }
 
 // ── Dateien ──
 
 fn upload_file(ctx: &Ctx) {
     let Some(room_id) = ctx.app.inner.lock().current_room_id else {
-        status(ctx, "Bitte zuerst einem Raum beitreten.");
+        status(ctx, &t!("chat.join_room_first"));
         return;
     };
     let dlg = FileDialog::builder(&ctx.ui.frame)
-        .with_message("Datei zum Hochladen wählen")
+        .with_message(&t!("files.choose_upload"))
         .with_style(FileDialogStyle::Open)
         .build();
     if dlg.show_modal() != ID_OK {
@@ -2707,7 +2701,7 @@ fn upload_file(ctx: &Ctx) {
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            status(ctx, &format!("Datei konnte nicht gelesen werden: {}", e));
+            status(ctx, &t!("files.read_failed", error = e));
             return;
         }
     };
@@ -2727,11 +2721,11 @@ fn upload_file(ctx: &Ctx) {
 
 fn download_file(ctx: &Ctx) {
     let Some(file) = selected_file(ctx) else {
-        status(ctx, "Bitte zuerst eine Datei auswählen.");
+        status(ctx, &t!("files.select_first"));
         return;
     };
     let dlg = FileDialog::builder(&ctx.ui.frame)
-        .with_message("Speicherort wählen")
+        .with_message(&t!("files.choose_target"))
         .with_default_file(&file.filename)
         .with_style(FileDialogStyle::Save)
         .build();
@@ -2756,7 +2750,7 @@ fn download_file(ctx: &Ctx) {
         ctx,
         Message::new("file_download", serde_json::json!({ "file_id": file.id })),
     ) {
-        ctx.ui.append_chat(&format!("Lade {} herunter…", file.filename));
+        ctx.ui.append_chat(&t!("files.downloading", file = file.filename));
     }
 }
 
@@ -2764,10 +2758,10 @@ fn download_file(ctx: &Ctx) {
 
 fn kick_user(ctx: &Ctx) {
     let Some(user_id) = selected_user(ctx) else {
-        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        status(ctx, &t!("admin.select_user_first"));
         return;
     };
-    let reason = ask_text(ctx, "Grund (optional):", "Nutzer kicken", "");
+    let reason = ask_text(ctx, &t!("hub_admin.reason_prompt"), &t!("admin.kick_title"), "");
     let mut data = serde_json::json!({ "user_id": user_id });
     if let Some(r) = reason {
         data["reason"] = serde_json::Value::String(r);
@@ -2777,11 +2771,11 @@ fn kick_user(ctx: &Ctx) {
 
 fn ban_user(ctx: &Ctx) {
     let Some(user_id) = selected_user(ctx) else {
-        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        status(ctx, &t!("admin.select_user_first"));
         return;
     };
-    let reason = ask_text(ctx, "Grund (optional):", "Nutzer bannen", "");
-    let duration = ask_text(ctx, "Dauer in Minuten (leer = dauerhaft):", "Nutzer bannen", "");
+    let reason = ask_text(ctx, &t!("hub_admin.reason_prompt"), &t!("admin.ban_title"), "");
+    let duration = ask_text(ctx, &t!("admin.ban_duration"), &t!("admin.ban_title"), "");
     let mut data = serde_json::json!({ "user_id": user_id });
     if let Some(r) = reason {
         data["reason"] = serde_json::Value::String(r);
@@ -2794,11 +2788,11 @@ fn ban_user(ctx: &Ctx) {
 
 fn move_user(ctx: &Ctx) {
     let Some(user_id) = selected_user(ctx) else {
-        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        status(ctx, &t!("admin.select_user_first"));
         return;
     };
     let Some(room_id) = selected_room(ctx) else {
-        status(ctx, "Bitte zuerst den Zielraum auswählen.");
+        status(ctx, &t!("admin.select_target_room"));
         return;
     };
     send_or_status(
@@ -2812,7 +2806,7 @@ fn move_user(ctx: &Ctx) {
 
 fn admin_mute(ctx: &Ctx, muted: bool) {
     let Some(user_id) = selected_user(ctx) else {
-        status(ctx, "Bitte zuerst einen Nutzer auswählen.");
+        status(ctx, &t!("admin.select_user_first"));
         return;
     };
     send_or_status(
@@ -2825,7 +2819,7 @@ fn admin_mute(ctx: &Ctx, muted: bool) {
 }
 
 fn server_message(ctx: &Ctx) {
-    if let Some(text) = ask_text(ctx, "Nachricht an alle:", "Servernachricht", "") {
+    if let Some(text) = ask_text(ctx, &t!("admin.server_msg_prompt"), &t!("admin.server_msg_title"), "") {
         send_or_status(
             ctx,
             Message::new("admin_server_message", serde_json::json!({ "message": text })),
@@ -2849,7 +2843,7 @@ fn ask_secret(ctx: &Ctx, message: &str, caption: &str) -> Option<String> {
 
 /// Ja/Nein-Frage, ob das Konto Administrator sein soll.
 fn ask_admin(ctx: &Ctx, caption: &str) -> bool {
-    let dlg = MessageDialog::builder(&ctx.ui.frame, "Soll dieses Konto Administrator sein?", caption)
+    let dlg = MessageDialog::builder(&ctx.ui.frame, &t!("accounts.ask_admin"), caption)
         .with_style(MessageDialogStyle::YesNo)
         .build();
     dlg.show_modal() == ID_YES
@@ -2879,8 +2873,8 @@ pub fn update_account_menu(ctx: &Ctx) {
             menu.insert(
                 0,
                 ui::ID_ACCOUNTS,
-                "Benutzerkonten &verwalten…",
-                "Konten anzeigen, Rollen ändern, Passwörter zurücksetzen, löschen",
+                &t!("menu.accounts"),
+                &t!("menu.accounts_help"),
                 ItemKind::Normal,
             );
         }
@@ -2895,28 +2889,28 @@ pub fn update_account_menu(ctx: &Ctx) {
 /// Die Liste aktualisiert sich live aus den Server-Antworten, weil der
 /// UI-Timer auch während des modalen Dialogs weiterläuft.
 fn manage_accounts(ctx: &Ctx) {
-    let dialog = Dialog::builder(&ctx.ui.frame, "Benutzerkonten verwalten").build();
+    let dialog = Dialog::builder(&ctx.ui.frame, &t!("accounts.title")).build();
     let v = BoxSizer::builder(Orientation::Vertical).build();
 
     v.add(
         &StaticText::builder(&dialog)
-            .with_label("Konten (Benutzername [Rolle]):")
+            .with_label(&t!("accounts.list_label"))
             .build(),
         0,
         SizerFlag::All,
         6,
     );
     let list = ListBox::builder(&dialog).build();
-    ui::set_a11y_name(&list, "Benutzerkonten");
+    ui::set_a11y_name(&list, &t!("accounts.list_a11y"));
     v.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 6);
 
-    let btn_new = Button::builder(&dialog).with_label("Konto anlegen…").build();
+    let btn_new = Button::builder(&dialog).with_label(&t!("accounts.create_btn")).build();
     let btn_pw = Button::builder(&dialog)
-        .with_label("Passwort zurücksetzen…")
+        .with_label(&t!("accounts.reset_pw_btn"))
         .build();
-    let btn_role = Button::builder(&dialog).with_label("Rolle ändern…").build();
-    let btn_del = Button::builder(&dialog).with_label("Konto löschen…").build();
-    let btn_refresh = Button::builder(&dialog).with_label("Aktualisieren").build();
+    let btn_role = Button::builder(&dialog).with_label(&t!("accounts.role_btn")).build();
+    let btn_del = Button::builder(&dialog).with_label(&t!("accounts.delete_btn")).build();
+    let btn_refresh = Button::builder(&dialog).with_label(&t!("common.refresh")).build();
     #[cfg(any(target_os = "ios", target_os = "android"))]
     btn_del.set_destructive(true);
     v.add_sizer(
@@ -2927,13 +2921,13 @@ fn manage_accounts(ctx: &Ctx) {
     );
 
     let reg_chk = CheckBox::builder(&dialog)
-        .with_label("Selbstregistrierung erlauben")
+        .with_label(&t!("accounts.allow_registration"))
         .build();
     reg_chk.set_value(ctx.st.borrow().registration_open);
-    ui::set_a11y_name(&reg_chk, "Selbstregistrierung erlauben");
+    ui::set_a11y_name(&reg_chk, &t!("accounts.allow_registration"));
     v.add(&reg_chk, 0, SizerFlag::All, 6);
 
-    let close = Button::builder(&dialog).with_label("Schließen").build();
+    let close = Button::builder(&dialog).with_label(&t!("common.close")).build();
     {
         let d = dialog;
         close.on_click(move |_| d.end_modal(ID_OK));
@@ -2955,10 +2949,10 @@ fn manage_accounts(ctx: &Ctx) {
         let ctx = ctx.clone();
         btn_pw.on_click(move |_| {
             let Some((name, _)) = selected_account(&ctx) else {
-                notify(&ctx, "Bitte zuerst ein Konto auswählen.", "Passwort zurücksetzen");
+                notify(&ctx, &t!("accounts.select_first"), &t!("hub_admin.action_reset_pw"));
                 return;
             };
-            if let Some(pw) = ask_secret(&ctx, &format!("Neues Passwort für „{}“:", name), "Passwort zurücksetzen") {
+            if let Some(pw) = ask_secret(&ctx, &t!("accounts.new_pw_for", name = name), &t!("hub_admin.action_reset_pw")) {
                 send_or_status(
                     &ctx,
                     Message::new("account_set_password", serde_json::json!({ "username": name, "password": pw })),
@@ -2970,14 +2964,14 @@ fn manage_accounts(ctx: &Ctx) {
         let ctx = ctx.clone();
         btn_role.on_click(move |_| {
             let Some((name, role)) = selected_account(&ctx) else {
-                notify(&ctx, "Bitte zuerst ein Konto auswählen.", "Rolle ändern");
+                notify(&ctx, &t!("accounts.select_first"), &t!("accounts.role_title"));
                 return;
             };
             let new_role = if role == "admin" { "user" } else { "admin" };
             let q = MessageDialog::builder(
                 &ctx.ui.frame,
-                &format!("Rolle von „{}“ auf „{}“ ändern?", name, new_role),
-                "Rolle ändern",
+                &t!("accounts.role_confirm", name = name, role = new_role),
+                &t!("accounts.role_title"),
             )
             .with_style(MessageDialogStyle::YesNo)
             .build();
@@ -2993,13 +2987,13 @@ fn manage_accounts(ctx: &Ctx) {
         let ctx = ctx.clone();
         btn_del.on_click(move |_| {
             let Some((name, _)) = selected_account(&ctx) else {
-                notify(&ctx, "Bitte zuerst ein Konto auswählen.", "Konto löschen");
+                notify(&ctx, &t!("accounts.select_first"), &t!("accounts.delete_title"));
                 return;
             };
             let q = MessageDialog::builder(
                 &ctx.ui.frame,
-                &format!("Konto „{}“ wirklich löschen?", name),
-                "Konto löschen",
+                &t!("accounts.delete_confirm", name = name),
+                &t!("accounts.delete_title"),
             )
             .with_style(MessageDialogStyle::YesNo)
             .build();
@@ -3041,13 +3035,13 @@ fn manage_accounts(ctx: &Ctx) {
 
 /// „Konto anlegen" aus dem Konten-Dialog.
 fn account_create_new(ctx: &Ctx) {
-    let Some(name) = ask_text(ctx, "Benutzername:", "Konto anlegen", "") else {
+    let Some(name) = ask_text(ctx, &t!("accounts.username"), &t!("accounts.create_title"), "") else {
         return;
     };
-    let Some(pw) = ask_secret(ctx, "Passwort:", "Konto anlegen") else {
+    let Some(pw) = ask_secret(ctx, &t!("accounts.password"), &t!("accounts.create_title")) else {
         return;
     };
-    let role = if ask_admin(ctx, "Konto anlegen") { "admin" } else { "user" };
+    let role = if ask_admin(ctx, &t!("accounts.create_title")) { "admin" } else { "user" };
     send_or_status(
         ctx,
         Message::new(
@@ -3058,10 +3052,10 @@ fn account_create_new(ctx: &Ctx) {
 }
 
 fn change_password(ctx: &Ctx) {
-    let Some(old) = ask_secret(ctx, "Aktuelles Passwort:", "Passwort ändern") else {
+    let Some(old) = ask_secret(ctx, &t!("accounts.current_pw"), &t!("accounts.change_pw_title")) else {
         return;
     };
-    let Some(new) = ask_secret(ctx, "Neues Passwort:", "Passwort ändern") else {
+    let Some(new) = ask_secret(ctx, &t!("accounts.new_pw"), &t!("accounts.change_pw_title")) else {
         return;
     };
     send_or_status(
@@ -3072,24 +3066,6 @@ fn change_password(ctx: &Ctx) {
         ),
     );
 }
-
-const HELP_TEXT: &str = "Kurztasten (unter macOS Cmd statt Strg):\n\n\
-Strg+M  Mikrofon stumm/laut\n\
-Strg+D  Ton aus/an (taub)\n\
-Strg+L  Loopback an/aus\n\
-Strg+S  Audiodatei streamen\n\
-Strg+P  Streaming pausieren/fortsetzen\n\
-Strg+Umschalt+S  Streaming stoppen\n\
-Strg+J  Ausgewähltem Raum beitreten\n\
-Strg+U  Datei hochladen\n\
-Strg+H  Datei herunterladen\n\
-Strg+Umschalt+P  Privatnachricht an ausgewählten Nutzer\n\
-Strg+Q  Beenden\n\n\
-Audio-Kurztasten:\n\
-Strg+Umschalt+Pfeil hoch/runter  Eigenen Stream lauter/leiser (für alle)\n\
-Strg+Umschalt+Pfeil rechts/links  Stream 10 s vor-/zurückspulen\n\
-Strg+Pfeil hoch/runter  Ausgewählten Nutzer lokal lauter/leiser\n\n\
-Im Baum: Pfeil rechts/links klappt auf/zu, Enter tritt einem Raum bei.";
 
 // ── Audio-Kurztasten (Pfeiltasten) ──
 
@@ -3109,14 +3085,14 @@ const SEEK_STEP: i32 = 10;
 /// (skaliert das gesendete Datei-Audio) und das lokale Mithören.
 fn stream_volume_step(ctx: &Ctx, delta_percent: i32) {
     if !ctx.app.inner.lock().streaming_file {
-        announce(ctx, "Es läuft kein Streaming.", true);
-        status(ctx, "Es läuft kein Streaming.");
+        announce(ctx, &t!("stream.none_running"), true);
+        status(ctx, &t!("stream.none_running"));
         return;
     }
     let cur = (ctx.app.stream_volume() * 100.0).round() as i32;
     let next = (cur + delta_percent).clamp(0, 200);
     ctx.app.set_stream_volume(next as f32 / 100.0);
-    let msg = format!("Stream-Lautstärke {} Prozent", next);
+    let msg = t!("hotkeys.stream_volume", percent = next).to_string();
     announce(ctx, &msg, true);
     status(ctx, &msg);
 }
@@ -3124,15 +3100,15 @@ fn stream_volume_step(ctx: &Ctx, delta_percent: i32) {
 /// Im laufenden Datei-Stream vor- oder zurückspulen (Sekunden).
 fn stream_seek(ctx: &Ctx, secs: i32) {
     if !ctx.app.inner.lock().streaming_file {
-        announce(ctx, "Es läuft kein Streaming.", true);
-        status(ctx, "Es läuft kein Streaming.");
+        announce(ctx, &t!("stream.none_running"), true);
+        status(ctx, &t!("stream.none_running"));
         return;
     }
     ctx.app.request_stream_seek(secs);
     let msg = if secs >= 0 {
-        format!("{} Sekunden vor", secs)
+        t!("hotkeys.seek_forward", secs = secs).to_string()
     } else {
-        format!("{} Sekunden zurück", -secs)
+        t!("hotkeys.seek_back", secs = -secs).to_string()
     };
     announce(ctx, &msg, true);
     status(ctx, &msg);
@@ -3142,8 +3118,8 @@ fn stream_seek(ctx: &Ctx, secs: i32) {
 /// ändern.
 fn user_volume_step(ctx: &Ctx, delta_percent: i32) {
     let Some(user_id) = selected_user(ctx) else {
-        announce(ctx, "Kein Nutzer ausgewählt.", true);
-        status(ctx, "Bitte zuerst einen Nutzer im Baum auswählen.");
+        announce(ctx, &t!("hotkeys.no_user"), true);
+        status(ctx, &t!("chat.select_user_first"));
         return;
     };
     let (nick, pct) = {
@@ -3153,7 +3129,7 @@ fn user_volume_step(ctx: &Ctx, delta_percent: i32) {
         inner.user_volumes.insert(user_id, next as f32 / 100.0);
         (inner.nickname_of(user_id), next)
     };
-    let msg = format!("Lautstärke {}: {} Prozent", nick, pct);
+    let msg = t!("hotkeys.user_volume", name = nick, percent = pct).to_string();
     announce(ctx, &msg, true);
     status(ctx, &msg);
 }
@@ -3179,6 +3155,41 @@ pub fn on_hotkey(ctx: &Ctx, key: i32, cmd: bool, shift: bool) -> bool {
     true
 }
 
+// ── Sprache ──
+
+/// Sprache der Oberfläche wählen und speichern. Neue Dialoge und Meldungen
+/// nutzen sie sofort; Menüs und feste Beschriftungen erst nach einem Neustart.
+fn choose_language(ctx: &Ctx) {
+    let current = config::load_config().language;
+    let mut labels: Vec<String> = vec![t!("language.system").to_string()];
+    labels.extend(crate::i18n::LANGUAGES.iter().map(|(_, name)| name.to_string()));
+    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let dlg = SingleChoiceDialog::builder(&ctx.ui.frame, &t!("language.prompt"), &t!("language.title"), &label_refs).build();
+    let preselect = crate::i18n::LANGUAGES
+        .iter()
+        .position(|(code, _)| *code == current)
+        .map(|i| i as i32 + 1)
+        .unwrap_or(0);
+    dlg.set_selection(preselect);
+    if dlg.show_modal() != ID_OK {
+        return;
+    }
+    let sel = dlg.get_selection();
+    if sel < 0 {
+        return;
+    }
+    let language = if sel == 0 {
+        String::new()
+    } else {
+        crate::i18n::LANGUAGES[(sel - 1) as usize].0.to_string()
+    };
+    let mut cfg = config::load_config();
+    cfg.language = language.clone();
+    let _ = config::save_config(&cfg);
+    crate::i18n::init(&language);
+    notify(ctx, &t!("language.restart"), &t!("language.title"));
+}
+
 // ── Menü-Dispatcher ──
 
 pub fn handle_menu(ctx: &Ctx, id: i32) {
@@ -3189,7 +3200,7 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         }
         ui::ID_DISCONNECT => {
             do_disconnect(ctx);
-            ctx.ui.append_chat("Verbindung getrennt.");
+            ctx.ui.append_chat(&t!("connect.disconnected"));
         }
         ui::ID_TOGGLE_MUTE => toggle_mute(ctx),
         ui::ID_TOGGLE_DEAFEN => toggle_deafen(ctx),
@@ -3214,13 +3225,10 @@ pub fn handle_menu(ctx: &Ctx, id: i32) {
         ui::ID_SERVER_MSG => server_message(ctx),
         ui::ID_ACCOUNTS => manage_accounts(ctx),
         ui::ID_CHANGE_PW => change_password(ctx),
+        ui::ID_LANGUAGE => choose_language(ctx),
         ui::ID_CHECK_UPDATE => crate::update::check_for_update(ctx, true),
-        ui::ID_HELP_KEYS => info_box(ctx, HELP_TEXT, "Kurztasten"),
-        ID_ABOUT => info_box(
-            ctx,
-            "TeamConference-Client\nNative Oberfläche mit wxWidgets (wxDragon).",
-            "Über TeamConference",
-        ),
+        ui::ID_HELP_KEYS => info_box(ctx, &t!("help.keys_text"), &t!("help.keys_title")),
+        ID_ABOUT => info_box(ctx, &t!("help.about_text"), &t!("help.about_title")),
         _ => {}
     }
 }

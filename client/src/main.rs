@@ -32,6 +32,9 @@ mod tts {
         }
     }
 }
+// Übersetzungen aus client/locales/*.yml einbetten (siehe i18n.rs). Fehlt ein
+// Schlüssel in einer Sprache, gilt Englisch, dann Deutsch.
+rust_i18n::i18n!("locales", fallback = ["en", "de"]);
 
 mod actions;
 mod app;
@@ -39,6 +42,8 @@ mod audio;
 mod config;
 mod handlers;
 mod hub;
+mod hubsession;
+mod i18n;
 mod net;
 mod protocol;
 mod roomtree;
@@ -96,6 +101,8 @@ fn main() {
 
     let app_state = Arc::new(AppState::new());
     let cfg = config::load_config();
+    // Sprache vor dem Aufbau der Oberfläche setzen.
+    i18n::init(&cfg.language);
     app_state.set_volume(cfg.volume);
     app_state.set_mic_volume(cfg.mic_volume);
     app_state.set_mic_boost(cfg.mic_boost);
@@ -185,6 +192,11 @@ fn main() {
                         Ok(msg) => handlers::handle(&ctx, msg),
                         Err(_) => break,
                     }
+                }
+                // Hub hat die Sitzung abgelehnt (in einem Hintergrund-Thread
+                // festgestellt) → Oberfläche auf „abgemeldet" umstellen.
+                if let Some(reason) = hubsession::take_lost() {
+                    actions::hub_session_lost(&ctx, &reason);
                 }
             });
             timer.start(30, false);

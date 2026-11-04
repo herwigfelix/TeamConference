@@ -23,7 +23,7 @@ TeamConference uses two channels:
 | Type | Direction | Data |
 |------|-----------|------|
 | `auth_login` | C→S | `{ username, password, nickname }` |
-| `auth_response` | S→C | `{ success, user_id, token, server_name, rooms, error? }` |
+| `auth_response` | S→C | `{ success, user_id, token, server_name, rooms, error?, error_code?, error_params? }` |
 
 ### Rooms
 
@@ -117,7 +117,7 @@ eindeutigen `username`.
 | `account_set_role` | C→S | `{ username, role }` (Admin, role = user/admin) |
 | `account_set_registration` | C→S | `{ open: bool }` (Admin) |
 | `password_change` | C→S | `{ old_password, new_password }` (eigener Account) |
-| `account_ack` | S→C | `{ success, message }` |
+| `account_ack` | S→C | `{ success, message, code, params? }` |
 
 ### Registrierung (Selbstregistrierung)
 
@@ -127,6 +127,21 @@ Benutzernamen den Account mit dem angegebenen Passwort und Rolle `user` an und
 meldet ihn direkt an. Existiert der Benutzer bereits, gilt ein falsches Passwort
 weiterhin als Fehler. Anfangswert über `[server] allow_registration` bzw.
 `TC_ALLOW_REGISTRATION` (Standard: aus).
+
+### Meldungen und Fehlercodes (Übersetzung)
+
+Der Server übersetzt keine Texte. Meldungen an den Client (`error`,
+`account_ack`, `file_upload_ack` bei Ablehnung) tragen einen sprachneutralen
+`code` (z. B. `room.full`, `account.deleted`) und optional `params` mit
+Platzhalterwerten (z. B. `{ "username": "bob" }`). `message` enthält zusätzlich
+einen Klartext als Fallback für ältere Clients. Bei `auth_response` heißen die
+Felder `error_code`/`error_params`, `error` bleibt der Klartext.
+
+Der Client zeigt `server.<code>` aus `client/locales/<sprache>.yml` an und setzt
+die `params` in die `%{name}`-Platzhalter ein; unbekannte Codes fallen auf
+`message` zurück. Neue Codes (`usererror::coded`/`coded_with` im Server) daher
+in jeder Sprachdatei unter `server:` ergänzen. Fehler ohne Code (z. B.
+Datenbankfehler) kommen nur mit `message`.
 
 ## Audio Channel (UDP, Binary)
 

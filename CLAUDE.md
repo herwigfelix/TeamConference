@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-TeamConference is a self-hosted TeamSpeak/Mumble-style voice app with an **accessibility-first** client. Two Rust crates: `server/` and `client/`. Replies and UI strings are German.
+TeamConference is a self-hosted TeamSpeak/Mumble-style voice app with an **accessibility-first** client. Two Rust crates: `server/` and `client/`. Replies are German; UI strings are translated (German source, English) — see "Translations" below.
 
 ## Build & run
 
@@ -64,4 +64,5 @@ Module roles: `ui.rs` builds the frame/menus/widgets and holds the `Ui` struct (
 - **Voice processing** (`audio/voice.rs`, crate `sonora`): echo cancellation + noise suppression run on the mic in `capture.rs`; the receive mixer in `udp_client.rs` feeds the speaker signal (minus own loopback) as echo reference into the same processor. Local mixer sources are keyed by source id — loopback (`SOURCE_MIC`) and streamed file (`SOURCE_FILE`) must never share a queue.
 - **iOS microphone choice** goes through `mui::audio_session::inputs()` / `set_preferred_input()` (cpal only sees "Default Device" on iOS).
 - **Accessibility is a core requirement**, not optional: keep everything keyboard-reachable, label controls, and mirror status changes into the chat log so screen-reader users can read them.
+- **Translations**: every user-visible client string goes through `t!("section.key")` (`rust-i18n`, `use rust_i18n::t;`), with texts in `client/locales/de.yml` + `en.yml` (embedded at compile time, `i18n!` in `main.rs`; placeholders `%{name}`). Add each new key to **all** locale files — `cargo test` (`i18n::tests::all_locales_have_the_same_keys`) fails otherwise. A new language = copy `de.yml`, translate, add it to `i18n::LANGUAGES`. Menus/labels are built once at startup, so a language change applies fully after restart. Don't use `t!` in `protocol.rs`/`state.rs`/`net/`/`audio/` — `lib/` compiles those without i18n. The server never sends display text alone: user-facing errors are `usererror::coded("room.full", "fallback")` (or `coded_with` + params) and arrive as `code`/`params`, which the client renders via `server.<code>` (`i18n::server_text`). Keep both sides in sync when adding codes.
 - The active client is `client/`. `client-tauri/` and `legazy client(abandoned)/` are dead and git-ignored — read them only as protocol references, never edit.

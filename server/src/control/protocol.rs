@@ -64,6 +64,29 @@ pub struct AuthResponse {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Sprachneutraler Fehlercode zu `error` (siehe usererror.rs); der Client
+    /// übersetzt ihn, `error` bleibt Fallback für ältere Clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_params: Option<serde_json::Value>,
+}
+
+impl AuthResponse {
+    /// Abgelehnte Anmeldung mit Code, optionalen Platzhalterwerten und Fallback-Text.
+    pub fn rejected(code: &str, params: serde_json::Value, message: &str) -> Self {
+        AuthResponse {
+            success: false,
+            user_id: None,
+            token: None,
+            server_name: None,
+            rooms: None,
+            role: None,
+            error: Some(message.to_string()),
+            error_code: Some(code.to_string()),
+            error_params: params.is_object().then_some(params),
+        }
+    }
 }
 
 // Rooms

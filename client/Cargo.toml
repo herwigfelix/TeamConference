@@ -32,6 +32,10 @@ ureq = { version = "2", features = ["json"] }
 # (Windows via Tolk → NVDA/JAWS, sonst SAPI; macOS AVFoundation; Linux Speech
 # Dispatcher). Läuft nur auf dem UI-Thread (Instanz ist nicht Send auf macOS).
 # Nur Desktop (siehe unten); iOS/Android sagen über VoiceOver/TalkBack an.
+# Übersetzungen (client/locales/*.yml, beim Kompilieren eingebettet) und
+# Erkennung der Systemsprache.
+rust-i18n = "3"
+sys-locale = "0.3"
 
 # Auf Windows zusätzlich das Tolk-Backend aktivieren, damit Ansagen über den
 # aktiven Screenreader (NVDA/JAWS) laufen statt nur über SAPI.
@@ -68,6 +72,9 @@ microphone = "Deine Stimme wird an die Personen in deinem Raum übertragen."
 # objc 0.2-Makros (macOS) prüfen ein altes `cargo-clippy`-Feature.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+[dev-dependencies]
+# Test, dass alle Sprachdateien dieselben Schlüssel haben.
+serde_yaml = "0.9"
 
 [build-dependencies]
 # Bettet unter Windows das Anwendungs-Manifest ein (Common Controls v6, DPI).

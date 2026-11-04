@@ -16,6 +16,7 @@ use crate::user::manager::UserManager;
 use crate::room::manager::RoomManager;
 use crate::audio::file_stream::AudioFileStreamer;
 use crate::audio::udp_server::UdpAudioServer;
+use crate::usererror::{self, error_code, error_msg};
 
 /// True, wenn der angemeldete Nutzer Admin ist.
 async fn is_admin(state: &SharedState, uid: i64) -> bool {
@@ -36,14 +37,24 @@ async fn same_tenant(state: &SharedState, uid: i64, room_id: i64) -> bool {
 
 /// Standard-Antwort bei fehlenden Rechten.
 fn deny() -> Message {
-    Message::new("error", serde_json::json!({ "message": "Insufficient permissions" }))
+    error_code("perm.insufficient", "Insufficient permissions")
 }
 
-/// Bestätigung/Fehler für Account-Operationen.
-fn account_ack(success: bool, message: &str) -> Message {
-    Message::new(
-        "account_ack",
-        serde_json::json!({ "success": success, "message": message }),
+/// Bestätigung/Fehler für Account-Operationen: `code` (+ `params`) übersetzt
+/// der Client, `message` ist der Fallback-Text.
+fn account_ack(success: bool, code: &str, params: serde_json::Value, message: &str) -> Message {
+    let mut data = usererror::fields(code, &params, message);
+    data["success"] = serde_json::json!(success);
+    Message::new("account_ack", data)
+}
+
+/// Fehlschlag einer Konto-Aktion wegen eines internen Fehlers.
+fn account_err(e: impl std::fmt::Display) -> Message {
+    account_ack(
+        false,
+        "account.error",
+        serde_json::json!({ "error": e.to_string() }),
+        &format!("Fehler: {}", e),
     )
 }
 
@@ -156,15 +167,11 @@ pub async fn handle_connection<S>(
                     };
                     if throttled {
                         drop(t);
-                        let resp = AuthResponse {
-                            success: false,
-                            user_id: None,
-                            token: None,
-                            server_name: None,
-                            rooms: None,
-                            role: None,
-                            error: Some("Zu viele Fehlversuche — bitte kurz warten".to_string()),
-                        };
+                        let resp = AuthResponse::rejected(
+                            "auth.too_many_attempts",
+                            serde_json::Value::Null,
+                            "Zu viele Fehlversuche — bitte kurz warten",
+                        );
                         let _ = tx.send(Message::new("auth_response", serde_json::to_value(&resp).unwrap()));
                         continue;
                     }
@@ -240,9 +247,7 @@ pub async fn handle_connection<S>(
                 let old_room = user.room_id;
 
                 if let Err(e) = state.rooms.join_room(uid, req.room_id, req.password.as_deref(), &tenant).await {
-                    let _ = tx.send(Message::new("error", serde_json::json!({
-                        "message": e.to_string()
-                    })));
+                    let _ = tx.send(error_msg(&e));
                     continue;
                 }
 
@@ -294,9 +299,7 @@ pub async fn handle_connection<S>(
                 match state.users.get_user(uid).await {
                     Some(u) if u.is_admin() => {}
                     _ => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": "Insufficient permissions"
-                        })));
+                        let _ = tx.send(deny());
                         continue;
                     }
                 };
@@ -318,9 +321,7 @@ pub async fn handle_connection<S>(
                         state.rooms.broadcast_room_list(&tenant).await;
                     }
                     Err(e) => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": e.to_string()
-                        })));
+                        let _ = tx.send(error_msg(&e));
                     }
                 }
             }
@@ -349,9 +350,7 @@ pub async fn handle_connection<S>(
                 match state.rooms.delete_room(room.id, &tenant).await {
                     Ok(()) => state.rooms.broadcast_room_list(&tenant).await,
                     Err(e) => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": e.to_string()
-                        })));
+                        let _ = tx.send(error_msg(&e));
                     }
                 }
             }
@@ -373,9 +372,7 @@ pub async fn handle_connection<S>(
                 match state.rooms.update_room(req.room_id, req.name, req.password, req.max_users, req.sample_rate, req.bit_depth, req.channels, req.bitrate).await {
                     Ok(()) => state.rooms.broadcast_room_list(&tenant).await,
                     Err(e) => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": e.to_string()
-                        })));
+                        let _ = tx.send(error_msg(&e));
                     }
                 }
             }
@@ -485,11 +482,11 @@ pub async fn handle_connection<S>(
                 };
                 // S2: Upload nur in Räume des eigenen Tenants.
                 if !same_tenant(&state, uid, req.room_id).await {
-                    let _ = tx.send(Message::new("file_upload_ack", serde_json::json!({
-                        "upload_id": "",
-                        "success": false,
-                        "error": "Kein Zugriff auf diesen Raum"
-                    })));
+                    let mut data = usererror::fields("room.no_access", &serde_json::Value::Null, "Kein Zugriff auf diesen Raum");
+                    data["upload_id"] = "".into();
+                    data["success"] = false.into();
+                    data["error"] = "Kein Zugriff auf diesen Raum".into();
+                    let _ = tx.send(Message::new("file_upload_ack", data));
                     continue;
                 }
                 match state.files.start_upload(uid, req).await {
@@ -497,11 +494,11 @@ pub async fn handle_connection<S>(
                         let _ = tx.send(Message::new("file_upload_ack", serde_json::to_value(ack).unwrap()));
                     }
                     Err(e) => {
-                        let _ = tx.send(Message::new("file_upload_ack", serde_json::json!({
-                            "upload_id": "",
-                            "success": false,
-                            "error": e.to_string()
-                        })));
+                        let mut data = usererror::error_fields(&e);
+                        data["upload_id"] = "".into();
+                        data["success"] = false.into();
+                        data["error"] = e.to_string().into();
+                        let _ = tx.send(Message::new("file_upload_ack", data));
                     }
                 }
             }
@@ -570,16 +567,12 @@ pub async fn handle_connection<S>(
                 let db_file = match queries::get_room_file_by_id(&state.db, req.file_id).await {
                     Ok(Some(f)) => f,
                     _ => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": "File not found"
-                        })));
+                        let _ = tx.send(error_code("file.not_found", "File not found"));
                         continue;
                     }
                 };
                 if !same_tenant(&state, uid, db_file.room_id).await {
-                    let _ = tx.send(Message::new("error", serde_json::json!({
-                        "message": "File not found"
-                    })));
+                    let _ = tx.send(error_code("file.not_found", "File not found"));
                     continue;
                 }
                 // S11: Datei blockweise von der Platte lesen statt komplett in den
@@ -610,9 +603,11 @@ pub async fn handle_connection<S>(
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": format!("Download failed: {}", e)
-                        })));
+                        let _ = tx.send(Message::new("error", usererror::fields(
+                            "file.download_failed",
+                            &serde_json::json!({ "error": e.to_string() }),
+                            &format!("Download failed: {}", e),
+                        )));
                     }
                 }
             }
@@ -624,9 +619,7 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
                 if let Err(e) = admin_handler::handle_kick(uid, req, &state.users, &state.rooms).await {
-                    let _ = tx.send(Message::new("error", serde_json::json!({
-                        "message": e.to_string()
-                    })));
+                    let _ = tx.send(error_msg(&e));
                 }
             }
 
@@ -637,9 +630,7 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
                 if let Err(e) = admin_handler::handle_ban(uid, req, &state.users, &state.rooms, &state.db).await {
-                    let _ = tx.send(Message::new("error", serde_json::json!({
-                        "message": e.to_string()
-                    })));
+                    let _ = tx.send(error_msg(&e));
                 }
             }
 
@@ -650,9 +641,7 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
                 if let Err(e) = admin_handler::handle_move(uid, req, &state.users, &state.rooms).await {
-                    let _ = tx.send(Message::new("error", serde_json::json!({
-                        "message": e.to_string()
-                    })));
+                    let _ = tx.send(error_msg(&e));
                 }
             }
 
@@ -663,9 +652,7 @@ pub async fn handle_connection<S>(
                     Err(_) => continue,
                 };
                 if let Err(e) = admin_handler::handle_admin_mute(uid, req, &state.users).await {
-                    let _ = tx.send(Message::new("error", serde_json::json!({
-                        "message": e.to_string()
-                    })));
+                    let _ = tx.send(error_msg(&e));
                 }
             }
 
@@ -716,9 +703,7 @@ pub async fn handle_connection<S>(
                         _ => false,
                     };
                     if !confined {
-                        let _ = tx.send(Message::new("error", serde_json::json!({
-                            "message": "Datei nicht gefunden"
-                        })));
+                        let _ = tx.send(error_code("file.not_found", "Datei nicht gefunden"));
                         continue;
                     }
 
@@ -746,7 +731,7 @@ pub async fn handle_connection<S>(
                 // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
                 // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
                 if state.config.server.multi_tenant {
-                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    let _ = tx.send(account_ack(false, "account.hub_mode", serde_json::Value::Null, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let _ = tx.send(account_list_msg(&state).await);
@@ -762,7 +747,7 @@ pub async fn handle_connection<S>(
                 // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
                 // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
                 if state.config.server.multi_tenant {
-                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    let _ = tx.send(account_ack(false, "account.hub_mode", serde_json::Value::Null, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -772,19 +757,19 @@ pub async fn handle_connection<S>(
                     _ => "user",
                 }.to_string();
                 if username.is_empty() || password.is_empty() {
-                    let _ = tx.send(account_ack(false, "Benutzername und Passwort sind erforderlich"));
+                    let _ = tx.send(account_ack(false, "account.credentials_required", serde_json::Value::Null, "Benutzername und Passwort sind erforderlich"));
                     continue;
                 }
                 if queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten().is_some() {
-                    let _ = tx.send(account_ack(false, "Benutzername existiert bereits"));
+                    let _ = tx.send(account_ack(false, "account.exists", serde_json::Value::Null, "Benutzername existiert bereits"));
                     continue;
                 }
                 match queries::create_user(&state.db, username.clone(), password, role).await {
                     Ok(_) => {
-                        let _ = tx.send(account_ack(true, &format!("Konto '{}' angelegt", username)));
+                        let _ = tx.send(account_ack(true, "account.created", serde_json::json!({ "username": username }), &format!("Konto '{}' angelegt", username)));
                         let _ = tx.send(account_list_msg(&state).await);
                     }
-                    Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                    Err(e) => { let _ = tx.send(account_err(e)); }
                 }
             }
 
@@ -798,22 +783,22 @@ pub async fn handle_connection<S>(
                 // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
                 // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
                 if state.config.server.multi_tenant {
-                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    let _ = tx.send(account_ack(false, "account.hub_mode", serde_json::Value::Null, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
                     Some(target) if target.id == uid => {
-                        let _ = tx.send(account_ack(false, "Das eigene Konto kann nicht gelöscht werden"));
+                        let _ = tx.send(account_ack(false, "account.cannot_delete_self", serde_json::Value::Null, "Das eigene Konto kann nicht gelöscht werden"));
                     }
                     Some(target) => match queries::delete_user(&state.db, target.id).await {
                         Ok(()) => {
-                            let _ = tx.send(account_ack(true, &format!("Konto '{}' gelöscht", username)));
+                            let _ = tx.send(account_ack(true, "account.deleted", serde_json::json!({ "username": username }), &format!("Konto '{}' gelöscht", username)));
                             let _ = tx.send(account_list_msg(&state).await);
                         }
-                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                        Err(e) => { let _ = tx.send(account_err(e)); }
                     },
-                    None => { let _ = tx.send(account_ack(false, "Konto nicht gefunden")); }
+                    None => { let _ = tx.send(account_ack(false, "account.not_found", serde_json::Value::Null, "Konto nicht gefunden")); }
                 }
             }
 
@@ -827,21 +812,21 @@ pub async fn handle_connection<S>(
                 // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
                 // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
                 if state.config.server.multi_tenant {
-                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    let _ = tx.send(account_ack(false, "account.hub_mode", serde_json::Value::Null, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 let password = parsed.data.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 if password.is_empty() {
-                    let _ = tx.send(account_ack(false, "Passwort darf nicht leer sein"));
+                    let _ = tx.send(account_ack(false, "account.password_empty", serde_json::Value::Null, "Passwort darf nicht leer sein"));
                     continue;
                 }
                 match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
                     Some(target) => match queries::update_password(&state.db, target.id, password).await {
-                        Ok(()) => { let _ = tx.send(account_ack(true, &format!("Passwort für '{}' geändert", username))); }
-                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                        Ok(()) => { let _ = tx.send(account_ack(true, "account.password_changed_for", serde_json::json!({ "username": username }), &format!("Passwort für '{}' geändert", username))); }
+                        Err(e) => { let _ = tx.send(account_err(e)); }
                     },
-                    None => { let _ = tx.send(account_ack(false, "Konto nicht gefunden")); }
+                    None => { let _ = tx.send(account_ack(false, "account.not_found", serde_json::Value::Null, "Konto nicht gefunden")); }
                 }
             }
 
@@ -855,7 +840,7 @@ pub async fn handle_connection<S>(
                 // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
                 // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
                 if state.config.server.multi_tenant {
-                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    let _ = tx.send(account_ack(false, "account.hub_mode", serde_json::Value::Null, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let username = parsed.data.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -866,12 +851,12 @@ pub async fn handle_connection<S>(
                 match queries::find_user_by_username(&state.db, username.clone()).await.ok().flatten() {
                     Some(target) => match queries::update_role(&state.db, target.id, role.clone()).await {
                         Ok(()) => {
-                            let _ = tx.send(account_ack(true, &format!("Rolle von '{}' = {}", username, role)));
+                            let _ = tx.send(account_ack(true, "account.role_changed", serde_json::json!({ "username": username, "role": role }), &format!("Rolle von '{}' = {}", username, role)));
                             let _ = tx.send(account_list_msg(&state).await);
                         }
-                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                        Err(e) => { let _ = tx.send(account_err(e)); }
                     },
-                    None => { let _ = tx.send(account_ack(false, "Konto nicht gefunden")); }
+                    None => { let _ = tx.send(account_ack(false, "account.not_found", serde_json::Value::Null, "Konto nicht gefunden")); }
                 }
             }
 
@@ -885,16 +870,20 @@ pub async fn handle_connection<S>(
                 // Im Hub-/Multi-Tenant-Modus ist jeder Sub-Server-Eigentümer Admin, was
                 // sonst globale Rechte-Eskalation erlaubt → Kontoverwaltung sperren.
                 if state.config.server.multi_tenant {
-                    let _ = tx.send(account_ack(false, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
+                    let _ = tx.send(account_ack(false, "account.hub_mode", serde_json::Value::Null, "Kontoverwaltung ist im Hub-Modus nicht verfügbar"));
                     continue;
                 }
                 let open = parsed.data.get("open").and_then(|v| v.as_bool()).unwrap_or(false);
                 match queries::set_registration(&state.db, open).await {
                     Ok(()) => {
-                        let _ = tx.send(account_ack(true, if open { "Registrierung aktiviert" } else { "Registrierung deaktiviert" }));
+                        let _ = tx.send(if open {
+                            account_ack(true, "account.registration_on", serde_json::Value::Null, "Registrierung aktiviert")
+                        } else {
+                            account_ack(true, "account.registration_off", serde_json::Value::Null, "Registrierung deaktiviert")
+                        });
                         let _ = tx.send(account_list_msg(&state).await);
                     }
-                    Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                    Err(e) => { let _ = tx.send(account_err(e)); }
                 }
             }
 
@@ -904,7 +893,7 @@ pub async fn handle_connection<S>(
                 let old = parsed.data.get("old_password").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let new = parsed.data.get("new_password").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 if new.is_empty() {
-                    let _ = tx.send(account_ack(false, "Neues Passwort darf nicht leer sein"));
+                    let _ = tx.send(account_ack(false, "account.new_password_empty", serde_json::Value::Null, "Neues Passwort darf nicht leer sein"));
                     continue;
                 }
                 let username = match state.users.get_user(uid).await {
@@ -914,10 +903,10 @@ pub async fn handle_connection<S>(
                 // Altes Passwort prüfen
                 match queries::authenticate_user(&state.db, username, old).await {
                     Ok(Some(_)) => match queries::update_password(&state.db, uid, new).await {
-                        Ok(()) => { let _ = tx.send(account_ack(true, "Dein Passwort wurde geändert")); }
-                        Err(e) => { let _ = tx.send(account_ack(false, &format!("Fehler: {}", e))); }
+                        Ok(()) => { let _ = tx.send(account_ack(true, "account.own_password_changed", serde_json::Value::Null, "Dein Passwort wurde geändert")); }
+                        Err(e) => { let _ = tx.send(account_err(e)); }
                     },
-                    _ => { let _ = tx.send(account_ack(false, "Altes Passwort ist falsch")); }
+                    _ => { let _ = tx.send(account_ack(false, "account.old_password_wrong", serde_json::Value::Null, "Altes Passwort ist falsch")); }
                 }
             }
 
