@@ -93,6 +93,9 @@ pub struct ClientConfig {
     /// Server-Ereignisse per Sprachausgabe ansagen (Standard: an).
     #[serde(default = "default_true")]
     pub announce_events: bool,
+    /// Sprache der Oberfläche ("de", "en", …); leer = Systemsprache.
+    #[serde(default)]
+    pub language: String,
 }
 
 fn default_port() -> u16 {
@@ -128,6 +131,7 @@ impl Default for ClientConfig {
             mic_volume: default_volume(),
             mic_boost: false,
             announce_events: true,
+            language: String::new(),
         }
     }
 }
@@ -151,6 +155,11 @@ fn config_path() -> PathBuf {
         .join("teamconference");
     std::fs::create_dir_all(&dir).ok();
     dir.join("client.json")
+}
+
+/// Pfad der aktiven client.json (Standardpfad oder `--cfg-path`).
+pub fn config_file_path() -> PathBuf {
+    config_path()
 }
 
 pub fn load_config() -> ClientConfig {

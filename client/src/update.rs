@@ -11,6 +11,8 @@
 //! eigenen Thread; Ergebnisse werden als synthetische `Message` über den
 //! UI-Kanal zurückgereicht und vom Handler auf dem UI-Thread verarbeitet.
 
+use rust_i18n::t;
+
 use crate::app::Ctx;
 use crate::protocol::Message;
 
@@ -89,7 +91,7 @@ pub fn check_for_update(ctx: &Ctx, manual: bool) {
                 let _ = ev_tx.send(Message::new(
                     "client_error",
                     serde_json::json!({
-                        "message": format!("TeamConference ist aktuell (Version {}).", current_version())
+                        "message": t!("update.up_to_date", version = current_version())
                     }),
                 ));
             }
@@ -98,7 +100,7 @@ pub fn check_for_update(ctx: &Ctx, manual: bool) {
             if manual {
                 let _ = ev_tx.send(Message::new(
                     "client_error",
-                    serde_json::json!({ "message": format!("Aktualisierungsprüfung fehlgeschlagen: {}", e) }),
+                    serde_json::json!({ "message": t!("update.check_failed", error = e) }),
                 ));
             }
         }
@@ -119,7 +121,7 @@ fn fetch_latest() -> Result<(String, Option<(String, String)>), String> {
     let tag = json
         .get("tag_name")
         .and_then(|v| v.as_str())
-        .ok_or("Antwort ohne tag_name")?
+        .ok_or_else(|| t!("update.no_tag").to_string())?
         .to_string();
     let mut asset = None;
     if let Some(arr) = json.get("assets").and_then(|v| v.as_array()) {
@@ -152,7 +154,7 @@ pub fn download_update(
         Err(e) => {
             let _ = ev_tx.send(Message::new(
                 "client_error",
-                serde_json::json!({ "message": format!("Download fehlgeschlagen: {}", e) }),
+                serde_json::json!({ "message": t!("update.download_failed", error = e) }),
             ));
         }
     });
@@ -192,12 +194,12 @@ pub fn apply_update_windows(zip_path: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_name = exe
         .file_name()
-        .ok_or("EXE-Name nicht ermittelbar")?
+        .ok_or_else(|| t!("update.no_exe_name").to_string())?
         .to_string_lossy()
         .to_string();
     let target_dir = exe
         .parent()
-        .ok_or("Installationsverzeichnis nicht ermittelbar")?
+        .ok_or_else(|| t!("update.no_install_dir").to_string())?
         .to_path_buf();
 
     let pid = std::process::id();
@@ -216,12 +218,12 @@ pub fn apply_update_windows(zip_path: &str) -> Result<(), String> {
         .status()
         .map_err(|e| e.to_string())?;
     if !status.success() {
-        return Err("Entpacken des Updates fehlgeschlagen".into());
+        return Err(t!("update.unzip_failed").into());
     }
 
     // Verzeichnis mit der neuen EXE finden (das ZIP enthält einen Unterordner).
     let src = find_dir_with(&tmp, &exe_name)
-        .ok_or("Neue Programmdatei im Update-Paket nicht gefunden")?;
+        .ok_or_else(|| t!("update.exe_not_found").to_string())?;
 
     // Updater-Batch schreiben: auf Prozessende warten, kopieren, neu starten.
     let bat = std::env::temp_dir().join(format!("tc-update-{}.bat", pid));

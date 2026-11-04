@@ -58,7 +58,7 @@ impl RoomManager {
             .iter()
             .find(|r| r.is_default)
             .map(|r| r.id)
-            .ok_or_else(|| anyhow::anyhow!("No default room configured"))
+            .ok_or_else(|| crate::usererror::coded("room.no_default", "No default room configured"))
     }
 
     pub async fn join_room(
@@ -73,17 +73,17 @@ impl RoomManager {
         let room = rooms
             .iter()
             .find(|r| r.id == room_id)
-            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+            .ok_or_else(|| crate::usererror::coded("room.not_found", "Room not found"))?;
 
         // Check password
         if let Some(ref hash) = room.password_hash {
             match password {
                 Some(pw) => {
                     if !queries::verify_password(pw, hash) {
-                        anyhow::bail!("Invalid room password");
+                        return Err(crate::usererror::coded("room.wrong_password", "Invalid room password"));
                     }
                 }
-                None => anyhow::bail!("Room requires a password"),
+                None => return Err(crate::usererror::coded("room.password_required", "Room requires a password")),
             }
         }
 
@@ -91,7 +91,7 @@ impl RoomManager {
         if room.max_users > 0 {
             let current = self.users.get_users_in_room(room_id).await.len() as i64;
             if current >= room.max_users {
-                anyhow::bail!("Room is full");
+                return Err(crate::usererror::coded("room.full", "Room is full"));
             }
         }
 

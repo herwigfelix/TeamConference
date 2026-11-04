@@ -10,10 +10,10 @@ pub async fn handle_room_chat(
     users: &Arc<UserManager>,
 ) -> anyhow::Result<()> {
     let sender = users.get_user(user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| crate::usererror::coded("user.not_found", "User not found"))?;
 
     if sender.room_id != Some(chat.room_id) {
-        anyhow::bail!("You are not in this room");
+        return Err(crate::usererror::coded("chat.not_in_room", "You are not in this room"));
     }
 
     let msg = Message::new("chat_room", serde_json::to_value(ChatRoom {
@@ -33,7 +33,7 @@ pub async fn handle_private_chat(
     db: &Arc<Connection>,
 ) -> anyhow::Result<()> {
     let sender = users.get_user(user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| crate::usererror::coded("user.not_found", "User not found"))?;
 
     let msg = Message::new("chat_private", serde_json::to_value(ChatPrivate {
         to_user_id: chat.to_user_id,

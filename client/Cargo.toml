@@ -30,11 +30,19 @@ ureq = { version = "2", features = ["json"] }
 # (Windows via Tolk → NVDA/JAWS, sonst SAPI; macOS AVFoundation; Linux Speech
 # Dispatcher). Läuft nur auf dem UI-Thread (Instanz ist nicht Send auf macOS).
 tts = "0.26"
+# Übersetzungen (client/locales/*.yml, beim Kompilieren eingebettet) und
+# Erkennung der Systemsprache.
+rust-i18n = "3"
+sys-locale = "0.3"
 
 # Auf Windows zusätzlich das Tolk-Backend aktivieren, damit Ansagen über den
 # aktiven Screenreader (NVDA/JAWS) laufen statt nur über SAPI.
 [target.'cfg(windows)'.dependencies]
 tts = { version = "0.26", features = ["tolk"] }
+
+[dev-dependencies]
+# Test, dass alle Sprachdateien dieselben Schlüssel haben.
+serde_yaml = "0.9"
 
 [build-dependencies]
 # Bettet unter Windows das Anwendungs-Manifest ein (Common Controls v6, DPI).

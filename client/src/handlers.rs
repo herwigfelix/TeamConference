@@ -3,6 +3,7 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use rust_i18n::t;
 use wxdragon::prelude::*;
 
 use crate::app::Ctx;
@@ -27,7 +28,7 @@ pub fn rebuild_files(ctx: &Ctx) {
     ctx.ui.files.clear();
     for f in &files {
         let kb = f.size_bytes.saturating_add(1023) / 1024;
-        ctx.ui.files.append(&format!("{} ({} KB)", f.filename, kb));
+        ctx.ui.files.append(&t!("files.entry", file = f.filename, kb = kb));
     }
     ctx.st.borrow_mut().files = files;
 }
@@ -45,25 +46,22 @@ pub fn rebuild_server_list(ctx: &Ctx) {
 pub fn refresh_status(ctx: &Ctx) {
     let inner = ctx.app.inner.lock();
     if !inner.connected {
-        ctx.ui.set_status("Nicht verbunden");
+        ctx.ui.set_status(&t!("status.not_connected"));
         return;
     }
-    let server = inner.server_name.clone().unwrap_or_else(|| "Server".into());
+    let server = inner.server_name.clone().unwrap_or_else(|| t!("status.server").to_string());
     let room = inner
         .current_room_id
         .map(|id| inner.room_name(id))
-        .unwrap_or_else(|| "kein Raum".into());
-    let mic = if inner.muted { "stumm" } else { "an" };
-    let ton = if inner.deafened { "aus" } else { "an" };
-    let mut s = format!(
-        "Verbunden mit {} | Raum: {} | Mikrofon: {} | Ton: {}",
-        server, room, mic, ton
-    );
+        .unwrap_or_else(|| t!("status.no_room").to_string());
+    let mic = if inner.muted { t!("status.mic_muted") } else { t!("status.state_on") };
+    let ton = if inner.deafened { t!("status.state_off") } else { t!("status.state_on") };
+    let mut s = t!("status.connected", server = server, room = room, mic = mic, sound = ton).to_string();
     if inner.loopback {
-        s.push_str(" | Loopback an");
+        s.push_str(&t!("status.loopback_on"));
     }
     if inner.streaming_file {
-        s.push_str(" | Streaming läuft");
+        s.push_str(&t!("status.streaming"));
     }
     drop(inner);
     ctx.ui.set_status(&s);
@@ -75,19 +73,19 @@ pub fn handle(ctx: &Ctx, msg: Message) {
     match msg.msg_type.as_str() {
         "auth_response" => match serde_json::from_value::<AuthResponse>(msg.data) {
             Ok(resp) if resp.success => {
-                let server = resp.server_name.unwrap_or_else(|| "Server".into());
+                let server = resp.server_name.unwrap_or_else(|| t!("status.server").to_string());
                 ui.frame.set_title(&format!("TeamConference — {}", server));
                 ui.show_main(true);
                 // War dies eine erfolgreiche Wiederverbindung? Dann Reconnect-
                 // Zustand beenden und ggf. den vorherigen Raum erneut betreten.
                 let reconnect = ctx.st.borrow_mut().reconnect.take();
                 if let Some(rc) = reconnect {
-                    ui.append_chat("Verbindung wiederhergestellt.");
+                    ui.append_chat(&t!("reconnect.restored"));
                     if let Some(rid) = rc.room_id {
                         crate::actions::rejoin_room(ctx, rid, rc.room_password);
                     }
                 } else {
-                    ui.append_chat(&format!("Verbunden mit {}.", server));
+                    ui.append_chat(&t!("connect.connected_to", server = server));
                 }
                 rebuild_tree(ctx);
                 rebuild_files(ctx);
@@ -98,11 +96,11 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 ui.rooms_tree.set_focus();
             }
             Ok(resp) => {
-                let err = resp.error.unwrap_or_else(|| "Unbekannter Fehler".into());
+                let err = crate::i18n::server_error(&resp.error_code, &resp.error_params, resp.error.as_deref());
                 crate::actions::do_disconnect(ctx);
-                crate::actions::notify(ctx, &format!("Anmeldung fehlgeschlagen: {}", err), "Verbinden");
+                crate::actions::notify(ctx, &t!("connect.login_failed", error = err), &t!("connect.caption"));
             }
-            Err(e) => crate::actions::notify(ctx, &format!("Ungültige Serverantwort: {}", e), "Verbinden"),
+            Err(e) => crate::actions::notify(ctx, &t!("connect.invalid_response", error = e), &t!("connect.caption")),
         },
 
         "connection_lost" => {
@@ -120,17 +118,17 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .data
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Verbindung fehlgeschlagen")
-                .to_string();
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("connect.failed").to_string());
             if ctx.st.borrow().reconnect.is_some() {
                 // Laufender Wiederverbindungsversuch → nächsten Versuch planen.
-                ui.append_chat(&format!("Wiederverbindung fehlgeschlagen: {}", text));
+                ui.append_chat(&t!("reconnect.failed_with", error = text));
                 crate::actions::schedule_reconnect(ctx);
             } else {
                 // Erstverbindung gescheitert → sauber trennen und melden.
                 crate::actions::do_disconnect(ctx);
                 ui.append_chat(&text);
-                crate::actions::notify(ctx, &text, "Verbinden");
+                crate::actions::notify(ctx, &text, &t!("connect.caption"));
             }
         }
 
@@ -140,8 +138,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .data
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Unbekannter Fehler")
-                .to_string();
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("common.unknown_error").to_string());
             ui.append_chat(&text);
             crate::actions::notify(ctx, &text, "TeamConference");
         }
@@ -156,7 +154,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .to_string();
             ui.append_hub_log(&text);
             crate::actions::update_hub_view(ctx);
-            crate::actions::notify(ctx, &text, "Server-Hub");
+            crate::actions::notify(ctx, &text, &t!("hub.caption"));
         }
 
         // Server-Hub: Verzeichnis neu laden (nach Login/Anlegen/Bearbeiten/Löschen).
@@ -192,26 +190,26 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 } else {
                     format!("{} — {}", s.name, s.description)
                 };
-                label.push_str(if s.is_public { " · öffentlich" } else { " · privat" });
+                label.push_str(&if s.is_public { t!("hub_list.public") } else { t!("hub_list.private") });
                 if !my_uid.is_empty() && s.owner_uid == my_uid {
-                    label.push_str(" · eigener Server");
+                    label.push_str(&t!("hub_list.own"));
                 } else if mine_view {
-                    label.push_str(" · Mitglied");
+                    label.push_str(&t!("hub_list.member"));
                 }
                 ui.hub_servers.append(&label);
             }
             if servers.is_empty() {
-                ui.append_hub_log(if mine_view {
-                    "Keine eigenen Server und keine Mitgliedschaften."
+                ui.append_hub_log(&if mine_view {
+                    t!("hub_list.none_mine")
                 } else {
-                    "Keine öffentlichen Server gefunden."
+                    t!("hub_list.none_public")
                 });
             } else {
-                ui.append_hub_log(&format!(
-                    "{} Server geladen ({}).",
-                    servers.len(),
-                    if mine_view { "meine Server" } else { "öffentliches Verzeichnis" }
-                ));
+                ui.append_hub_log(&if mine_view {
+                    t!("hub_list.loaded_mine", count = servers.len())
+                } else {
+                    t!("hub_list.loaded_public", count = servers.len())
+                });
             }
             ctx.st.borrow_mut().hub_servers = servers;
         }
@@ -223,12 +221,12 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             let filename = msg.data.get("filename").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let q = MessageDialog::builder(
                 &ui.frame,
-                &format!(
-                    "Eine neue Version ({}) ist verfügbar. Du nutzt {}. Jetzt herunterladen?",
-                    version,
-                    crate::update::current_version()
+                &t!(
+                    "update.available",
+                    version = version,
+                    current = crate::update::current_version()
                 ),
-                "Aktualisierung verfügbar",
+                &t!("update.available_title"),
             )
             .with_style(MessageDialogStyle::YesNo)
             .build();
@@ -237,7 +235,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                     // Kein passendes Paket gefunden → Release-Seite öffnen.
                     crate::update::open_path(&crate::update::releases_page());
                 } else {
-                    ui.append_chat("Lade Aktualisierung herunter…");
+                    ui.append_chat(&t!("update.downloading"));
                     crate::update::download_update(ctx.ev_tx.clone(), url, filename);
                 }
             }
@@ -255,9 +253,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                     Ok(()) => {
                         crate::actions::notify(
                             ctx,
-                            "Die Aktualisierung wird jetzt eingespielt. TeamConference \
-                             schließt sich kurz und startet danach automatisch neu.",
-                            "Aktualisierung",
+                            &t!("update.applying"),
+                            &t!("update.title"),
                         );
                         // Prozess beenden, damit der Updater die Dateien ersetzen kann.
                         std::process::exit(0);
@@ -266,12 +263,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                         // Fallback: Paket nur öffnen, manuell installieren.
                         crate::actions::notify(
                             ctx,
-                            &format!(
-                                "Automatisches Einspielen fehlgeschlagen ({}).\n\nDas \
-                                 heruntergeladene Paket wird zum manuellen Installieren geöffnet:\n{}",
-                                e, path
-                            ),
-                            "Aktualisierung",
+                            &t!("update.apply_failed", error = e, path = path),
+                            &t!("update.title"),
                         );
                         crate::update::open_path(&path);
                     }
@@ -282,11 +275,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
             {
                 crate::actions::notify(
                     ctx,
-                    &format!(
-                        "Aktualisierung heruntergeladen:\n{}\n\nDie Datei wird zum Installieren geöffnet.",
-                        path
-                    ),
-                    "Aktualisierung",
+                    &t!("update.downloaded", path = path),
+                    &t!("update.title"),
                 );
                 crate::update::open_path(&path);
             }
@@ -298,7 +288,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .stream_paused
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             crate::actions::set_menu_check(ctx, crate::ui::ID_PAUSE_STREAM, false);
-            ui.append_chat("Datei-Streaming beendet.");
+            ui.append_chat(&t!("stream.finished"));
             refresh_status(ctx);
         }
 
@@ -328,7 +318,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 };
                 rebuild_tree(ctx);
                 if announce {
-                    let line = format!("{} hat den Raum {} betreten.", user.nickname, room_name);
+                    let line = t!("events.room_joined", name = user.nickname, room = room_name).to_string();
                     ui.append_chat(&format!("* {}", line));
                     crate::actions::announce_event(ctx, &line);
                 }
@@ -350,7 +340,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 };
                 rebuild_tree(ctx);
                 if announce {
-                    let line = format!("{} hat den Raum {} verlassen.", nick, room_name);
+                    let line = t!("events.room_left", name = nick, room = room_name).to_string();
                     ui.append_chat(&format!("* {}", line));
                     crate::actions::announce_event(ctx, &line);
                 }
@@ -364,8 +354,9 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .data
                 .get("nickname")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Jemand");
-            let line = format!("{} hat den Server betreten.", nick);
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("events.someone").to_string());
+            let line = t!("events.server_joined", name = nick).to_string();
             ui.append_chat(&format!("* {}", line));
             crate::actions::announce_event(ctx, &line);
         }
@@ -375,8 +366,9 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .data
                 .get("nickname")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Jemand");
-            let line = format!("{} hat den Server verlassen.", nick);
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("events.someone").to_string());
+            let line = t!("events.server_left", name = nick).to_string();
             ui.append_chat(&format!("* {}", line));
             crate::actions::announce_event(ctx, &line);
         }
@@ -387,7 +379,8 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .get("from_user")
                 .and_then(|u| u.get("nickname"))
                 .and_then(|n| n.as_str())
-                .unwrap_or("Unbekannt");
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("events.unknown").to_string());
             let text = msg.data.get("message").and_then(|m| m.as_str()).unwrap_or("");
             let room = msg
                 .data
@@ -407,14 +400,15 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .get("from_user")
                 .and_then(|u| u.get("nickname"))
                 .and_then(|n| n.as_str())
-                .unwrap_or("Unbekannt");
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("events.unknown").to_string());
             let text = msg.data.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            ui.append_chat(&format!("[Privat] {}: {}", nick, text));
+            ui.append_chat(&t!("chat.private_from", name = nick, text = text));
         }
 
         "chat_server" => {
             let text = msg.data.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            ui.append_chat(&format!("[Server] {}", text));
+            ui.append_chat(&t!("chat.server", text = text));
         }
 
         "audio_user_state" => {
@@ -442,14 +436,24 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         }
 
         "file_upload_ack" => {
+            // Grund einer Ablehnung: Code → übersetzt, sonst Klartext des Servers.
+            let reason = if msg.data.get("code").is_some() {
+                crate::i18n::server_text(&msg.data)
+            } else {
+                msg.data.get("error").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
             if let Ok(ack) = serde_json::from_value::<FileUploadAck>(msg.data) {
                 let pending = ctx.app.inner.lock().pending_upload.take();
                 if !ack.success {
-                    ui.append_chat("Upload vom Server abgelehnt.");
+                    if reason.is_empty() {
+                        ui.append_chat(&t!("files.upload_rejected"));
+                    } else {
+                        ui.append_chat(&t!("files.upload_rejected_reason", reason = reason));
+                    }
                     return;
                 }
                 if let Some(upload) = pending {
-                    ui.append_chat(&format!("Lade {} hoch…", upload.filename));
+                    ui.append_chat(&t!("files.uploading", file = upload.filename));
                     let app = ctx.app.clone();
                     let ev_tx = ctx.ev_tx.clone();
                     ctx.rt.spawn(async move {
@@ -482,7 +486,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                         }
                         let _ = ev_tx.send(Message::new(
                             "client_error",
-                            serde_json::json!({ "message": format!("Upload von {} abgeschlossen.", upload.filename) }),
+                            serde_json::json!({ "message": t!("files.upload_done", file = upload.filename) }),
                         ));
                     });
                 }
@@ -494,7 +498,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 let decoded = match BASE64.decode(data.data.as_bytes()) {
                     Ok(d) => d,
                     Err(e) => {
-                        ui.append_chat(&format!("Download-Fehler (Base64): {}", e));
+                        ui.append_chat(&t!("files.download_error", error = e));
                         return;
                     }
                 };
@@ -513,9 +517,9 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 };
                 if let Some((path, buf)) = finished {
                     match std::fs::write(&path, &buf) {
-                        Ok(()) => ui.append_chat(&format!("Datei gespeichert: {}", path.display())),
+                        Ok(()) => ui.append_chat(&t!("files.saved", path = path.display())),
                         Err(e) => {
-                            ui.append_chat(&format!("Datei konnte nicht gespeichert werden: {}", e))
+                            ui.append_chat(&t!("files.save_failed", error = e))
                         }
                     }
                 }
@@ -525,8 +529,11 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         "stream_file_status" => {
             if let Ok(st) = serde_json::from_value::<StreamFileStatus>(msg.data) {
                 let nick = ctx.app.inner.lock().nickname_of(st.user_id);
-                let verb = if st.playing { "spielt" } else { "stoppte" };
-                ui.append_chat(&format!("* {} {} {}", nick, verb, st.filename));
+                ui.append_chat(&if st.playing {
+                    t!("events.stream_playing", name = nick, file = st.filename)
+                } else {
+                    t!("events.stream_stopped", name = nick, file = st.filename)
+                });
             }
         }
 
@@ -535,9 +542,10 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .data
                 .get("reason")
                 .and_then(|r| r.as_str())
-                .unwrap_or("kein Grund angegeben");
-            ui.append_chat(&format!("Du wurdest vom Server geworfen: {}", reason));
-            ui.set_status("Vom Server geworfen");
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("events.no_reason").to_string());
+            ui.append_chat(&t!("events.kicked", reason = reason));
+            ui.set_status(&t!("events.kicked_status"));
         }
 
         "user_banned" | "banned" => {
@@ -545,9 +553,10 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                 .data
                 .get("reason")
                 .and_then(|r| r.as_str())
-                .unwrap_or("kein Grund angegeben");
-            ui.append_chat(&format!("Du wurdest gebannt: {}", reason));
-            ui.set_status("Vom Server gebannt");
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t!("events.no_reason").to_string());
+            ui.append_chat(&t!("events.banned", reason = reason));
+            ui.set_status(&t!("events.banned_status"));
         }
 
         "user_moved" | "moved" => {
@@ -560,7 +569,7 @@ pub fn handle(ctx: &Ctx, msg: Message) {
                     inner.current_room_password = None;
                 }
                 let name = ctx.app.inner.lock().room_name(rid);
-                ui.append_chat(&format!("* Du wurdest in den Raum {} verschoben.", name));
+                ui.append_chat(&t!("events.moved", room = name));
                 rebuild_tree(ctx);
                 refresh_status(ctx);
                 let _ = ctx
@@ -571,18 +580,13 @@ pub fn handle(ctx: &Ctx, msg: Message) {
 
         "account_ack" => {
             let success = msg.data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-            let text = msg
-                .data
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("")
-                .to_string();
-            let prefix = if success { "Konten" } else { "Konten-Fehler" };
+            let text = crate::i18n::server_text(&msg.data);
+            let prefix = if success { t!("accounts.prefix") } else { t!("accounts.prefix_error") };
             ui.set_status(&format!("{}: {}", prefix, text));
             ui.append_chat(&format!("[{}] {}", prefix, text));
             // Bei offenem Konten-Dialog für Screenreader-Nutzer rückmelden.
             if ctx.st.borrow().account_dialog.is_some() {
-                crate::actions::notify(ctx, &text, prefix);
+                crate::actions::notify(ctx, &text, &prefix);
             }
         }
 
@@ -617,14 +621,13 @@ pub fn handle(ctx: &Ctx, msg: Message) {
         }
 
         "error" => {
-            let text = msg
-                .data
-                .get("message")
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| msg.data.to_string());
-            ui.set_status(&format!("Fehler: {}", text));
-            ui.append_chat(&format!("Fehler: {}", text));
+            let text = if msg.data.get("message").is_some() || msg.data.get("code").is_some() {
+                crate::i18n::server_text(&msg.data)
+            } else {
+                msg.data.to_string()
+            };
+            ui.set_status(&t!("common.error", error = text));
+            ui.append_chat(&t!("common.error", error = text));
         }
 
         other => tracing::debug!("Unbehandelter Servernachrichtentyp: {}", other),

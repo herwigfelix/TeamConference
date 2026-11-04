@@ -6,6 +6,8 @@ use wxdragon::accessible::{AccStatus, AccessibleImpl};
 use wxdragon::prelude::*;
 use wxdragon::widgets::simplebook::SimpleBook;
 
+use rust_i18n::t;
+
 /// Liefert einem ansonsten namenlosen Bedienelement (Eingabefeld, Checkbox)
 /// einen stabilen Accessible-Namen. wxWidgets' Standard-`GetName` nutzt das
 /// dynamische Label (bei TextCtrl den Inhalt), weshalb leere Felder sonst nur
@@ -63,6 +65,8 @@ pub const ID_ACCOUNTS: i32 = ID_HIGHEST + 23;
 pub const ID_CHANGE_PW: i32 = ID_HIGHEST + 29;
 // Auto-Updater: nach Aktualisierung suchen
 pub const ID_CHECK_UPDATE: i32 = ID_HIGHEST + 33;
+// Sprache der Oberfläche wählen
+pub const ID_LANGUAGE: i32 = ID_HIGHEST + 34;
 
 /// Alle Widget-Handles der Oberfläche. Widgets sind Copy → frei in Closures kopierbar.
 #[derive(Clone, Copy)]
@@ -159,7 +163,7 @@ impl Ui {
 
         StatusBar::builder(&frame)
             .with_fields_count(1)
-            .add_initial_text(0, "Nicht verbunden")
+            .add_initial_text(0, &t!("status.not_connected"))
             .build();
 
         // Reiter (Notebook) für die Vor-Verbindungs-Ansicht.
@@ -171,7 +175,7 @@ impl Ui {
 
         cv.add(
             &StaticText::builder(&connect_panel)
-                .with_label("Gespeicherte Server")
+                .with_label(&t!("ui.saved_servers"))
                 .build(),
             0,
             SizerFlag::All,
@@ -181,12 +185,12 @@ impl Ui {
         cv.add(&server_list, 1, SizerFlag::Expand | SizerFlag::All, 6);
 
         let server_btns = BoxSizer::builder(Orientation::Horizontal).build();
-        let connect_btn = Button::builder(&connect_panel).with_label("Verbinden").build();
+        let connect_btn = Button::builder(&connect_panel).with_label(&t!("ui.connect")).build();
         let bookmark_btn = Button::builder(&connect_panel)
-            .with_label("Als Lesezeichen speichern")
+            .with_label(&t!("ui.save_bookmark"))
             .build();
         let remove_btn = Button::builder(&connect_panel)
-            .with_label("Server entfernen")
+            .with_label(&t!("ui.remove_server"))
             .build();
         server_btns.add(&connect_btn, 0, SizerFlag::All, 4);
         server_btns.add(&bookmark_btn, 0, SizerFlag::All, 4);
@@ -198,7 +202,7 @@ impl Ui {
         port_in.set_value("9500");
         let audio_port_in = TextCtrl::builder(&connect_panel).build();
         let ssl_chk = CheckBox::builder(&connect_panel)
-            .with_label("SSL/TLS verwenden")
+            .with_label(&t!("ui.use_ssl"))
             .build();
         ssl_chk.set_value(true);
         let user_in = TextCtrl::builder(&connect_panel).build();
@@ -208,16 +212,16 @@ impl Ui {
         let nick_in = TextCtrl::builder(&connect_panel).build();
 
         let use_central_chk = CheckBox::builder(&connect_panel)
-            .with_label("Zentrales Login verwenden (statt Passwort)")
+            .with_label(&t!("ui.use_central"))
             .build();
 
-        add_form_row(&connect_panel, &cv, "Host:", &host_in);
-        add_form_row(&connect_panel, &cv, "Port:", &port_in);
-        add_form_row(&connect_panel, &cv, "Audioport (optional):", &audio_port_in);
+        add_form_row(&connect_panel, &cv, &t!("ui.host"), &host_in);
+        add_form_row(&connect_panel, &cv, &t!("ui.port"), &port_in);
+        add_form_row(&connect_panel, &cv, &t!("ui.audio_port"), &audio_port_in);
         cv.add(&ssl_chk, 0, SizerFlag::All, 6);
-        add_form_row(&connect_panel, &cv, "Benutzername:", &user_in);
-        add_form_row(&connect_panel, &cv, "Passwort:", &pass_in);
-        add_form_row(&connect_panel, &cv, "Spitzname:", &nick_in);
+        add_form_row(&connect_panel, &cv, &t!("ui.username"), &user_in);
+        add_form_row(&connect_panel, &cv, &t!("ui.password"), &pass_in);
+        add_form_row(&connect_panel, &cv, &t!("ui.nickname"), &nick_in);
         cv.add(&use_central_chk, 0, SizerFlag::All, 6);
 
         connect_panel.set_sizer(cv, true);
@@ -229,14 +233,14 @@ impl Ui {
         let hv = BoxSizer::builder(Orientation::Vertical).build();
         hv.add(
             &StaticText::builder(&hub_panel)
-                .with_label("Server-Hub — zentrales Konto (Anmeldung per Telefonnummer)")
+                .with_label(&t!("ui.hub_heading"))
                 .build(),
             0,
             SizerFlag::All,
             6,
         );
         let hub_status = StaticText::builder(&hub_panel)
-            .with_label("Status: nicht angemeldet.")
+            .with_label(&t!("hub_status.logged_out"))
             .build();
         hv.add(&hub_status, 0, SizerFlag::All, 6);
 
@@ -245,15 +249,15 @@ impl Ui {
         // Seite 0 — Anmelden
         let hub_login_panel = Panel::builder(&hub_book).build();
         let lv = BoxSizer::builder(Orientation::Vertical).build();
-        lv.add(&StaticText::builder(&hub_login_panel).with_label("Anmelden").build(), 0, SizerFlag::All, 4);
+        lv.add(&StaticText::builder(&hub_login_panel).with_label(&t!("ui.hub_login")).build(), 0, SizerFlag::All, 4);
         let hub_ident_in = TextCtrl::builder(&hub_login_panel).build();
         let hub_login_pass_in = TextCtrl::builder(&hub_login_panel).with_style(TextCtrlStyle::Password).build();
-        add_form_row(&hub_login_panel, &lv, "Benutzername/Telefon:", &hub_ident_in);
-        add_form_row(&hub_login_panel, &lv, "Passwort:", &hub_login_pass_in);
+        add_form_row(&hub_login_panel, &lv, &t!("ui.hub_ident"), &hub_ident_in);
+        add_form_row(&hub_login_panel, &lv, &t!("ui.password"), &hub_login_pass_in);
         let lrow = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_login_btn = Button::builder(&hub_login_panel).with_label("Anmelden").build();
-        let hub_show_register_btn = Button::builder(&hub_login_panel).with_label("Neu registrieren").build();
-        let hub_show_reset_btn = Button::builder(&hub_login_panel).with_label("Passwort vergessen").build();
+        let hub_login_btn = Button::builder(&hub_login_panel).with_label(&t!("ui.hub_login")).build();
+        let hub_show_register_btn = Button::builder(&hub_login_panel).with_label(&t!("ui.hub_show_register")).build();
+        let hub_show_reset_btn = Button::builder(&hub_login_panel).with_label(&t!("ui.hub_forgot_pw")).build();
         lrow.add(&hub_login_btn, 0, SizerFlag::All, 4);
         lrow.add(&hub_show_register_btn, 0, SizerFlag::All, 4);
         lrow.add(&hub_show_reset_btn, 0, SizerFlag::All, 4);
@@ -263,22 +267,22 @@ impl Ui {
         // Seite 1 — Registrieren
         let hub_register_panel = Panel::builder(&hub_book).build();
         let rv = BoxSizer::builder(Orientation::Vertical).build();
-        rv.add(&StaticText::builder(&hub_register_panel).with_label("Neu registrieren (per Telefonnummer)").build(), 0, SizerFlag::All, 4);
+        rv.add(&StaticText::builder(&hub_register_panel).with_label(&t!("ui.hub_register_heading")).build(), 0, SizerFlag::All, 4);
         let hub_phone_in = TextCtrl::builder(&hub_register_panel).build();
         let hub_reg_user_in = TextCtrl::builder(&hub_register_panel).build();
         let hub_reg_display_in = TextCtrl::builder(&hub_register_panel).build();
         let hub_reg_pass_in = TextCtrl::builder(&hub_register_panel).with_style(TextCtrlStyle::Password).build();
-        add_form_row(&hub_register_panel, &rv, "Telefon (z. B. +49…):", &hub_phone_in);
-        add_form_row(&hub_register_panel, &rv, "Benutzername:", &hub_reg_user_in);
-        add_form_row(&hub_register_panel, &rv, "Anzeigename:", &hub_reg_display_in);
-        add_form_row(&hub_register_panel, &rv, "Passwort:", &hub_reg_pass_in);
-        let hub_register_btn = Button::builder(&hub_register_panel).with_label("Code anfordern (SMS/WhatsApp)").build();
+        add_form_row(&hub_register_panel, &rv, &t!("ui.hub_phone_example"), &hub_phone_in);
+        add_form_row(&hub_register_panel, &rv, &t!("ui.username"), &hub_reg_user_in);
+        add_form_row(&hub_register_panel, &rv, &t!("profile.display_name"), &hub_reg_display_in);
+        add_form_row(&hub_register_panel, &rv, &t!("ui.password"), &hub_reg_pass_in);
+        let hub_register_btn = Button::builder(&hub_register_panel).with_label(&t!("ui.hub_request_code_sms")).build();
         rv.add(&hub_register_btn, 0, SizerFlag::All, 4);
         let hub_code_in = TextCtrl::builder(&hub_register_panel).build();
-        add_form_row(&hub_register_panel, &rv, "Bestätigungscode:", &hub_code_in);
+        add_form_row(&hub_register_panel, &rv, &t!("ui.hub_verification_code"), &hub_code_in);
         let rrow = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_verify_btn = Button::builder(&hub_register_panel).with_label("Code bestätigen & anmelden").build();
-        let hub_back_register_btn = Button::builder(&hub_register_panel).with_label("Zurück").build();
+        let hub_verify_btn = Button::builder(&hub_register_panel).with_label(&t!("ui.hub_verify")).build();
+        let hub_back_register_btn = Button::builder(&hub_register_panel).with_label(&t!("ui.back")).build();
         rrow.add(&hub_verify_btn, 0, SizerFlag::All, 4);
         rrow.add(&hub_back_register_btn, 0, SizerFlag::All, 4);
         rv.add_sizer(&rrow, 0, SizerFlag::All, 2);
@@ -287,18 +291,18 @@ impl Ui {
         // Seite 2 — Passwort zurücksetzen
         let hub_reset_panel = Panel::builder(&hub_book).build();
         let sv = BoxSizer::builder(Orientation::Vertical).build();
-        sv.add(&StaticText::builder(&hub_reset_panel).with_label("Passwort zurücksetzen (per SMS-Code)").build(), 0, SizerFlag::All, 4);
+        sv.add(&StaticText::builder(&hub_reset_panel).with_label(&t!("ui.hub_reset_heading")).build(), 0, SizerFlag::All, 4);
         let hub_reset_phone_in = TextCtrl::builder(&hub_reset_panel).build();
-        add_form_row(&hub_reset_panel, &sv, "Telefon:", &hub_reset_phone_in);
-        let hub_reset_btn = Button::builder(&hub_reset_panel).with_label("Code anfordern").build();
+        add_form_row(&hub_reset_panel, &sv, &t!("ui.hub_phone"), &hub_reset_phone_in);
+        let hub_reset_btn = Button::builder(&hub_reset_panel).with_label(&t!("ui.hub_request_code")).build();
         sv.add(&hub_reset_btn, 0, SizerFlag::All, 4);
         let hub_reset_code_in = TextCtrl::builder(&hub_reset_panel).build();
         let hub_reset_pass_in = TextCtrl::builder(&hub_reset_panel).with_style(TextCtrlStyle::Password).build();
-        add_form_row(&hub_reset_panel, &sv, "Code:", &hub_reset_code_in);
-        add_form_row(&hub_reset_panel, &sv, "Neues Passwort:", &hub_reset_pass_in);
+        add_form_row(&hub_reset_panel, &sv, &t!("ui.hub_code"), &hub_reset_code_in);
+        add_form_row(&hub_reset_panel, &sv, &t!("accounts.new_pw"), &hub_reset_pass_in);
         let srow = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_reset_confirm_btn = Button::builder(&hub_reset_panel).with_label("Neues Passwort setzen").build();
-        let hub_back_reset_btn = Button::builder(&hub_reset_panel).with_label("Zurück").build();
+        let hub_reset_confirm_btn = Button::builder(&hub_reset_panel).with_label(&t!("ui.hub_set_new_pw")).build();
+        let hub_back_reset_btn = Button::builder(&hub_reset_panel).with_label(&t!("ui.back")).build();
         srow.add(&hub_reset_confirm_btn, 0, SizerFlag::All, 4);
         srow.add(&hub_back_reset_btn, 0, SizerFlag::All, 4);
         sv.add_sizer(&srow, 0, SizerFlag::All, 2);
@@ -307,17 +311,17 @@ impl Ui {
         // Seite 3 — Eingeloggt: Verzeichnis, Profil, Abmelden
         let hub_account_panel = Panel::builder(&hub_book).build();
         let av = BoxSizer::builder(Orientation::Vertical).build();
-        let hub_logout_btn = Button::builder(&hub_account_panel).with_label("Abmelden").build();
+        let hub_logout_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_logout")).build();
         av.add(&hub_logout_btn, 0, SizerFlag::All, 4);
-        av.add(&StaticText::builder(&hub_account_panel).with_label("Server-Verzeichnis").build(), 0, SizerFlag::All, 4);
+        av.add(&StaticText::builder(&hub_account_panel).with_label(&t!("ui.hub_directory")).build(), 0, SizerFlag::All, 4);
         // Ansicht umschalten: das öffentliche Verzeichnis zeigt nur öffentliche
         // Server — eigene private und Server, bei denen man Mitglied ist,
         // liefert erst „Meine Server" (/servers/mine).
         let scope_row = BoxSizer::builder(Orientation::Horizontal).build();
-        let scope_lbl = StaticText::builder(&hub_account_panel).with_label("Ansicht:").build();
+        let scope_lbl = StaticText::builder(&hub_account_panel).with_label(&t!("ui.hub_view")).build();
         let hub_scope = Choice::builder(&hub_account_panel).build();
-        hub_scope.append("Öffentliches Verzeichnis");
-        hub_scope.append("Meine Server (auch private)");
+        hub_scope.append(&t!("ui.hub_scope_public"));
+        hub_scope.append(&t!("ui.hub_scope_mine"));
         hub_scope.set_selection(0);
         scope_row.add(&scope_lbl, 0, SizerFlag::AlignCenterVertical | SizerFlag::All, 6);
         scope_row.add(&hub_scope, 1, SizerFlag::Expand | SizerFlag::All, 6);
@@ -326,16 +330,16 @@ impl Ui {
         let hub_search_in = TextCtrl::builder(&hub_account_panel)
             .with_style(TextCtrlStyle::ProcessEnter)
             .build();
-        add_form_row(&hub_account_panel, &av, "Suche:", &hub_search_in);
+        add_form_row(&hub_account_panel, &av, &t!("ui.hub_search"), &hub_search_in);
         let hub_servers = ListBox::builder(&hub_account_panel).build();
         av.add(&hub_servers, 1, SizerFlag::Expand | SizerFlag::All, 4);
         // Zeile 1: Server-Aktionen
         let drow = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_refresh_btn = Button::builder(&hub_account_panel).with_label("Aktualisieren").build();
-        let hub_join_btn = Button::builder(&hub_account_panel).with_label("Verbinden").build();
-        let hub_create_btn = Button::builder(&hub_account_panel).with_label("Server anlegen…").build();
-        let hub_edit_btn = Button::builder(&hub_account_panel).with_label("Bearbeiten…").build();
-        let hub_delete_btn = Button::builder(&hub_account_panel).with_label("Löschen").build();
+        let hub_refresh_btn = Button::builder(&hub_account_panel).with_label(&t!("common.refresh")).build();
+        let hub_join_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.connect")).build();
+        let hub_create_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_create_server")).build();
+        let hub_edit_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_edit_server")).build();
+        let hub_delete_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_delete_server")).build();
         drow.add(&hub_refresh_btn, 0, SizerFlag::All, 4);
         drow.add(&hub_join_btn, 0, SizerFlag::All, 4);
         drow.add(&hub_create_btn, 0, SizerFlag::All, 4);
@@ -344,12 +348,12 @@ impl Ui {
         av.add_sizer(&drow, 0, SizerFlag::All, 2);
         // Zeile 2: Konto + Admin
         let drow2 = BoxSizer::builder(Orientation::Horizontal).build();
-        let hub_invite_btn = Button::builder(&hub_account_panel).with_label("Nutzer einladen…").build();
-        let hub_invites_btn = Button::builder(&hub_account_panel).with_label("Einladungen…").build();
-        let hub_profile_btn = Button::builder(&hub_account_panel).with_label("Profil bearbeiten…").build();
-        let hub_admin_pending_btn = Button::builder(&hub_account_panel).with_label("Admin: Freigaben…").build();
-        let hub_admin_user_btn = Button::builder(&hub_account_panel).with_label("Admin: Nutzer…").build();
-        let hub_admin_servers_btn = Button::builder(&hub_account_panel).with_label("Admin: Server…").build();
+        let hub_invite_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_invite")).build();
+        let hub_invites_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_invites")).build();
+        let hub_profile_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_profile")).build();
+        let hub_admin_pending_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_admin_pending")).build();
+        let hub_admin_user_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_admin_users")).build();
+        let hub_admin_servers_btn = Button::builder(&hub_account_panel).with_label(&t!("ui.hub_admin_servers")).build();
         drow2.add(&hub_invite_btn, 0, SizerFlag::All, 4);
         drow2.add(&hub_invites_btn, 0, SizerFlag::All, 4);
         drow2.add(&hub_profile_btn, 0, SizerFlag::All, 4);
@@ -359,10 +363,10 @@ impl Ui {
         av.add_sizer(&drow2, 0, SizerFlag::All, 2);
         hub_account_panel.set_sizer(av, true);
 
-        hub_book.add_page(&hub_login_panel, "Anmelden", true, None);
-        hub_book.add_page(&hub_register_panel, "Registrieren", false, None);
-        hub_book.add_page(&hub_reset_panel, "Passwort", false, None);
-        hub_book.add_page(&hub_account_panel, "Konto", false, None);
+        hub_book.add_page(&hub_login_panel, &t!("ui.hub_login"), true, None);
+        hub_book.add_page(&hub_register_panel, &t!("ui.hub_page_register"), false, None);
+        hub_book.add_page(&hub_reset_panel, &t!("ui.hub_page_password"), false, None);
+        hub_book.add_page(&hub_account_panel, &t!("ui.hub_page_account"), false, None);
         hv.add(&hub_book, 1, SizerFlag::Expand | SizerFlag::All, 4);
 
         let hub_log = TextCtrl::builder(&hub_panel)
@@ -372,8 +376,8 @@ impl Ui {
         hub_panel.set_sizer(hv, true);
 
         // Server-Hub zuerst, dann Serverliste.
-        notebook.add_page(&hub_panel, "Server-Hub", true, None);
-        notebook.add_page(&connect_panel, "Serverliste", false, None);
+        notebook.add_page(&hub_panel, &t!("hub.caption"), true, None);
+        notebook.add_page(&connect_panel, &t!("ui.server_list_tab"), false, None);
 
         // ── Hauptansicht ──
         let main_panel = Panel::builder(&frame).build();
@@ -383,7 +387,7 @@ impl Ui {
         let left = BoxSizer::builder(Orientation::Vertical).build();
         left.add(
             &StaticText::builder(&main_panel)
-                .with_label("Räume und Nutzer")
+                .with_label(&t!("ui.rooms_and_users"))
                 .build(),
             0,
             SizerFlag::All,
@@ -394,7 +398,7 @@ impl Ui {
         // Auf Windows kein Beitreten-Knopf: Enter/Doppelklick im Baum tritt bei.
         #[cfg(not(target_os = "windows"))]
         let join_btn = {
-            let b = Button::builder(&main_panel).with_label("Beitreten").build();
+            let b = Button::builder(&main_panel).with_label(&t!("room.join_caption")).build();
             left.add(&b, 0, SizerFlag::Expand | SizerFlag::All, 4);
             b
         };
@@ -403,7 +407,7 @@ impl Ui {
         // Mitte: Chat
         let center = BoxSizer::builder(Orientation::Vertical).build();
         center.add(
-            &StaticText::builder(&main_panel).with_label("Chatverlauf").build(),
+            &StaticText::builder(&main_panel).with_label(&t!("ui.chat_log")).build(),
             0,
             SizerFlag::All,
             4,
@@ -416,7 +420,7 @@ impl Ui {
         let chat_in = TextCtrl::builder(&main_panel)
             .with_style(TextCtrlStyle::ProcessEnter)
             .build();
-        let send_btn = Button::builder(&main_panel).with_label("Senden").build();
+        let send_btn = Button::builder(&main_panel).with_label(&t!("ui.send")).build();
         input_row.add(&chat_in, 1, SizerFlag::Expand | SizerFlag::All, 4);
         input_row.add(&send_btn, 0, SizerFlag::All, 4);
         center.add_sizer(&input_row, 0, SizerFlag::Expand | SizerFlag::All, 4);
@@ -426,7 +430,7 @@ impl Ui {
         let right = BoxSizer::builder(Orientation::Vertical).build();
         right.add(
             &StaticText::builder(&main_panel)
-                .with_label("Wiedergabe % (100 = normal)")
+                .with_label(&t!("ui.playback_volume"))
                 .build(),
             0,
             SizerFlag::All,
@@ -442,7 +446,7 @@ impl Ui {
 
         right.add(
             &StaticText::builder(&main_panel)
-                .with_label("Mikrofon % (100 = normal)")
+                .with_label(&t!("ui.mic_volume"))
                 .build(),
             0,
             SizerFlag::All,
@@ -456,7 +460,7 @@ impl Ui {
         right.add(&mic_volume, 0, SizerFlag::Expand | SizerFlag::All, 4);
         right.add(
             &StaticText::builder(&main_panel)
-                .with_label("Dateien im aktuellen Raum")
+                .with_label(&t!("ui.room_files"))
                 .build(),
             0,
             SizerFlag::All,
@@ -467,7 +471,7 @@ impl Ui {
         // Datei-Liste aktualisiert sich automatisch (beim Betreten eines Raums
         // und wenn Dateien hoch- oder runtergeladen werden) — kein Knopf nötig.
         let download_btn = Button::builder(&main_panel)
-            .with_label("Herunterladen")
+            .with_label(&t!("ui.download"))
             .build();
         right.add(&download_btn, 0, SizerFlag::All, 4);
         mh.add_sizer(&right, 2, SizerFlag::Expand | SizerFlag::All, 4);
@@ -484,36 +488,36 @@ impl Ui {
         frame.layout();
 
         // Accessible-Namen für sonst namenlose Bedienelemente (Screenreader)
-        set_a11y_name(&server_list, "Gespeicherte Server");
-        set_a11y_name(&host_in, "Host");
-        set_a11y_name(&port_in, "Port");
-        set_a11y_name(&audio_port_in, "Audioport optional");
-        set_a11y_name(&ssl_chk, "SSL/TLS verwenden");
-        set_a11y_name(&user_in, "Benutzername");
-        set_a11y_name(&pass_in, "Passwort");
-        set_a11y_name(&nick_in, "Spitzname");
-        set_a11y_name(&use_central_chk, "Zentrales Login verwenden");
-        set_a11y_name(&hub_status, "Hub-Status");
-        set_a11y_name(&hub_ident_in, "Hub-Benutzername oder Telefon");
-        set_a11y_name(&hub_login_pass_in, "Hub-Passwort");
-        set_a11y_name(&hub_phone_in, "Telefonnummer");
-        set_a11y_name(&hub_reg_user_in, "Hub-Benutzername");
-        set_a11y_name(&hub_reg_display_in, "Anzeigename");
-        set_a11y_name(&hub_reg_pass_in, "Passwort oder neues Passwort");
-        set_a11y_name(&hub_code_in, "Bestätigungscode");
-        set_a11y_name(&hub_reset_phone_in, "Telefonnummer für Reset");
-        set_a11y_name(&hub_reset_code_in, "Reset-Code");
-        set_a11y_name(&hub_reset_pass_in, "Neues Passwort");
-        set_a11y_name(&hub_scope, "Ansicht: öffentliches Verzeichnis oder meine Server");
-        set_a11y_name(&hub_search_in, "Verzeichnis durchsuchen");
-        set_a11y_name(&hub_servers, "Server im Verzeichnis");
-        set_a11y_name(&hub_log, "Server-Hub Meldungen");
-        set_a11y_name(&rooms_tree, "Räume und Nutzer");
-        set_a11y_name(&chat_log, "Chatverlauf");
-        set_a11y_name(&chat_in, "Chatnachricht eingeben");
-        set_a11y_name(&volume, "Wiedergabe-Lautstärke in Prozent, 100 ist normal");
-        set_a11y_name(&mic_volume, "Mikrofon-Lautstärke in Prozent, 100 ist normal");
-        set_a11y_name(&files, "Dateien im aktuellen Raum");
+        set_a11y_name(&server_list, &t!("ui.saved_servers"));
+        set_a11y_name(&host_in, &t!("a11y.host"));
+        set_a11y_name(&port_in, &t!("a11y.port"));
+        set_a11y_name(&audio_port_in, &t!("a11y.audio_port"));
+        set_a11y_name(&ssl_chk, &t!("ui.use_ssl"));
+        set_a11y_name(&user_in, &t!("a11y.username"));
+        set_a11y_name(&pass_in, &t!("a11y.password"));
+        set_a11y_name(&nick_in, &t!("a11y.nickname"));
+        set_a11y_name(&use_central_chk, &t!("a11y.use_central"));
+        set_a11y_name(&hub_status, &t!("a11y.hub_status"));
+        set_a11y_name(&hub_ident_in, &t!("a11y.hub_ident"));
+        set_a11y_name(&hub_login_pass_in, &t!("a11y.hub_password"));
+        set_a11y_name(&hub_phone_in, &t!("a11y.phone"));
+        set_a11y_name(&hub_reg_user_in, &t!("a11y.hub_username"));
+        set_a11y_name(&hub_reg_display_in, &t!("a11y.display_name"));
+        set_a11y_name(&hub_reg_pass_in, &t!("a11y.password_or_new"));
+        set_a11y_name(&hub_code_in, &t!("a11y.verification_code"));
+        set_a11y_name(&hub_reset_phone_in, &t!("a11y.reset_phone"));
+        set_a11y_name(&hub_reset_code_in, &t!("a11y.reset_code"));
+        set_a11y_name(&hub_reset_pass_in, &t!("a11y.new_password"));
+        set_a11y_name(&hub_scope, &t!("a11y.hub_scope"));
+        set_a11y_name(&hub_search_in, &t!("a11y.hub_search"));
+        set_a11y_name(&hub_servers, &t!("a11y.hub_servers"));
+        set_a11y_name(&hub_log, &t!("a11y.hub_log"));
+        set_a11y_name(&rooms_tree, &t!("ui.rooms_and_users"));
+        set_a11y_name(&chat_log, &t!("ui.chat_log"));
+        set_a11y_name(&chat_in, &t!("a11y.chat_input"));
+        set_a11y_name(&volume, &t!("a11y.playback_volume"));
+        set_a11y_name(&mic_volume, &t!("a11y.mic_volume"));
+        set_a11y_name(&files, &t!("ui.room_files"));
 
         Ui {
             frame,
@@ -620,66 +624,67 @@ fn add_form_row(panel: &Panel, vbox: &BoxSizer, label: &str, field: &TextCtrl) {
 /// automatisch auf Cmd ab — eine Definition genügt für alle Plattformen.
 fn build_menu_bar(frame: &Frame) {
     let server_menu = Menu::builder()
-        .append_item(ID_DISCONNECT, "Verbindung &trennen", "Vom Server trennen")
-        .append_item(ID_EXIT, "&Beenden\tCtrl+Q", "Programm beenden")
+        .append_item(ID_DISCONNECT, &t!("menu.disconnect"), &t!("menu.disconnect_help"))
+        .append_item(ID_EXIT, &format!("{}\tCtrl+Q", t!("menu.exit")), &t!("menu.exit_help"))
         .build();
 
     // Check-Einträge: das Häkchen zeigt den Zustand (Screenreader: „aktiviert/deaktiviert").
     let audio_menu = Menu::builder()
-        .append_check_item(ID_TOGGLE_MUTE, "Mikrofon &stummschalten\tCtrl+M", "Häkchen = Mikrofon ist stumm")
-        .append_check_item(ID_TOGGLE_DEAFEN, "Ton &ausschalten (taub)\tCtrl+D", "Häkchen = Ton ist aus")
-        .append_check_item(ID_TOGGLE_LOOPBACK, "&Loopback\tCtrl+L", "Häkchen = Loopback ist an")
-        .append_item(ID_AUDIO_SETTINGS, "Audio-&Einstellungen…", "Samplerate, Bittiefe, Mono/Stereo")
-        .append_item(ID_STREAM_FILE, "Audiodatei &streamen…\tCtrl+S", "Datei in den Raum streamen")
-        .append_check_item(ID_PAUSE_STREAM, "Streaming &pausieren\tCtrl+P", "Häkchen = Streaming ist pausiert")
-        .append_item(ID_STOP_STREAM, "Streaming &stoppen\tCtrl+Shift+S", "Streaming beenden")
+        .append_check_item(ID_TOGGLE_MUTE, &format!("{}\tCtrl+M", t!("menu.mute")), &t!("menu.mute_help"))
+        .append_check_item(ID_TOGGLE_DEAFEN, &format!("{}\tCtrl+D", t!("menu.deafen")), &t!("menu.deafen_help"))
+        .append_check_item(ID_TOGGLE_LOOPBACK, &format!("{}\tCtrl+L", t!("menu.loopback")), &t!("menu.loopback_help"))
+        .append_item(ID_AUDIO_SETTINGS, &t!("menu.audio_settings"), &t!("menu.audio_settings_help"))
+        .append_item(ID_STREAM_FILE, &format!("{}\tCtrl+S", t!("menu.stream_file")), &t!("menu.stream_file_help"))
+        .append_check_item(ID_PAUSE_STREAM, &format!("{}\tCtrl+P", t!("menu.pause_stream")), &t!("menu.pause_stream_help"))
+        .append_item(ID_STOP_STREAM, &format!("{}\tCtrl+Shift+S", t!("menu.stop_stream")), &t!("menu.stop_stream_help"))
         .build();
 
     let room_menu = Menu::builder()
-        .append_item(ID_JOIN_ROOM, "Raum &beitreten\tCtrl+J", "Ausgewähltem Raum beitreten")
-        .append_item(ID_LEAVE_ROOM, "Raum &verlassen", "Aktuellen Raum verlassen")
-        .append_item(ID_CREATE_ROOM, "Raum &erstellen…", "Raum an der Cursor-Position erstellen (Lobby = oberste Ebene, auf einem Raum = Unterraum)")
-        .append_item(ID_EDIT_ROOM, "Raum &bearbeiten…", "Ausgewählten Raum bearbeiten (Name, Passwort, Audio)")
-        .append_item(ID_DELETE_ROOM, "Raum &löschen…", "Ausgewählten Raum löschen")
+        .append_item(ID_JOIN_ROOM, &format!("{}\tCtrl+J", t!("menu.join_room")), &t!("menu.join_room_help"))
+        .append_item(ID_LEAVE_ROOM, &t!("menu.leave_room"), &t!("menu.leave_room_help"))
+        .append_item(ID_CREATE_ROOM, &t!("menu.create_room"), &t!("menu.create_room_help"))
+        .append_item(ID_EDIT_ROOM, &t!("menu.edit_room"), &t!("menu.edit_room_help"))
+        .append_item(ID_DELETE_ROOM, &t!("menu.delete_room"), &t!("menu.delete_room_help"))
         .build();
 
     let file_menu = Menu::builder()
-        .append_item(ID_UPLOAD, "Datei &hochladen…\tCtrl+U", "Datei in den aktuellen Raum hochladen")
-        .append_item(ID_DOWNLOAD, "Datei &herunterladen…\tCtrl+H", "Ausgewählte Datei herunterladen")
+        .append_item(ID_UPLOAD, &format!("{}\tCtrl+U", t!("menu.upload")), &t!("menu.upload_help"))
+        .append_item(ID_DOWNLOAD, &format!("{}\tCtrl+H", t!("menu.download")), &t!("menu.download_help"))
         .build();
 
     // Nutzerbezogene Aktionen (am im Baum ausgewählten Nutzer).
     let user_menu = Menu::builder()
-        .append_item(ID_PM, "&Privatnachricht senden\tCtrl+Shift+P", "An ausgewählten Nutzer (Text im Eingabefeld)")
-        .append_item(ID_KICK, "Nutzer &kicken…", "Ausgewählten Nutzer kicken")
-        .append_item(ID_BAN, "Nutzer &bannen…", "Ausgewählten Nutzer bannen")
-        .append_item(ID_MOVE_USER, "Nutzer &verschieben", "In ausgewählten Raum verschieben")
-        .append_item(ID_ADMIN_MUTE, "Nutzer stummschalten (Admin)", "Ausgewählten Nutzer stummschalten")
-        .append_item(ID_ADMIN_UNMUTE, "Stummschaltung aufheben (Admin)", "Stummschaltung aufheben")
+        .append_item(ID_PM, &format!("{}\tCtrl+Shift+P", t!("menu.pm")), &t!("menu.pm_help"))
+        .append_item(ID_KICK, &t!("menu.kick"), &t!("menu.kick_help"))
+        .append_item(ID_BAN, &t!("menu.ban"), &t!("menu.ban_help"))
+        .append_item(ID_MOVE_USER, &t!("menu.move_user"), &t!("menu.move_user_help"))
+        .append_item(ID_ADMIN_MUTE, &t!("menu.admin_mute"), &t!("menu.admin_mute_help"))
+        .append_item(ID_ADMIN_UNMUTE, &t!("menu.admin_unmute"), &t!("menu.admin_unmute_help"))
         .build();
 
     // Verwaltung: serverweite Aktionen und eigenes Konto. „Benutzerkonten
     // verwalten" wird nur für Admins dynamisch eingefügt (siehe
     // actions::update_account_menu).
     let admin_menu = Menu::builder()
-        .append_item(ID_SERVER_MSG, "&Servernachricht senden…", "Nachricht an alle senden")
-        .append_item(ID_CHANGE_PW, "Eigenes &Passwort ändern…", "Eigenes Passwort ändern")
+        .append_item(ID_SERVER_MSG, &t!("menu.server_msg"), &t!("menu.server_msg_help"))
+        .append_item(ID_LANGUAGE, &t!("menu.language"), &t!("menu.language_help"))
+        .append_item(ID_CHANGE_PW, &t!("menu.change_pw"), &t!("menu.change_pw_help"))
         .build();
 
     let help_menu = Menu::builder()
-        .append_item(ID_CHECK_UPDATE, "Nach &Aktualisierung suchen…", "Auf neue Version prüfen")
-        .append_item(ID_HELP_KEYS, "&Kurztasten\tF1", "Kurztasten anzeigen")
-        .append_item(ID_ABOUT, "&Über…", "Über TeamConference")
+        .append_item(ID_CHECK_UPDATE, &t!("menu.check_update"), &t!("menu.check_update_help"))
+        .append_item(ID_HELP_KEYS, &format!("{}\tF1", t!("menu.help_keys")), &t!("menu.help_keys_help"))
+        .append_item(ID_ABOUT, &t!("menu.about"), &t!("help.about_title"))
         .build();
 
     let menubar = MenuBar::builder()
-        .append(server_menu, "&Server")
-        .append(audio_menu, "&Audio")
-        .append(room_menu, "&Räume")
-        .append(file_menu, "&Dateien")
-        .append(user_menu, "&Nutzer")
-        .append(admin_menu, "&Verwaltung")
-        .append(help_menu, "&Hilfe")
+        .append(server_menu, &t!("menu.server"))
+        .append(audio_menu, &t!("menu.audio"))
+        .append(room_menu, &t!("menu.rooms"))
+        .append(file_menu, &t!("menu.files"))
+        .append(user_menu, &t!("menu.users"))
+        .append(admin_menu, &t!("menu.admin"))
+        .append(help_menu, &t!("menu.help"))
         .build();
     frame.set_menu_bar(menubar);
 }

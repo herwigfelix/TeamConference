@@ -50,7 +50,12 @@ impl FileHandler {
         req: FileUploadStart,
     ) -> anyhow::Result<FileUploadAck> {
         if req.size > self.max_upload_size {
-            anyhow::bail!("File too large (max {} MB)", self.max_upload_size / 1024 / 1024);
+            let max_mb = self.max_upload_size / 1024 / 1024;
+            return Err(crate::usererror::coded_with(
+                "file.too_large",
+                serde_json::json!({ "max_mb": max_mb }),
+                format!("File too large (max {} MB)", max_mb),
+            ));
         }
 
         // Speicherlimit prüfen. Im Multi-Tenant-Modus pro Unterserver, sonst
@@ -66,10 +71,14 @@ impl FileHandler {
             let used = queries::total_storage_bytes_for_tenant(&self.db, tenant).await.unwrap_or(0);
             if used + req.size > limit {
                 let gib = limit as f64 / (1024.0 * 1024.0 * 1024.0);
-                anyhow::bail!(
-                    "Speicherlimit dieses Servers erreicht (max {:.1} GB) — bitte Dateien löschen oder Limit erhöhen lassen",
-                    gib
-                );
+                return Err(crate::usererror::coded_with(
+                    "file.storage_full",
+                    serde_json::json!({ "max_gb": format!("{:.1}", gib) }),
+                    format!(
+                        "Speicherlimit dieses Servers erreicht (max {:.1} GB) — bitte Dateien löschen oder Limit erhöhen lassen",
+                        gib
+                    ),
+                ));
             }
         } else if self.file_limit_bytes > 0 {
             let stored = queries::total_storage_bytes(&self.db).await.unwrap_or(0);
@@ -82,10 +91,14 @@ impl FileHandler {
                 .sum();
             if stored + pending + req.size > self.file_limit_bytes {
                 let gib = self.file_limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                anyhow::bail!(
-                    "Speicherlimit des Servers erreicht (max {:.1} GB) — bitte Dateien löschen oder Limit erhöhen lassen",
-                    gib
-                );
+                return Err(crate::usererror::coded_with(
+                    "file.storage_full",
+                    serde_json::json!({ "max_gb": format!("{:.1}", gib) }),
+                    format!(
+                        "Speicherlimit des Servers erreicht (max {:.1} GB) — bitte Dateien löschen oder Limit erhöhen lassen",
+                        gib
+                    ),
+                ));
             }
         }
 
@@ -124,7 +137,7 @@ impl FileHandler {
         // streamen (Disk-Exhaustion-DoS, umgeht max_upload_size + Speicherlimit).
         let (path, new_total, over) = {
             let upload = uploads.get_mut(&chunk.upload_id)
-                .ok_or_else(|| anyhow::anyhow!("Upload not found"))?;
+                .ok_or_else(|| crate::usererror::coded("file.upload_not_found", "Upload not found"))?;
             let new_total = upload.bytes_written.saturating_add(data.len() as i64);
             let over = new_total > upload.size || new_total > self.max_upload_size;
             (upload.storage_path.clone(), new_total, over)
@@ -133,7 +146,7 @@ impl FileHandler {
             uploads.remove(&chunk.upload_id);
             drop(uploads);
             tokio::fs::remove_file(&path).await.ok();
-            anyhow::bail!("Upload überschreitet die angegebene Größe");
+            return Err(crate::usererror::coded("file.upload_exceeds_size", "Upload überschreitet die angegebene Größe"));
         }
 
         use tokio::io::AsyncWriteExt;
@@ -152,7 +165,7 @@ impl FileHandler {
 
     pub async fn complete_upload(&self, req: FileUploadComplete) -> anyhow::Result<i64> {
         let upload = self.pending_uploads.write().await.remove(&req.upload_id)
-            .ok_or_else(|| anyhow::anyhow!("Upload not found"))?;
+            .ok_or_else(|| crate::usererror::coded("file.upload_not_found", "Upload not found"))?;
 
         let file_id = queries::save_room_file(
             &self.db,
@@ -179,7 +192,7 @@ impl FileHandler {
 
     pub async fn download_file(&self, file_id: i64) -> anyhow::Result<(FileInfo, Vec<u8>)> {
         let db_file = queries::get_room_file_by_id(&self.db, file_id).await?
-            .ok_or_else(|| anyhow::anyhow!("File not found"))?;
+            .ok_or_else(|| crate::usererror::coded("file.not_found", "File not found"))?;
 
         let data = tokio::fs::read(&db_file.storage_path).await?;
 

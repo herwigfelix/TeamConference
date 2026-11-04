@@ -328,6 +328,29 @@ plattformüblich gespeichert:
   als Textzeile im Chatverlauf protokolliert; passwortgeschützte Räume und
   stumm/taub-Zustände sind textuell gekennzeichnet (nicht nur per Icon).
 
+## Sprachen
+
+Der Client ist auf **Deutsch** und **Englisch** verfügbar. Standardmäßig gilt
+die Systemsprache (andere Systemsprachen → Englisch); umstellen lässt sie sich
+unter *Verwaltung → Sprache / Language…*. Menüs und feste Beschriftungen
+wechseln nach einem Neustart.
+
+Alle Texte stehen in `client/locales/<code>.yml` und werden beim Kompilieren
+eingebettet. **Neue Sprache hinzufügen:**
+
+1. `client/locales/de.yml` kopieren, z. B. nach `client/locales/fr.yml`, und
+   die Texte übersetzen. Schlüssel und Platzhalter wie `%{name}` bleiben
+   unverändert; `&` markiert die Menü-Kurztaste (pro Menü eindeutig halten).
+2. Die Sprache in `LANGUAGES` in `client/src/i18n.rs` eintragen, z. B.
+   `("fr", "Français")`.
+3. `cd client && cargo test` prüft, dass die neue Datei genau dieselben
+   Schlüssel wie `de.yml` hat.
+
+Fehlende Schlüssel fallen auf Englisch, dann Deutsch zurück. Server-Meldungen
+(Fehler, Konto-Rückmeldungen) schickt der Server als sprachneutralen Code; ihre
+Texte stehen im Abschnitt `server:` derselben Dateien (siehe
+[docs/protocol.md](docs/protocol.md#meldungen-und-fehlercodes-übersetzung)).
+
 ## Protokoll
 
 Vollständige Spezifikation in [docs/protocol.md](docs/protocol.md).

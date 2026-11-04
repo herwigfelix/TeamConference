@@ -4,6 +4,7 @@ use crate::control::protocol::*;
 use crate::db::queries;
 use crate::user::manager::UserManager;
 use crate::room::manager::RoomManager;
+use crate::usererror::coded;
 
 pub async fn handle_kick(
     admin_id: i64,
@@ -12,17 +13,17 @@ pub async fn handle_kick(
     rooms: &Arc<RoomManager>,
 ) -> anyhow::Result<()> {
     let admin = users.get_user(admin_id).await
-        .ok_or_else(|| anyhow::anyhow!("Admin not found"))?;
+        .ok_or_else(|| coded("admin.not_found", "Admin not found"))?;
 
     if !admin.is_moderator() {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
     let target = users.get_user(kick.user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| coded("user.not_found", "User not found"))?;
     if admin.tenant != target.tenant {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     let reason = kick.reason.unwrap_or_default();
@@ -59,17 +60,17 @@ pub async fn handle_ban(
     db: &Arc<Connection>,
 ) -> anyhow::Result<()> {
     let admin = users.get_user(admin_id).await
-        .ok_or_else(|| anyhow::anyhow!("Admin not found"))?;
+        .ok_or_else(|| coded("admin.not_found", "Admin not found"))?;
 
     if !admin.is_admin() {
-        anyhow::bail!("Only admins can ban users");
+        return Err(coded("perm.only_admins_ban", "Only admins can ban users"));
     }
 
     // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
     let target = users.get_user(ban.user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| coded("user.not_found", "User not found"))?;
     if admin.tenant != target.tenant {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     let reason = ban.reason.clone().unwrap_or_default();
@@ -115,18 +116,18 @@ pub async fn handle_move(
     rooms: &Arc<RoomManager>,
 ) -> anyhow::Result<()> {
     let admin = users.get_user(admin_id).await
-        .ok_or_else(|| anyhow::anyhow!("Admin not found"))?;
+        .ok_or_else(|| coded("admin.not_found", "Admin not found"))?;
 
     if !admin.is_moderator() {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     let target = users.get_user(mv.user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| coded("user.not_found", "User not found"))?;
 
     // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
     if admin.tenant != target.tenant {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     let old_room_id = target.room_id;
@@ -177,24 +178,24 @@ pub async fn handle_admin_mute(
     users: &Arc<UserManager>,
 ) -> anyhow::Result<()> {
     let admin = users.get_user(admin_id).await
-        .ok_or_else(|| anyhow::anyhow!("Admin not found"))?;
+        .ok_or_else(|| coded("admin.not_found", "Admin not found"))?;
 
     if !admin.is_moderator() {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     // S5: Ziel muss im selben Tenant sein (Einzelserver: tenant="" → no-op).
     // Vor dem Mutieren prüfen.
     let pre = users.get_user(mute.user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| coded("user.not_found", "User not found"))?;
     if admin.tenant != pre.tenant {
-        anyhow::bail!("Insufficient permissions");
+        return Err(coded("perm.insufficient", "Insufficient permissions"));
     }
 
     users.set_admin_muted(mute.user_id, mute.muted).await;
 
     let target = users.get_user(mute.user_id).await
-        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        .ok_or_else(|| coded("user.not_found", "User not found"))?;
 
     // Broadcast state change
     if let Some(room_id) = target.room_id {

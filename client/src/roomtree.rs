@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use rust_i18n::t;
 use wxdragon::prelude::*;
 
 use crate::protocol::{RoomInfo, UserInfo};
@@ -25,17 +26,20 @@ fn user_label(u: &UserInfo) -> String {
         label.push_str(&format!(" [{}]", u.role));
     }
     if u.muted {
-        label.push_str(", stumm");
+        label.push_str(&t!("tree.muted"));
     }
     if u.deafened {
-        label.push_str(", taub");
+        label.push_str(&t!("tree.deafened"));
     }
     label
 }
 
 fn room_label(room: &RoomInfo) -> String {
-    let lock = if room.has_password { ", Passwort" } else { "" };
-    format!("{} ({} Nutzer{})", room.name, room.users.len(), lock)
+    if room.has_password {
+        t!("tree.room_locked", name = room.name, count = room.users.len()).to_string()
+    } else {
+        t!("tree.room", name = room.name, count = room.users.len()).to_string()
+    }
 }
 
 /// IDs des aktuellen Raums und aller Vorfahren (zum Aufklappen des Pfades).
@@ -108,7 +112,7 @@ mod imp {
     ) {
         tree.delete_all_items();
         let expand = expand_path(rooms, current);
-        if let Some(root) = tree.add_root("Räume", None, None) {
+        if let Some(root) = tree.add_root(&t!("tree.root"), None, None) {
             add_level(tree, &root, rooms, None, &expand);
             tree.expand(&root);
         }
@@ -131,7 +135,7 @@ mod imp {
     pub fn build(parent: &Panel) -> Widget {
         let tree = DataViewTreeCtrl::builder(parent).build();
         tree.append_icon_text_column(
-            "Räume und Nutzer",
+            &t!("ui.rooms_and_users"),
             0,
             240,
             DataViewAlign::Left,

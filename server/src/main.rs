@@ -11,6 +11,7 @@ mod chat;
 mod files;
 mod admin;
 mod db;
+mod usererror;
 
 use clap::Parser;
 use std::path::PathBuf;
