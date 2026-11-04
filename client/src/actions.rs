@@ -1856,6 +1856,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
 
     // Vorlagen-Auswahl
     let template_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&template_choice);
     for t in &TEMPLATES {
         template_choice.append(&t!(t.label_key));
     }
@@ -1865,6 +1866,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
 
     // Erweiterte Audio-Felder (anfangs ggf. ausgeblendet)
     let rate_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&rate_choice);
     for r in RATES {
         rate_choice.append(&r.to_string());
     }
@@ -1873,6 +1875,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     let rate_lbl = add_row(&dialog, &v, &t!("audio.sample_rate"), &rate_choice);
 
     let depth_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&depth_choice);
     for d in DEPTHS {
         depth_choice.append(&d.to_string());
     }
@@ -1881,6 +1884,7 @@ fn room_dialog(ctx: &Ctx, mode: RoomMode) {
     let depth_lbl = add_row(&dialog, &v, &t!("audio.bit_depth"), &depth_choice);
 
     let ch_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&ch_choice);
     ch_choice.append(&t!("audio.mono"));
     ch_choice.append(&t!("audio.stereo"));
     ch_choice.set_selection(if ch0 >= 2 { 1 } else { 0 });
@@ -2246,6 +2250,7 @@ fn audio_settings(ctx: &Ctx) {
     };
 
     let in_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&in_choice);
     for d in &inputs {
         in_choice.append(d);
     }
@@ -2254,6 +2259,7 @@ fn audio_settings(ctx: &Ctx) {
     row(&*t!("devices.mic"), &in_choice);
 
     let out_choice = Choice::builder(&dialog).build();
+    ui::ignore_mouse_wheel(&out_choice);
     for d in &outputs {
         out_choice.append(d);
     }

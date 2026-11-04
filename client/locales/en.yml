@@ -383,7 +383,7 @@ menu:
   admin_unmute_help: "Lift the mute"
   server_msg: "Send &server message…"
   server_msg_help: "Send a message to everyone"
-  language: "&Language / Sprache…"
+  language: "&Language…"
   language_help: "Choose the interface language"
   change_pw: "Change own &password…"
   change_pw_help: "Change your own password"
@@ -565,7 +565,7 @@ tree:
   room_locked: "%{name} (%{count} users, password)"
 
 language:
-  title: "Language / Sprache"
+  title: "Language"
   prompt: "Choose the interface language:"
   system: "System language"
   restart: "The language will be fully applied after restarting TeamConference."

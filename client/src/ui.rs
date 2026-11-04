@@ -29,6 +29,17 @@ impl AccessibleImpl for NamedAccessible {
     }
 }
 
+/// Mausrad über einer Auswahl (wxChoice) ignorieren. Windows wandelt jede
+/// Raddrehung über einer Auswahlbox in „Pfeil runter/hoch" um — auch ohne
+/// Fokus, nur weil der Mauszeiger darüber steht. Die Auswahl wechselt dann
+/// unbemerkt (bei der Hub-Ansicht samt Neuladen der Liste), und der
+/// Screenreader meldet einen scheinbar zufälligen Sprung. Bedient wird per
+/// Tastatur oder Aufklappen; das Ereignis wird hier verschluckt (wxdragon
+/// reicht Ereignisse standardmäßig weiter, daher ausdrücklich `skip(false)`).
+pub fn ignore_mouse_wheel(choice: &Choice) {
+    choice.on_mouse_wheel(|ev| ev.skip(false));
+}
+
 /// Setzt Fenster- und Accessible-Namen eines Bedienelements.
 pub fn set_a11y_name(widget: &dyn WxWidget, name: &str) {
     widget.set_name(name);
@@ -320,6 +331,7 @@ impl Ui {
         let scope_row = BoxSizer::builder(Orientation::Horizontal).build();
         let scope_lbl = StaticText::builder(&hub_account_panel).with_label(&t!("ui.hub_view")).build();
         let hub_scope = Choice::builder(&hub_account_panel).build();
+        ignore_mouse_wheel(&hub_scope);
         hub_scope.append(&t!("ui.hub_scope_public"));
         hub_scope.append(&t!("ui.hub_scope_mine"));
         hub_scope.set_selection(0);

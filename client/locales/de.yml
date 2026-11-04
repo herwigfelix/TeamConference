@@ -385,7 +385,7 @@ menu:
   admin_unmute_help: "Stummschaltung aufheben"
   server_msg: "&Servernachricht senden…"
   server_msg_help: "Nachricht an alle senden"
-  language: "Sprache / &Language…"
+  language: "Sp&rache…"
   language_help: "Sprache der Oberfläche wählen"
   change_pw: "Eigenes &Passwort ändern…"
   change_pw_help: "Eigenes Passwort ändern"
@@ -567,7 +567,7 @@ tree:
   room_locked: "%{name} (%{count} Nutzer, Passwort)"
 
 language:
-  title: "Sprache / Language"
+  title: "Sprache"
   prompt: "Sprache der Oberfläche wählen:"
   system: "Systemsprache"
   restart: "Die Sprache wird nach einem Neustart von TeamConference vollständig übernommen."

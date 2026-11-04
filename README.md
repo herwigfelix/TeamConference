@@ -332,7 +332,7 @@ plattformüblich gespeichert:
 
 Der Client ist auf **Deutsch** und **Englisch** verfügbar. Standardmäßig gilt
 die Systemsprache (andere Systemsprachen → Englisch); umstellen lässt sie sich
-unter *Verwaltung → Sprache / Language…*. Menüs und feste Beschriftungen
+unter *Verwaltung → Sprache…* (auf Englisch *Administration → Language…*). Menüs und feste Beschriftungen
 wechseln nach einem Neustart.
 
 Alle Texte stehen in `client/locales/<code>.yml` und werden beim Kompilieren
